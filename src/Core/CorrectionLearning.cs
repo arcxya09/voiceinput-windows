@@ -16,6 +16,10 @@ public record CorrectionCandidate
     public long Revision { get; init; } = 1;
     public string LearnedText { get; init; } = "";
     public string LearnedScope { get; init; } = "";
+    public string LearnedAlias { get; init; } = "";
+    public bool AutomaticReplacement { get; init; }
+    [JsonIgnore] public bool ReplacementValid { get; init; } = true;
+    [JsonIgnore] public string ReplacementLabel => State!=CorrectionState.Learned?"—":!AutomaticReplacement?"自动纠正关闭":ReplacementValid?"自动纠正开启":"规则已失效";
     public string? TermId { get; init; }
     public long AppliedTermRevision { get; init; }
     public TermData? PriorTerm { get; init; }
@@ -24,7 +28,7 @@ public record CorrectionCandidate
     [JsonIgnore] public string StateLabel => State switch { CorrectionState.Learned => "已学习", CorrectionState.Ignored => "已忽略", _ => "待确认" };
     [JsonIgnore] public string FrequencyLabel => Count >= 3 ? "多次纠正" : "";
 }
-public record CorrectionApproval(string Text, string Original, string Category, string Scope, int Weight);
+public record CorrectionApproval(string Text, string Original, string Category, string Scope, int Weight, bool AutomaticReplacement = false);
 
 /// <summary>Local, bounded edit comparison. Suggestions are reviewed by a person before becoming terms.</summary>
 public static class CorrectionRules

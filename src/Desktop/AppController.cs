@@ -48,6 +48,7 @@ public sealed partial class AppController : IAsyncDisposable
     private readonly Dictionary<(string Id,bool PermissionOnly),SessionData> pendingSessions = [];
     private readonly SemaphoreSlim settingsGate = new(1,1);
     private List<TermData> terms = [];
+    private long termReloadSequence,appliedTermReload;
     private HashSet<string> suppressed = [];
     public AppSettings Settings { get; private set; } = new();
     public Credentials Keys { get; private set; } = new();
@@ -102,7 +103,8 @@ public sealed partial class AppController : IAsyncDisposable
     private async Task<bool> SaveSegment(TranscriptEngine source,SessionData session,SegmentData s)
     {
         bool ok=true;
-        try{await Repository.SaveSegmentAsync(session,s,Settings.SaveMemory&&Settings.AllowLearning&&Settings.LearnCorrections);}catch{ok=false;}
+        var options=Settings;
+        try{await Repository.SaveSegmentAsync(session,s,options.SaveMemory&&options.AllowLearning&&options.LearnCorrections,options.SaveMemory&&options.AllowLearning&&options.DynamicLexicon);}catch{ok=false;}
         await OnActor(()=>
         {
             if(IsForgotten(session))return;
@@ -117,7 +119,7 @@ public sealed partial class AppController : IAsyncDisposable
                 if(Repository.Queued>=900||failedWrites.Count>=1000||failedWrites.Values.Sum(x=>Encoding.UTF8.GetByteCount(x.RawText+x.FinalText))>=4*1024*1024)_=StopAsync(true);
             }
         });
-        if(ok&&s.EditRevision>0)await ReloadTerms();
+        if(ok&&(s.EditRevision>0||s.AsrState==AsrState.Confirmed))await ReloadTerms();
         return ok;
     }
     public async Task InitializeAsync()
@@ -132,8 +134,9 @@ public sealed partial class AppController : IAsyncDisposable
     }
     private async Task ReloadTerms()
     {
-        string project=Settings.ProjectId;var t=await Repository.TermsAsync(project);var s=await Repository.SuppressedAsync(project);
-        await OnActor(()=>{if(Settings.ProjectId!=project)return;terms=t;suppressed=s;TermsUpdated?.Invoke();CorrectionsUpdated?.Invoke();});
+        long request=Interlocked.Increment(ref termReloadSequence);
+        string project=Settings.ProjectId;var t=await Repository.TermsAsync(project);var s=await Repository.SuppressedAsync(project);var mappings=await Repository.ActiveCorrectionTermsAsync(project);
+        await OnActor(()=>{if(Settings.ProjectId!=project||request<appliedTermReload)return;appliedTermReload=request;terms=t;suppressed=s;approvedCorrections=mappings;TermsUpdated?.Invoke();CorrectionsUpdated?.Invoke();});
     }
     public async Task SaveSettingsAsync(AppSettings options,Credentials keys)
     {
@@ -169,10 +172,17 @@ public sealed partial class AppController : IAsyncDisposable
             if(!allowed)return false;
             Settings.AsrUri();if(Keys.BailianKey.Length==0)throw new ArgumentException("请先在设置页填写百炼 API Key。");
             startup=CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token,cancelled);startup.CancelAfter(15000);
+            // Finish any previous source before selecting this turn's vocabulary. Its accepted
+            // observations must be visible even if the background UI refresh has not completed.
+            await OnActor(()=>engine?.FinishAll());await Repository.BarrierAsync();await ReloadTerms();
+            startup.Token.ThrowIfCancellationRequested();
             var selected=await OnActor(()=>
             {
-                CancelToken(extraction);engine?.FinishAll();NewEngine(new SessionData{Id=turnId,ProjectId=Settings.ProjectId,AllowLearning=Settings.AllowLearning});
-                captureFailure=null;SetDiagnostic("Preparing");state=CaptureState.Connecting;Status("正在准备麦克风…");return Settings.UseLexicon?Lexicon.Select(terms,Settings.ProjectId):[];
+                CancelToken(extraction);NewEngine(new SessionData{Id=turnId,ProjectId=Settings.ProjectId,AllowLearning=Settings.AllowLearning});
+                captureFailure=null;SetDiagnostic("Preparing");state=CaptureState.Connecting;
+                var chosen=NextHotwords();
+                engine!.UpdateSession(engine.Session with{Hotwords=chosen.Select(t=>new HotwordUsage(t.Text,t.Weight)).ToList(),EligibleHotwordCount=EligibleHotwords(),HotwordState=Settings.UseLexicon?"Prepared":"Disabled",Revision=engine.Session.Revision+1});
+                Status("正在准备麦克风…");return chosen;
             });
             var client=new BailianClient(ReceiveAsync);asr=client;
             await OnActor(()=>{engine!.StartTask(client.TaskId,selected.Select(t=>t.Text).ToArray());lastResponse=lastVoice=Environment.TickCount64;voiceSeen=false;billedSeconds=0;});
@@ -187,6 +197,7 @@ public sealed partial class AppController : IAsyncDisposable
             if(!await targetReady.WaitAsync(startup.Token))throw new InvalidOperationException("无法确认可编辑的输入位置，未上传语音。");
             await client.StartAsync(Settings,Keys.BailianKey,selected,startup.Token);
             SetDiagnostic("Recognizing");
+            await OnActor(()=>engine!.UpdateSession(engine.Session with{HotwordState=Settings.UseLexicon?"Sent":"Disabled",Revision=engine.Session.Revision+1}));
             await OnActor(()=>{state=captureReleased?CaptureState.Draining:CaptureState.Recording;Status(captureReleased?"录音已停止，正在收齐尾句…":"正在听 · 松开快捷键后输入，Esc 取消。");});
             return true;
         }
@@ -195,7 +206,7 @@ public sealed partial class AppController : IAsyncDisposable
             string error=asr?.FailureMessage??SafeError(e);
             SetDiagnostic("StartFailed",e,$"{(audio?.Diagnostic.Length>0?audio.Diagnostic:audio?.FormatDescription)}\n错误：{error}");
             audio?.Abort();asr?.Abort();if(audio!=null){await audio.DisposeAsync();audio=null;}if(asr!=null){var id=asr.TaskId;await asr.DisposeAsync();asr=null;await OnActor(()=>engine?.SealTask(id,"启动未完成"));}
-            await OnActor(()=>{state=e is OperationCanceledException?CaptureState.Stopped:CaptureState.Faulted;Status(captureFailure??error);});
+            await OnActor(()=>{if(engine?.Session.HotwordState=="Prepared")engine.UpdateSession(engine.Session with{HotwordState="Failed",Revision=engine.Session.Revision+1});state=e is OperationCanceledException?CaptureState.Stopped:CaptureState.Faulted;Status(captureFailure??error);});
             return false;
         }
         finally{startup?.Dispose();startup=null;captureGate.Release();}
@@ -293,7 +304,10 @@ public sealed partial class AppController : IAsyncDisposable
         {
             if(engine==null||(turnId!=null&&engine.Session.Id!=turnId)||state is CaptureState.Connecting or CaptureState.Recording or CaptureState.Draining)return (Source:(TranscriptEngine?)null,Work:(WholePolishWork?)null,Key:"",Prompt:"");
             engine.FinishAll();
-            var work=engine.BeginWholePolish(allowPolish&&!token.IsCancellationRequested&&Settings.PolishEnabled&&!polishCircuit&&Keys.DeepSeekKey.Length>0,Lexicon.Matches(TranscriptText.Render(engine.Segments),terms,Settings.ProjectId));
+            if(allowPolish&&!token.IsCancellationRequested&&Settings.UseLexicon)engine.ApplyConfirmedCorrections(approvedCorrections);
+            var protectedTerms=Settings.UseLexicon?Lexicon.Matches(TranscriptText.Render(engine.Segments),terms,engine.Session.ProjectId):[];
+            engine.UpdateSession(engine.Session with{ProtectedTermCount=protectedTerms.Length,Revision=engine.Session.Revision+1});
+            var work=engine.BeginWholePolish(allowPolish&&!token.IsCancellationRequested&&Settings.PolishEnabled&&!polishCircuit&&Keys.DeepSeekKey.Length>0,protectedTerms);
             if(work!=null){Interlocked.Increment(ref activePolish);Status("正在统一润色本次完整输入…");}else Notify();
             return (Source:(TranscriptEngine?)engine,Work:work,Key:Keys.DeepSeekKey,Prompt:Settings.EffectivePolishPrompt);
         });
@@ -312,6 +326,7 @@ public sealed partial class AppController : IAsyncDisposable
         }
         var saved=await OnActor(()=>prepared.Source.Session);
         if(Settings.SaveMemory)await SaveSessionSafe(saved);
+        await Repository.BarrierAsync();await ReloadTerms();
         if(Settings.AutoExtract&&!token.IsCancellationRequested&&allowPolish)_=AutoExtractWhenReady();
     }
     public Task ParagraphAsync()=>OnActor(()=>{engine?.Paragraph();Status("将在下一个识别片段开始时换段。");});
@@ -330,8 +345,8 @@ public sealed partial class AppController : IAsyncDisposable
             if(await OnActor(()=>HasPending(session.Id)))throw new InvalidOperationException("该会话仍有内容未保存，已保留现有文字。请先重试保存，再重新载入历史。");
         }
         var saved=await Repository.LoadSessionAsync(session.Id)??throw new InvalidOperationException("该历史记录已删除，请刷新列表。");session=saved.Session;
-        await OnActor(()=>{engine?.FinishAll();NewEngine(session.DeliveryState=="Sending"?session with{DeliveryState="Unknown",DeliveryReason="上次输入结果未知，不自动重发。"}:session,saved.Segments);state=CaptureState.Paused;Status("已载入历史供查看与编辑；历史文字不会自动输入。");});
-        if(Settings.ProjectId!=session.ProjectId){Settings=Settings with{ProjectId=session.ProjectId};await ReloadTerms();}
+        await OnActor(()=>{engine?.FinishAll();NewEngine(session.DeliveryState=="Sending"?session with{DeliveryState="Unknown",DeliveryReason="上次输入结果未知，不自动重发。"}:session,saved.Segments);Settings=Settings with{ProjectId=session.ProjectId};state=CaptureState.Paused;Status("已载入历史供查看与编辑；历史文字不会自动输入。");});
+        await ReloadTerms();
     }
     public async Task DeleteSessionAsync(SessionData session)
     {
@@ -358,7 +373,7 @@ public sealed partial class AppController : IAsyncDisposable
         {
             await OnActor(()=>{if(term.Scope!="*"&&term.Scope!=Settings.ProjectId)throw new ArgumentException("词条范围已变化，请重新选择。");knowledgeEpoch++;});
             await Repository.SaveUserTermAsync(term);await ReloadTerms();await OnActor(()=>Status("词条已保存，下次识别任务使用新词库。"));
-            if(Settings.AsrContext&&Environment.TickCount64-lastContextUpdate>=5000&&asr!=null&&(await SnapshotAsync()).State==CaptureState.Recording){lastContextUpdate=Environment.TickCount64;try{await asr.UpdateContextAsync(Lexicon.Context(Lexicon.Select(terms,Settings.ProjectId)),lifetime.Token);}catch{}}
+            if(Settings.UseLexicon&&Settings.AsrContext&&Environment.TickCount64-lastContextUpdate>=5000&&asr!=null&&(await SnapshotAsync()).State==CaptureState.Recording){lastContextUpdate=Environment.TickCount64;try{await asr.UpdateContextAsync(Lexicon.Context(NextHotwords()),lifetime.Token);}catch{}}
         }
         finally{knowledgeGate.Release();}
     }
@@ -425,7 +440,7 @@ public sealed partial class AppController : IAsyncDisposable
     {
         if(string.IsNullOrWhiteSpace(text)||JsonCodec.Count(text)>600)throw new ArgumentException("试用文本应为 1—600 字。");
         string system=PolishRules.ResolvePrompt(prompt);
-        var protectedTerms=Lexicon.Matches(text,terms,Settings.ProjectId);
+        var protectedTerms=Settings.UseLexicon?Lexicon.Matches(text,terms,Settings.ProjectId):[];
         string result=await deepseek.CallAsync(system,new{current_text=text,protected_terms=protectedTerms},false,1536,"polish_preview",key,12000,token);
         return PolishRules.Validate(text,result,protectedTerms);
     }

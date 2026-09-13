@@ -55,6 +55,9 @@ public sealed partial class AppController
             }
             else if(pendingSessions.ContainsKey(key))Status("会话信息未保存，正文仍可复制。请点击重试保存。");
         });
+        // Revoking consent deletes observations in the repository transaction. Refresh the
+        // vocabulary before acknowledging success, including the retry-save path.
+        if(success&&!session.AllowLearning)await ReloadTerms();
         return success;
     }
 

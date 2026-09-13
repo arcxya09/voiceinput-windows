@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
@@ -5,7 +6,54 @@ namespace RealtimeTranscription.Core;
 
 public static class Lexicon
 {
-    public static IReadOnlyList<TermData> Select(IEnumerable<TermData> all, string project) => all.Where(t => t.State == TermState.Enabled && (t.Scope == "*" || t.Scope == project)).GroupBy(t => t.Text, StringComparer.Ordinal).Select(g => g.OrderByDescending(t => t.Scope == project).First()).OrderByDescending(t => t.Pinned).ThenByDescending(t => t.Scope == project).ThenByDescending(t => t.Weight).ThenByDescending(t => t.UpdatedAt).ThenBy(t => t.Id, StringComparer.Ordinal).Take(200).ToArray();
+    /// <summary>
+    /// Selects at most 200 enabled terms for the current project. A project entry overrides
+    /// the same normalized global word; finite pin/project bonuses leave room for actively
+    /// used global terms. The returned records retain their stored manual weights.
+    /// </summary>
+    public static IReadOnlyList<TermData> Select(IEnumerable<TermData> all, string project, DateTimeOffset? now = null)
+    {
+        var at = now ?? DateTimeOffset.UtcNow;
+        return all.Where(t => t.State == TermState.Enabled && (t.Scope == "*" || t.Scope == project))
+            .GroupBy(t => t.Text.Trim().Normalize(NormalizationForm.FormC), StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.OrderByDescending(t => t.Scope == project).ThenByDescending(t => t.UpdatedAt).ThenBy(t => t.Id, StringComparer.Ordinal).First())
+            .OrderByDescending(t => RankingScore(t, project, at))
+            .ThenByDescending(t => t.UpdatedAt).ThenBy(t => t.Id, StringComparer.Ordinal)
+            .Take(200).ToArray();
+    }
+
+    /// <summary>
+    /// Manual priority contributes 10–50 points, pinning 8, and project scope 4.
+    /// Learning contributes at most 54 points, using capped lifetime counts discounted by
+    /// time since the last observation. These are not rolling-window frequency statistics.
+    /// </summary>
+    public static double RankingScore(TermData term, string project, DateTimeOffset? now = null) =>
+        Math.Clamp(term.Weight, 1, 5) * 10 + (term.Pinned ? 8 : 0) + (term.Scope == project ? 4 : 0)
+        + LearningScore(term, now ?? DateTimeOffset.UtcNow);
+
+    /// <summary>
+    /// Computes the ASR weight without changing the user's saved weight. Learned scores of
+    /// 18 and 32 add one and two levels respectively, with an overall range of 1–5.
+    /// </summary>
+    public static int EffectiveWeight(TermData term, DateTimeOffset? now = null)
+    {
+        double learned = LearningScore(term, now ?? DateTimeOffset.UtcNow);
+        return Math.Clamp(Math.Clamp(term.Weight, 1, 5) + (learned >= 32 ? 2 : learned >= 18 ? 1 : 0), 1, 5);
+    }
+
+    private static double LearningScore(TermData term, DateTimeOffset now) =>
+        ActivityScore(term.UsageCount, term.LastUsedAt, now, 24, 12, 30)
+        + ActivityScore(term.CorrectionCount, term.LastCorrectedAt, now, 12, 6, 90);
+
+    private static double ActivityScore(long count, DateTimeOffset? last, DateTimeOffset now, double countCap, double recentCap, double halfLifeDays)
+    {
+        if (count <= 0) return 0;
+        double freshness = last is { } at ? Math.Pow(0.5, Math.Max(0, (now - at).TotalDays) / halfLifeDays) : 0;
+        // Quarter strength retains bounded lifetime experience; the remainder ages out.
+        // Convert before adding one so even a saturated long counter stays finite.
+        double frequency = Math.Min(countCap, 4 * Math.Log2(1 + (double)count));
+        return frequency * (0.25 + 0.75 * freshness) + recentCap * freshness;
+    }
     public static string[] Matches(string raw, IEnumerable<TermData> all, string project) => all.Where(t => t.State == TermState.Enabled && t.Protect && (t.Scope == "*" || t.Scope == project) && ContainsTerm(raw, t.Text)).Select(t => t.Text).Distinct(StringComparer.Ordinal).ToArray();
     public static bool ContainsTerm(string text, string term)
     {

@@ -68,7 +68,7 @@ public sealed partial class MemoryRepository : IAsyncDisposable
     public Task InitializeAsync() => WriteAsync(c =>
     {
         using var version = c.CreateCommand(); version.CommandText = "PRAGMA user_version"; int value = Convert.ToInt32(version.ExecuteScalar());
-        if (value > 2) throw new InvalidOperationException("数据库来自较新版本，请使用新版程序，原数据已保留。");
+        if (value > 3) throw new InvalidOperationException("数据库来自较新版本，请使用新版程序，原数据已保留。");
         using var command = c.CreateCommand(); command.CommandText = """
 PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, project TEXT NOT NULL, created TEXT NOT NULL, revision INTEGER NOT NULL, payload BLOB NOT NULL);
@@ -87,7 +87,11 @@ CREATE TABLE IF NOT EXISTS correction_sources(candidate TEXT NOT NULL REFERENCES
 CREATE INDEX IF NOT EXISTS correction_sources_segment ON correction_sources(segment);
 CREATE INDEX IF NOT EXISTS correction_sources_session ON correction_sources(session);
 CREATE TABLE IF NOT EXISTS correction_decisions(id TEXT PRIMARY KEY REFERENCES corrections(id) ON DELETE CASCADE);
-PRAGMA user_version=2;
+CREATE TABLE IF NOT EXISTS term_observations(term TEXT NOT NULL REFERENCES terms(id) ON DELETE CASCADE,segment TEXT NOT NULL REFERENCES segments(id) ON DELETE CASCADE,session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,project TEXT NOT NULL,corrected INTEGER NOT NULL CHECK(corrected IN (0,1)),created TEXT NOT NULL,corrected_at TEXT,PRIMARY KEY(term,segment));
+CREATE INDEX IF NOT EXISTS term_observations_project ON term_observations(project,term,session);
+CREATE INDEX IF NOT EXISTS term_observations_segment ON term_observations(segment);
+CREATE INDEX IF NOT EXISTS term_observations_session ON term_observations(session);
+PRAGMA user_version=3;
 """; command.ExecuteNonQuery();
         MergeDuplicateTerms(c);
     });
@@ -128,30 +132,46 @@ PRAGMA user_version=2;
                 if (saved.LearningRevision > data.LearningRevision)
                     data = data with { AllowLearning = saved.AllowLearning, LearningRevision = saved.LearningRevision };
             }
-        using var cmd = Command(c, "INSERT INTO sessions(id,project,created,revision,payload) VALUES($id,$p,$at,$v,$b) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,payload=excluded.payload WHERE excluded.revision>=sessions.revision", ("$id",data.Id),("$p",data.ProjectId),("$at",data.CreatedAt.ToString("O")),("$v",data.Revision),("$b",Pack(data))); if(cmd.ExecuteNonQuery()>0&&!data.AllowLearning)RemoveCorrectionSession(c,data.Id);
+        using var cmd = Command(c, "INSERT INTO sessions(id,project,created,revision,payload) VALUES($id,$p,$at,$v,$b) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,payload=excluded.payload WHERE excluded.revision>=sessions.revision", ("$id",data.Id),("$p",data.ProjectId),("$at",data.CreatedAt.ToString("O")),("$v",data.Revision),("$b",Pack(data))); if(cmd.ExecuteNonQuery()>0&&!data.AllowLearning)
+        {
+            RemoveCorrectionSession(c,data.Id);
+            RemoveTermObservationSession(c,data.Id);
+        }
     }
-    public Task SaveSegmentAsync(SessionData session, SegmentData data, bool learnCorrections=false) => WriteAsync(c =>
+    public Task SaveSegmentAsync(SessionData session, SegmentData data, bool learnCorrections=false, bool learnUsage=false) => WriteAsync(c =>
     {
+        if(data.SessionId!=session.Id)throw new ArgumentException("片段与会话不匹配。");
         using var tx = c.BeginTransaction(); SaveSession(c, session);
         if (Dead(c,"segment",data.Id)) throw new InvalidOperationException("已清除片段的旧保存已拒绝。");
-        using var cmd = Command(c, "INSERT INTO segments(id,session,task,task_order,sentence,revision,payload) VALUES($id,$s,$t,$o,$n,$v,$b) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,payload=excluded.payload WHERE excluded.revision>=segments.revision", ("$id",data.Id),("$s",data.SessionId),("$t",data.TaskId),("$o",data.TaskOrder),("$n",data.SentenceId),("$v",data.Revision),("$b",Pack(data)));
-        if (cmd.ExecuteNonQuery() > 0 && data.EditRevision > 0)
+        using var cmd = Command(c, "INSERT INTO segments(id,session,task,task_order,sentence,revision,payload) VALUES($id,$s,$t,$o,$n,$v,$b) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,payload=excluded.payload WHERE excluded.revision>=segments.revision AND segments.session=excluded.session", ("$id",data.Id),("$s",data.SessionId),("$t",data.TaskId),("$o",data.TaskOrder),("$n",data.SentenceId),("$v",data.Revision),("$b",Pack(data)));
+        if (cmd.ExecuteNonQuery() > 0)
         {
-            RemoveEvidence(c, e => e.SegmentId == data.Id && (data.OutputState == OutputState.Deleted || e.SourceRevision != data.SourceRevision || e.EditRevision != data.EditRevision));
-            SyncCorrections(c,session,data,learnCorrections);
+            if(data.EditRevision>0)
+            {
+                RemoveEvidence(c, e => e.SegmentId == data.Id && (data.OutputState == OutputState.Deleted || e.SourceRevision != data.SourceRevision || e.EditRevision != data.EditRevision));
+                SyncCorrections(c,session,data,learnCorrections);
+            }
+            SyncTermObservations(c,session,data,learnUsage);
         }
         tx.Commit();
     });
-    public Task SaveTermAsync(TermData term) => WriteAsync(c => SaveTerm(c,term));
+    public Task SaveTermAsync(TermData term) => WriteAsync(c => {using var tx=c.BeginTransaction();SaveTerm(c,term);tx.Commit();});
     private void SaveTerm(SqliteConnection c,TermData term)
     {
         term.Validate(); if (Dead(c,"term",term.Id) || Dead(c,"project",term.Scope)) throw new InvalidOperationException("已删除词条的旧保存已拒绝。");
-        using var cmd = Command(c, "INSERT INTO terms(id,scope,revision,payload) VALUES($id,$s,$v,$b) ON CONFLICT(id) DO UPDATE SET scope=excluded.scope,revision=excluded.revision,payload=excluded.payload WHERE excluded.revision>=terms.revision", ("$id",term.Id),("$s",term.Scope),("$v",term.Revision),("$b",Pack(term))); cmd.ExecuteNonQuery();
+        TermData? previous=null;
+        using(var query=Command(c,"SELECT payload FROM terms WHERE id=$id",("$id",term.Id)))
+            if(query.ExecuteScalar() is byte[] bytes)previous=Unpack<TermData>(bytes);
+        using var cmd = Command(c, "INSERT INTO terms(id,scope,revision,payload) VALUES($id,$s,$v,$b) ON CONFLICT(id) DO UPDATE SET scope=excluded.scope,revision=excluded.revision,payload=excluded.payload WHERE excluded.revision>=terms.revision", ("$id",term.Id),("$s",term.Scope),("$v",term.Revision),("$b",Pack(term)));
+        if(cmd.ExecuteNonQuery()>0&&previous!=null&&(previous.Text!=term.Text||previous.Scope!=term.Scope))
+        {
+            using var clear=Command(c,"DELETE FROM term_observations WHERE term=$id",("$id",term.Id));clear.ExecuteNonQuery();
+        }
     }
     public Task ImportTermsAsync(IReadOnlyList<TermData> batch) => WriteAsync(c=>{using var tx=c.BeginTransaction();foreach(var term in batch)SaveTerm(c,term);tx.Commit();});
     public Task SaveProjectAsync(Project project) => WriteAsync(c => { if (Dead(c,"project",project.Id)) throw new InvalidOperationException("项目已删除。"); using var cmd=Command(c,"INSERT INTO projects(id,revision,payload) VALUES($id,$v,$b) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,payload=excluded.payload WHERE excluded.revision>=projects.revision",("$id",project.Id),("$v",project.Revision),("$b",Pack(project))); cmd.ExecuteNonQuery(); });
     public Task<List<Project>> ProjectsAsync() => Task.Run(() => { using var c=Open(); using var cmd=Command(c,"SELECT payload FROM projects ORDER BY rowid"); using var r=cmd.ExecuteReader(); var list=new List<Project>(); while(r.Read())list.Add(Unpack<Project>((byte[])r[0])); return list; });
-    public Task<List<TermData>> TermsAsync(string scope) => Task.Run(() => { using var c=Open(); using var cmd=Command(c,"SELECT payload FROM terms WHERE scope=$s OR scope='*'",("$s",scope)); using var r=cmd.ExecuteReader(); var list=new List<TermData>(); while(r.Read())list.Add(Unpack<TermData>((byte[])r[0])); return list; });
+    public Task<List<TermData>> TermsAsync(string scope) => Task.Run(() => { using var c=Open();return ReadTermsWithUsage(c,scope); });
     public Task<HashSet<string>> SuppressedAsync(string scope) => Task.Run(() => { using var c=Open(); using var cmd=Command(c,"SELECT payload FROM suppression WHERE scope=$s OR scope='*'",("$s",scope)); using var r=cmd.ExecuteReader(); var list=new HashSet<string>(StringComparer.Ordinal); while(r.Read())list.Add(Unpack<string>((byte[])r[0])); return list; });
     public Task<List<SegmentData>> SegmentsAsync(string session) => Task.Run(() => { using var c=Open(); using var cmd=Command(c,"SELECT payload FROM segments WHERE session=$s ORDER BY task_order,sentence",("$s",session)); using var r=cmd.ExecuteReader(); var list=new List<SegmentData>(); while(r.Read())list.Add(Unpack<SegmentData>((byte[])r[0]) with { SaveState=SaveState.Saved }); return list; });
     public Task<List<MemoryHit>> SearchAsync(string? project, string query, DateTimeOffset? since, CancellationToken token) => Task.Run(() =>

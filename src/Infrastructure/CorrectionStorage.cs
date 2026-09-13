@@ -12,7 +12,13 @@ public sealed partial class MemoryRepository
         while(reader.Read())rows.Add(Unpack<CorrectionCandidate>((byte[])reader[0]) with{Count=reader.GetInt32(1)});
         return rows;
     }
-    public Task<List<CorrectionCandidate>> CorrectionsAsync(string project)=>Task.Run(()=>{using var c=Open();return ReadCorrections(c,project);});
+    public Task<List<CorrectionCandidate>> CorrectionsAsync(string project)=>Task.Run(()=>
+    {
+        using var c=Open();var rows=ReadCorrections(c,project);var terms=ReadTerms(c).ToDictionary(t=>t.Id);
+        return rows.Select(d=>d with{ReplacementValid=d.TermId!=null&&terms.TryGetValue(d.TermId,out var term)
+            &&term.State==TermState.Enabled&&term.Scope==d.LearnedScope&&term.Text==d.LearnedText&&term.Alias==d.LearnedAlias
+            &&ConfirmedCorrections.IsSafePair(term.Alias,term.Text)}).ToList();
+    });
     public Task<List<CorrectionEvidence>> CorrectionEvidenceAsync(string id)=>Task.Run(()=>
     {
         using var c=Open();using var query=Command(c,"SELECT payload FROM correction_sources WHERE candidate=$id ORDER BY created DESC LIMIT 30",("$id",id));
@@ -82,7 +88,7 @@ public sealed partial class MemoryRepository
         }
         return result;
     }
-    public async Task<TermData> ConfirmCorrectionAsync(string id,string project,CorrectionApproval approval)
+    public async Task<TermData> ConfirmCorrectionAsync(string id,string project,CorrectionApproval approval,bool learnUsage=true)
     {
         TermData? result=null;
         await WriteAsync(c=>
@@ -102,11 +108,42 @@ public sealed partial class MemoryRepository
             result=old==null?requested:old with{Text=word,Alias=alias,Origin=old.Origin=="Extracted"?"CorrectionLearning":old.Origin,State=TermState.Enabled,Weight=Math.Max(old.Weight,requested.Weight),Pinned=true,Protect=true,Revision=old.Revision+1,UpdatedAt=DateTimeOffset.UtcNow};
             SaveTerm(c,result);
             // Keep only vocabulary settings for undo; do not duplicate historic source text in a backup snapshot.
-            SaveCorrection(c,candidate with{State=CorrectionState.Learned,Revision=candidate.Revision+1,LearnedText=word,LearnedScope=approval.Scope,TermId=result.Id,AppliedTermRevision=result.Revision,PriorTerm=old is null?null:old with{Evidence=[]}});
-            MarkCorrectionDecision(c,id,true);tx.Commit();
+            SaveCorrection(c,candidate with{State=CorrectionState.Learned,Revision=candidate.Revision+1,LearnedText=word,LearnedScope=approval.Scope,LearnedAlias=alias,AutomaticReplacement=approval.AutomaticReplacement,TermId=result.Id,AppliedTermRevision=result.Revision,PriorTerm=old is null?null:old with{Evidence=[]}});
+            MarkCorrectionDecision(c,id,true);
+            foreach(var source in learnUsage?sources:[])
+            {
+                using var sample=Command(c,"SELECT s.payload,p.payload FROM sessions s JOIN segments p ON p.session=s.id WHERE s.id=$s AND p.id=$p",("$s",source.SessionId),("$p",source.SegmentId));
+                SessionData? session=null;SegmentData? segment=null;
+                using(var reader=sample.ExecuteReader())if(reader.Read()){session=Unpack<SessionData>((byte[])reader[0]);segment=Unpack<SegmentData>((byte[])reader[1]);}
+                if(session!=null&&segment!=null)SyncTermObservations(c,session,segment,true);
+            }
+            tx.Commit();
         });
         return result!;
     }
+    public Task<List<TermData>> ActiveCorrectionTermsAsync(string project)=>Task.Run(()=>
+    {
+        using var c=Open();
+        // Payloads are encrypted; resolve ids from the decrypted decisions, never from imported aliases.
+        var decisions=ReadAllCorrectionDecisions(c);var terms=ReadTerms(c).ToDictionary(t=>t.Id);
+        return decisions.Where(d=>d.State==CorrectionState.Learned&&d.AutomaticReplacement)
+            .Where(d=>d.TermId!=null&&terms.TryGetValue(d.TermId,out var term)&&term.State==TermState.Enabled&&(term.Scope=="*"||term.Scope==project)&&term.Scope==d.LearnedScope&&term.Text==d.LearnedText&&term.Alias==d.LearnedAlias)
+            .Select(d=>terms[d.TermId!]).DistinctBy(t=>t.Id).ToList();
+    });
+    private List<CorrectionCandidate> ReadAllCorrectionDecisions(SqliteConnection c)
+    {
+        using var command=Command(c,"SELECT payload FROM corrections");using var reader=command.ExecuteReader();var list=new List<CorrectionCandidate>();
+        while(reader.Read())list.Add(Unpack<CorrectionCandidate>((byte[])reader[0]));return list;
+    }
+    public Task SetAutomaticCorrectionAsync(string id,string project,bool enabled)=>WriteAsync(c=>
+    {
+        using var tx=c.BeginTransaction();var decision=ReadCorrection(c,id);
+        if(decision.ProjectId!=project||decision.State!=CorrectionState.Learned)throw new InvalidOperationException("请选择本项目已学习的纠错记录。");
+        using var query=Command(c,"SELECT payload FROM terms WHERE id=$id",("$id",decision.TermId));
+        var term=query.ExecuteScalar() is byte[] bytes?Unpack<TermData>(bytes):throw new InvalidOperationException("对应词条已删除。");
+        if(enabled&&(term.State!=TermState.Enabled||term.Text!=decision.LearnedText||term.Scope!=decision.LearnedScope||term.Alias.Length==0))throw new InvalidOperationException("词条已改变或禁用，请先重新确认标准写法。");
+        SaveCorrection(c,decision with{AutomaticReplacement=enabled,LearnedAlias=term.Alias,Revision=decision.Revision+1});tx.Commit();
+    });
     public Task SetCorrectionIgnoredAsync(string id,string project,bool ignored)=>WriteAsync(c=>
     {
         using var tx=c.BeginTransaction();var value=ReadCorrection(c,id);

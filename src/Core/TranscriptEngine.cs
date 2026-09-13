@@ -12,6 +12,7 @@ public sealed partial class TranscriptEngine
     private readonly Func<long> clock;
     private int taskOrder, sequence;
     private bool nextParagraph;
+    private bool appliedConfirmedCorrections;
     public SessionData Session { get; private set; }
     public event Action<SegmentData>? Changed;
     public IReadOnlyList<SegmentData> Segments => segments.Values.OrderBy(s => s.TaskOrder).ThenBy(s => s.SentenceId).ToArray();
@@ -20,6 +21,8 @@ public sealed partial class TranscriptEngine
     public TranscriptEngine(SessionData session, Func<long>? clock = null,bool wholeTurn=false) { Session = session; this.clock = clock ?? (() => Environment.TickCount64); this.wholeTurn=wholeTurn; }
     public void Restore(IEnumerable<SegmentData> saved)
     {
+        // Loading history must never reinterpret old text using today's mappings.
+        appliedConfirmedCorrections = true;
         if(Session.WholePolishState=="Waiting")Session=Session with{WholePolishState="Fallback",WholePolishReason="上次全文润色未完成，保留原文",Revision=Session.Revision+1};
         foreach (var value in saved)
         {
@@ -30,6 +33,7 @@ public sealed partial class TranscriptEngine
             tasks.TryAdd(s.TaskId, new TaskState(s.TaskOrder, []) { Sealed = true });
         }
         Publish();
+        if (Session.AppliedCorrections.Count > 0) RefreshAppliedCorrectionSummary("", "", false);
     }
     public void StartTask(string taskId, string[] terms)
     {
@@ -37,6 +41,79 @@ public sealed partial class TranscriptEngine
         tasks.Add(taskId, new TaskState(++taskOrder, terms)); nextParagraph = taskOrder > 1;
     }
     public void Paragraph() => nextParagraph = true;
+    public ConfirmedCorrectionResult ApplyConfirmedCorrections(IReadOnlyList<TermData> approvedTerms)
+    {
+        string original = TranscriptText.Render(Segments);
+        if (appliedConfirmedCorrections || Session.WholePolishState != "None") return new(original, []);
+        if (tasks.Values.Any(t => !t.Sealed) || pending.Count > 0)
+            throw new InvalidOperationException("收齐尾句后才能应用确认纠错。");
+        appliedConfirmedCorrections = true;
+        // Failed/incomplete audio is kept as confirmed ASR text for review. In particular,
+        // an unseen earlier sentence could contain the opening of a quote or code block.
+        if (Session.Gaps.Count > 0 || Segments.Any(s => s.AsrState == AsrState.Unresolved)) return new(original, []);
+        if (approvedTerms.Count == 0 || original.Length == 0) return new(original, []);
+
+        // Match against the full turn so quoted/code spans remain protected across sentences.
+        // Keep segment ownership: corrections spanning ASR segment boundaries are skipped.
+        var ranges = new List<(SegmentData Segment, int Start, int Length)>();
+        int offset = 0;
+        char last = '\0';
+        static bool LatinNumber(char c) => c is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9';
+        foreach (var segment in Segments.Where(s => s.OutputState == OutputState.Published && s.FinalText.Length > 0))
+        {
+            if (offset > 0)
+            {
+                if (segment.ParagraphBefore) offset += 4;
+                else if (LatinNumber(last) && LatinNumber(segment.FinalText[0])) offset++;
+            }
+            ranges.Add((segment, offset, segment.FinalText.Length));
+            offset += segment.FinalText.Length;
+            last = segment.FinalText[^1];
+        }
+        var result = ConfirmedCorrections.Apply(original, approvedTerms, Session.ProjectId);
+        var edits = result.Edits.Where(e => ranges.Any(r => !r.Segment.UserLocked && e.Start >= r.Start && e.Start + e.Length <= r.Start + r.Length)).ToArray();
+        if (edits.Length == 0) return new(original, []);
+        var changed = new List<SegmentData>();
+        var records = new List<AppliedCorrectionRecord>();
+        foreach (var range in ranges)
+        {
+            var local = edits.Where(e => e.Start >= range.Start && e.Start + e.Length <= range.Start + range.Length).OrderBy(e => e.Start).ToArray();
+            if (local.Length == 0) continue;
+            string corrected = range.Segment.FinalText;
+            foreach (var edit in local.Reverse()) corrected = corrected.Remove(edit.Start - range.Start, edit.Length).Insert(edit.Start - range.Start, edit.Replacement);
+            var occurrences = new List<AppliedCorrectionOccurrence>();
+            int delta = 0;
+            foreach (var edit in local)
+            {
+                occurrences.Add(new(edit.Start - range.Start + delta, edit.Replacement));
+                delta += edit.Replacement.Length - edit.Length;
+            }
+            records.Add(new(range.Segment.Id, corrected, occurrences));
+            changed.Add(range.Segment with { FinalText = corrected, Reason = "已应用确认纠错", Revision = range.Segment.Revision + 1 });
+        }
+        Session = Session with
+        {
+            AppliedCorrectionCount = edits.Length,
+            AppliedCorrectionTerms = edits.Select(e => e.Replacement).Distinct(StringComparer.Ordinal).ToList(),
+            AppliedCorrections = records,
+            Revision = Session.Revision + 1
+        };
+        foreach (var segment in changed) Put(segment);
+        return new(TranscriptText.Render(Segments), edits);
+    }
+    private void RefreshAppliedCorrectionSummary(string editedId, string text, bool deleted)
+    {
+        var remaining = new List<AppliedCorrectionOccurrence>();
+        foreach (var record in Session.AppliedCorrections.Take(ConfirmedCorrections.MaxRecordedOccurrences))
+        {
+            if (record.SegmentId == editedId)
+            { if (!deleted) remaining.AddRange(ConfirmedCorrections.Remaining(record, text)); }
+            else if (segments.TryGetValue(record.SegmentId, out var segment) && segment.OutputState == OutputState.Published)
+                remaining.AddRange(ConfirmedCorrections.Remaining(record, segment.FinalText));
+            if (remaining.Count > ConfirmedCorrections.MaxRecordedOccurrences) { remaining.Clear(); break; }
+        }
+        Session = Session with { AppliedCorrectionCount = remaining.Count, AppliedCorrectionTerms = remaining.Select(o => o.Text).Distinct(StringComparer.Ordinal).ToList() };
+    }
     public PolishWork? Receive(AsrEvent e, bool polish, bool autoParagraph, string[] protectedTerms, bool previousContext)
     {
         if (!tasks.TryGetValue(e.TaskId, out var task) || task.Sealed || e.Heartbeat || e.SentenceId <= 0) return null;
@@ -153,6 +230,7 @@ public sealed partial class TranscriptEngine
         }
         if (action is not ("撤销" or "恢复原文") && JsonCodec.Count(text) > 20000) throw new ArgumentException("单段编辑超过 20,000 字。");
         Session=Session with{WholePolishState="Fallback",WholePolishText="",WholePolishReason="原始片段已编辑，使用编辑后的正文",WholePolishOperation=Session.WholePolishOperation+1,Revision=Session.Revision+1};
+        RefreshAppliedCorrectionSummary(id, text, deleted);
         long edit = s.EditRevision + 1;
         s = s with { FinalText = text, UserLocked = true, Operation = s.Operation + 1, EditRevision = edit, Revision = s.Revision + 1, OutputState = deleted ? OutputState.Deleted : OutputState.Published, Reason = action, Edits = [.. s.Edits, new EditVersion(edit, text, action, DateTimeOffset.UtcNow)], UndoHistory = history, UndoPosition = cursor };
         pending.Remove(id); Put(s); return s;

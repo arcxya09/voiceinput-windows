@@ -62,9 +62,10 @@ internal static class CorrectionDialog
         panel.Children.Add(new TextBlock{Text=$"已在 {candidate.Count} 个片段中纠正这组写法。请检查标准词条，再确认学习。",TextWrapping=TextWrapping.Wrap});
         TextBox Field(string label,string value,int max){panel.Children.Add(new TextBlock{Text=label,Margin=new Thickness(0,14,0,6)});var box=new TextBox{Text=value,MaxLength=max};panel.Children.Add(box);return box;}
         var correct=Field("标准写法（可修改，1—64 字）",candidate.Corrected,128);
-        var original=Field("旧写法（仅用于追溯）",candidate.Original,128);
+        var original=Field("旧写法（请核对自动纠正的来源写法）",candidate.Original,128);
         var category=Field("类别", "专业术语",32);
         var global=new CheckBox{Content="加入全局词库（默认只用于本项目）"};panel.Children.Add(global);
+        var replace=new CheckBox{Content="自动纠正这组已确认写法（保留原始识别文本）",IsChecked=true};panel.Children.Add(replace);
         var weight=Field("识别权重（1—5）",candidate.Count>=3?"5":"4",1);
         if(evidence.FirstOrDefault() is {} sample)
         {
@@ -81,7 +82,7 @@ internal static class CorrectionDialog
             {
                 if(!int.TryParse(weight.Text,out int level))throw new ArgumentException("识别权重应为 1—5。");
                 var term=new TermData{Text=correct.Text.Trim(),Alias=original.Text.Trim(),Weight=level};term.Validate();
-                result=new(term.Text,term.Alias,category.Text.Trim(),global.IsChecked==true?"*":candidate.ProjectId,level);win.DialogResult=true;
+                result=new(term.Text,term.Alias,category.Text.Trim(),global.IsChecked==true?"*":candidate.ProjectId,level,replace.IsChecked==true);win.DialogResult=true;
             }
             catch(ArgumentException e){MessageBox.Show(win,e.Message,"纠错学习");}
         };

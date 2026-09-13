@@ -34,6 +34,7 @@ public record AppSettings
     public bool AutoExtract { get; init; }
     public bool LearnCorrections { get; init; } = true;
     public bool UseLexicon { get; init; } = true;
+    public bool DynamicLexicon { get; init; } = true;
     public bool AsrContext { get; init; }
     public bool PreviousContext { get; init; }
     public bool AutoParagraph { get; init; }
@@ -72,8 +73,16 @@ public enum AsrState { Partial, Confirmed, Unresolved }
 public enum OutputState { Waiting, Ready, Published, Suppressed, Unresolved, Deleted }
 public enum SaveState { NotRequested, Pending, Saved, Failed }
 
+public record HotwordUsage(string Text,int Weight);
 public record SessionData
 {
+    public List<HotwordUsage> Hotwords { get; init; } = [];
+    public string HotwordState { get; init; } = "None";
+    public int EligibleHotwordCount { get; init; }
+    public int ProtectedTermCount { get; init; }
+    public int AppliedCorrectionCount { get; init; }
+    public List<string> AppliedCorrectionTerms { get; init; } = [];
+    public List<AppliedCorrectionRecord> AppliedCorrections { get; init; } = [];
     public string WholePolishState { get; init; } = "None";
     public string WholePolishText { get; init; } = "";
     public string WholePolishReason { get; init; } = "";
@@ -131,6 +140,11 @@ public enum TermState { Candidate, Enabled, Disabled }
 public record TermEvidence(string SessionId, string SegmentId, long SourceRevision, long EditRevision, string Quote, bool Influenced, int SliceStart = 0);
 public record TermData
 {
+    [JsonIgnore] public long UsageCount { get; init; }
+    [JsonIgnore] public long CorrectionCount { get; init; }
+    [JsonIgnore] public DateTimeOffset? LastUsedAt { get; init; }
+    [JsonIgnore] public DateTimeOffset? LastCorrectedAt { get; init; }
+    [JsonIgnore] public int SuggestedWeight => Lexicon.EffectiveWeight(this);
     public string Id { get; init; } = JsonCodec.Id();
     public string Scope { get; init; } = "default";
     public string Text { get; init; } = "";

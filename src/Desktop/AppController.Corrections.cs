@@ -15,7 +15,8 @@ public sealed partial class AppController
                 if(Settings.ProjectId!=candidate.ProjectId)throw new InvalidOperationException("项目已切换，请重新选择候选。");
                 knowledgeEpoch++;return Settings.ProjectId;
             });
-            var term=await Repository.ConfirmCorrectionAsync(candidate.Id,project,approval);await ReloadTerms();
+            var options=Settings;
+            var term=await Repository.ConfirmCorrectionAsync(candidate.Id,project,approval,options.SaveMemory&&options.AllowLearning&&options.DynamicLexicon);await ReloadTerms();
             await OnActor(()=>Status(Settings.UseLexicon?$"已学习“{term.Text}”，下次语音输入优先使用该词条。":$"已学习“{term.Text}”。可在设置中开启“识别时使用已启用词库”。"));
         }
         finally{knowledgeGate.Release();}

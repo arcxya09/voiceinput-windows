@@ -436,6 +436,11 @@ await Test("全部历史不复活已删词条，不覆盖已禁用和人工状�
 await ControllerRegression.Run(Test);
 await CorrectionRegression.Run(Test);
 await FocusRegression.Run(Test);
+await LexiconRankingRegression.Run(Test);
+await TermUsageRegression.Run(Test);
+await ConfirmedCorrectionRegression.Run(Test);
+await CorrectionMappingStorageRegression.Run(Test);
+await ControllerLexiconRegression.Run(Test);
 Console.WriteLine($"RESULT: {passed} passed; {failed} failed. Interactive desktop, microphone and paid cloud calls were not executed.");
 return failed==0?0:1;
 
