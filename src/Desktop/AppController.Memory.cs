@@ -53,7 +53,12 @@ public sealed partial class AppController
         try
         {
             await Repository.BarrierAsync();
-            await Repository.RetainAsync(Settings.RetentionDays,lifetime.Token);
+            await Repository.RetainAsync(Settings.RetentionDays,lifetime.Token,id=>OnActor(()=>
+            {
+                ForgetPending(id);
+                if(engine?.Session.Id==id&&state is not (CaptureState.Connecting or CaptureState.Recording or CaptureState.Draining))engine=null;
+                Notify();
+            }));
             await ReloadTerms();
             await OnActor(() =>
             {

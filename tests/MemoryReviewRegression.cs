@@ -64,6 +64,28 @@ static class MemoryReviewRegression
             var expired=new SessionData{CreatedAt=DateTimeOffset.UtcNow.AddDays(-8)};await f.App.Repository.SaveSessionAsync(expired);
             await f.App.MaintainMemoryAsync();Check(await f.App.Repository.LoadSessionAsync(expired.Id)==null);
         });
+        await test("R17 清理非当前过期会话同步移除失败保存队列，重试不复活历史",async()=>
+        {
+            await using var f=await ControllerFixture.Create();
+            var expired=new SessionData{CreatedAt=DateTimeOffset.UtcNow.AddDays(-20)};
+            var source=new SegmentData{SessionId=expired.Id,TaskId=JsonCodec.Id(),TaskOrder=1,SentenceId=1,RawText="过期原文。",FinalText="过期原文。",AsrState=AsrState.Confirmed,OutputState=OutputState.Published,SaveState=SaveState.Saved,SourceRevision=1};
+            await f.App.Repository.SaveSegmentAsync(expired,source);await f.App.LoadSessionAsync(expired);
+            var failed=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            f.App.Updated+=snapshot=>{if(snapshot.Segments.Any(s=>s.Id==source.Id&&s.SaveState==SaveState.Failed))failed.TrySetResult();};
+            f.Protector.Fail=j=>j.TryGetProperty("finalText",out var value)&&value.GetString()=="过期修订保存失败。";
+            await f.App.EditAsync(source.Id,"过期修订保存失败。");await failed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(f.App.FailedSaveCount>0);
+            var recent=await f.Seed("近期正文。");await f.App.LoadSessionAsync(recent.Session);
+            Check(f.App.FailedSaveCount>0,"切换会话不能丢弃尚未清理的保存失败");
+            await f.App.SaveSettingsAsync(f.App.Settings with{RetentionDays=7},f.App.Keys);
+            Check(await f.App.Repository.LoadSessionAsync(expired.Id)==null);
+            Check(f.App.FailedSaveCount==0,"清理非当前来源后应立即更新持续告警");
+            f.Protector.Fail=null;await f.App.RetrySaveAsync();
+            var snapshot=await f.App.SnapshotAsync();
+            Check(snapshot.Unsaved==0&&f.App.FailedSaveCount==0&&snapshot.Session?.Id==recent.Session.Id&&TranscriptText.Render(snapshot)=="近期正文。");
+            bool rejected=false;try{await f.App.Repository.SaveSegmentAsync(expired,source);}catch(InvalidOperationException){rejected=true;}
+            Check(rejected&&await f.App.Repository.LoadSessionAsync(expired.Id)==null,"墓碑仍须拒绝迟到写入");
+        });
         await test("R18 投递成功不清除真实保存失败状态，重试成功后复位",async()=>
         {
             await using var f=await ControllerFixture.Create();var source=await f.Seed("保存状态。");await f.App.LoadSessionAsync(source.Session);

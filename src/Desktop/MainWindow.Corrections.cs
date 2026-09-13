@@ -11,6 +11,12 @@ public partial class MainWindow
     private async Task RefreshCorrections()
     {
         if(CorrectionsGrid==null||shuttingDown)return;
+        if(!controller.MemoryAvailable)
+        {
+            ++correctionRefresh;CorrectionsGrid.ItemsSource=Array.Empty<CorrectionCandidate>();
+            CorrectionTabLabel.Text="纠错学习";CorrectionStatus.Text=controller.MemoryStatus;
+            return;
+        }
         int serial=++correctionRefresh;string project=CurrentProject;string? selection=(CorrectionsGrid.SelectedItem as CorrectionCandidate)?.Id;
         var all=await controller.Repository.CorrectionsAsync(project);
         if(serial!=correctionRefresh||CurrentProject!=project||shuttingDown)return;

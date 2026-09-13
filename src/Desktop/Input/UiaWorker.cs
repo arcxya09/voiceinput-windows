@@ -131,7 +131,7 @@ internal sealed class UiaProcess : IIsolatedInputWorker
             RedirectStandardInput = true, RedirectStandardOutput = true
         };
         if (Path.GetFileNameWithoutExtension(executable).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
-            start.ArgumentList.Add(System.Reflection.Assembly.GetEntryAssembly()!.Location);
+            start.ArgumentList.Add(Path.Combine(AppContext.BaseDirectory, System.Reflection.Assembly.GetEntryAssembly()!.GetName().Name + ".dll"));
         start.ArgumentList.Add(UiaWorker.Argument); start.ArgumentList.Add(Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture));
         process = Process.Start(start) ?? throw new InvalidOperationException("辅助功能工作进程未启动。");
     }

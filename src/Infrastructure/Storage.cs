@@ -242,10 +242,22 @@ PRAGMA user_version=3;
         while(sessions.Count>0){foreach(var s in sessions)await DeleteSessionAsync(s.Session.Id);sessions=await SearchAsync(project,"",null,CancellationToken.None);}
         await WriteAsync(c=>{using var tx=c.BeginTransaction();using(var cmd=Command(c,"DELETE FROM corrections WHERE project=$p",("$p",project)))cmd.ExecuteNonQuery();using(var cmd=Command(c,"DELETE FROM terms WHERE scope=$p",("$p",project)))cmd.ExecuteNonQuery();using(var cmd=Command(c,"DELETE FROM projects WHERE id=$p",("$p",project)))cmd.ExecuteNonQuery();using(var cmd=Command(c,"DELETE FROM suppression WHERE scope=$p",("$p",project)))cmd.ExecuteNonQuery();tx.Commit();});
     }
-    public async Task RetainAsync(int? days,CancellationToken token=default)
+    public async Task RetainAsync(int? days,CancellationToken token=default,Func<string,Task>? onDeleted=null)
     {
         if(days==null)return; var cutoff=DateTimeOffset.UtcNow.AddDays(-days.Value);
-        while(true){token.ThrowIfCancellationRequested();var batch=await Task.Run(()=>{using var c=Open();using var cmd=Command(c,"SELECT id FROM sessions WHERE created<$at LIMIT 100",("$at",cutoff.ToString("O")));using var r=cmd.ExecuteReader();var ids=new List<string>();while(r.Read())ids.Add(r.GetString(0));return ids;});if(batch.Count==0)break;foreach(var id in batch){token.ThrowIfCancellationRequested();await DeleteSessionAsync(id);}}
+        while(true)
+        {
+            token.ThrowIfCancellationRequested();
+            var batch=await Task.Run(()=>{using var c=Open();using var cmd=Command(c,"SELECT id FROM sessions WHERE created<$at LIMIT 100",("$at",cutoff.ToString("O")));using var r=cmd.ExecuteReader();var ids=new List<string>();while(r.Read())ids.Add(r.GetString(0));return ids;});
+            if(batch.Count==0)break;
+            foreach(var id in batch)
+            {
+                token.ThrowIfCancellationRequested();await DeleteSessionAsync(id);
+                // Reconcile in-memory retry state immediately after each committed deletion,
+                // including when a later deletion or cancellation ends this maintenance pass.
+                if(onDeleted!=null)await onDeleted(id);
+            }
+        }
     }
     public Task CheckpointAsync() => WriteAsync(c=>{using var cmd=Command(c,"PRAGMA wal_checkpoint(TRUNCATE)");cmd.ExecuteNonQuery();});
     public async ValueTask DisposeAsync() { writes.Writer.TryComplete(); await writer.WaitAsync(TimeSpan.FromSeconds(3)); SqliteConnection.ClearAllPools(); }
