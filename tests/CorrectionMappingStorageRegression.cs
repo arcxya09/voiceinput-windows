@@ -100,7 +100,7 @@ internal static class CorrectionMappingStorageRegression
             }
         });
 
-        await test("修改标准词或旧写法使旧自动纠错确认失效", async () =>
+        await test("修改标准词使确认失效，修改追溯别名不覆盖独立映射", async () =>
         {
             foreach (bool rename in new[] { true, false })
             {
@@ -109,10 +109,10 @@ internal static class CorrectionMappingStorageRegression
                 await f.App.ConfirmCorrectionAsync(candidate, Approval(candidate, true));
                 var term = f.App.Terms.Single();
                 await f.App.SaveTermAsync(rename ? term with { Text = "人才盘点系统" } : term with { Alias = "另一旧写法" });
-                Check((await f.App.Repository.ActiveCorrectionTermsAsync("default")).Count == 0, rename ? "改标准词" : "改旧写法");
-                Check((await f.App.Repository.CorrectionsAsync("default")).Single().ReplacementLabel == "规则已失效");
+                Check((await f.App.Repository.ActiveCorrectionTermsAsync("default")).Count == (rename ? 0 : 1), rename ? "改标准词" : "改追溯旧写法");
+                Check((await f.App.Repository.CorrectionsAsync("default")).Single().ReplacementValid == !rename);
                 await f.Reopen();
-                Check((await f.App.Repository.ActiveCorrectionTermsAsync("default")).Count == 0);
+                Check((await f.App.Repository.ActiveCorrectionTermsAsync("default")).Count == (rename ? 0 : 1));
             }
         });
 

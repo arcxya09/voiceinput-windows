@@ -48,22 +48,31 @@ public sealed class SettingsStore(string folder, IProtector protector)
 public record MemoryHit(SessionData Session, string Snippet, int SegmentCount);
 public sealed partial class MemoryRepository : IAsyncDisposable
 {
-    private record Work(Action<SqliteConnection> Run, TaskCompletionSource Done);
+    private record Work(Action<SqliteConnection> Run, TaskCompletionSource Done, bool Initialize);
     private readonly string path;
     private readonly IProtector protector;
     private readonly Channel<Work> writes = Channel.CreateBounded<Work>(new BoundedChannelOptions(1000) { SingleReader = true, FullMode = BoundedChannelFullMode.Wait });
     private readonly Task writer;
     private int queued;
+    private int initialized;
+    public bool IsAvailable => Volatile.Read(ref initialized) == 1;
     public int Queued => Volatile.Read(ref queued);
     public MemoryRepository(string path, IProtector protector)
     {
-        this.path = path; this.protector = protector; Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        this.path = path; this.protector = protector;
         writer = Task.Run(WriteLoop);
     }
-    private SqliteConnection Open()
+    private SqliteConnection Open(bool initializing = false)
     {
-        var c = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Mode = SqliteOpenMode.ReadWriteCreate, DefaultTimeout = 1, Pooling = true }.ToString()); c.Open();
-        using var pragma = c.CreateCommand(); pragma.CommandText = "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=1000; PRAGMA secure_delete=ON;"; pragma.ExecuteNonQuery(); return c;
+        if (!initializing && !IsAvailable) throw new InvalidOperationException("本地记忆尚未成功初始化，已暂停数据库读写；听写结果仍可复制。");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var c = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Mode = SqliteOpenMode.ReadWriteCreate, DefaultTimeout = 1, Pooling = true }.ToString());
+        try
+        {
+            c.Open();
+            using var pragma = c.CreateCommand(); pragma.CommandText = "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=1000; PRAGMA secure_delete=ON;"; pragma.ExecuteNonQuery(); return c;
+        }
+        catch { c.Dispose(); throw; }
     }
     public Task InitializeAsync() => WriteAsync(c =>
     {
@@ -94,7 +103,8 @@ CREATE INDEX IF NOT EXISTS term_observations_session ON term_observations(sessio
 PRAGMA user_version=3;
 """; command.ExecuteNonQuery();
         MergeDuplicateTerms(c);
-    });
+        Volatile.Write(ref initialized, 1);
+    }, initialize: true);
     private byte[] Pack<T>(T value) => protector.Protect(JsonSerializer.SerializeToUtf8Bytes(value, JsonCodec.Options));
     private T Unpack<T>(byte[] value) => JsonSerializer.Deserialize<T>(protector.Unprotect(value), JsonCodec.Options)!;
     private static SqliteCommand Command(SqliteConnection c, string sql, params (string Key, object? Value)[] args)
@@ -107,15 +117,15 @@ PRAGMA user_version=3;
     {
         await foreach (var work in writes.Reader.ReadAllAsync())
         {
-            try { using var connection = Open(); work.Run(connection); work.Done.TrySetResult(); }
-            catch (Exception e) { work.Done.TrySetException(e); }
+            try { using var connection = Open(work.Initialize); work.Run(connection); work.Done.TrySetResult(); }
+            catch (Exception e) { if (work.Initialize) Volatile.Write(ref initialized, -1); work.Done.TrySetException(e); }
             finally { Interlocked.Decrement(ref queued); }
         }
     }
-    private async Task WriteAsync(Action<SqliteConnection> work)
+    private async Task WriteAsync(Action<SqliteConnection> work, bool initialize = false)
     {
         var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); Interlocked.Increment(ref queued);
-        try { await writes.Writer.WriteAsync(new(work, done)); } catch { Interlocked.Decrement(ref queued); throw; }
+        try { await writes.Writer.WriteAsync(new(work, done, initialize)); } catch { Interlocked.Decrement(ref queued); throw; }
         await done.Task;
     }
     public Task BarrierAsync() => WriteAsync(_ => { });
@@ -232,10 +242,10 @@ PRAGMA user_version=3;
         while(sessions.Count>0){foreach(var s in sessions)await DeleteSessionAsync(s.Session.Id);sessions=await SearchAsync(project,"",null,CancellationToken.None);}
         await WriteAsync(c=>{using var tx=c.BeginTransaction();using(var cmd=Command(c,"DELETE FROM corrections WHERE project=$p",("$p",project)))cmd.ExecuteNonQuery();using(var cmd=Command(c,"DELETE FROM terms WHERE scope=$p",("$p",project)))cmd.ExecuteNonQuery();using(var cmd=Command(c,"DELETE FROM projects WHERE id=$p",("$p",project)))cmd.ExecuteNonQuery();using(var cmd=Command(c,"DELETE FROM suppression WHERE scope=$p",("$p",project)))cmd.ExecuteNonQuery();tx.Commit();});
     }
-    public async Task RetainAsync(int? days)
+    public async Task RetainAsync(int? days,CancellationToken token=default)
     {
         if(days==null)return; var cutoff=DateTimeOffset.UtcNow.AddDays(-days.Value);
-        while(true){var batch=await Task.Run(()=>{using var c=Open();using var cmd=Command(c,"SELECT id FROM sessions WHERE created<$at LIMIT 100",("$at",cutoff.ToString("O")));using var r=cmd.ExecuteReader();var ids=new List<string>();while(r.Read())ids.Add(r.GetString(0));return ids;});if(batch.Count==0)break;foreach(var id in batch)await DeleteSessionAsync(id);}
+        while(true){token.ThrowIfCancellationRequested();var batch=await Task.Run(()=>{using var c=Open();using var cmd=Command(c,"SELECT id FROM sessions WHERE created<$at LIMIT 100",("$at",cutoff.ToString("O")));using var r=cmd.ExecuteReader();var ids=new List<string>();while(r.Read())ids.Add(r.GetString(0));return ids;});if(batch.Count==0)break;foreach(var id in batch){token.ThrowIfCancellationRequested();await DeleteSessionAsync(id);}}
     }
     public Task CheckpointAsync() => WriteAsync(c=>{using var cmd=Command(c,"PRAGMA wal_checkpoint(TRUNCATE)");cmd.ExecuteNonQuery();});
     public async ValueTask DisposeAsync() { writes.Writer.TryComplete(); await writer.WaitAsync(TimeSpan.FromSeconds(3)); SqliteConnection.ClearAllPools(); }

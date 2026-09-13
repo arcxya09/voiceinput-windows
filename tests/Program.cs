@@ -176,11 +176,11 @@ await Test("正常中止收发循环不通知上传失败",async()=>
     await client.StartAsync(new(){LegacyEndpoint=true},"TEST_ONLY",[],timeout.Token);client.Abort();await client.DisposeAsync();
     Assert(!events.Any(e=>e.Event=="connection-failed"));
 });
-await Test("连接前缓存严格限为 5 秒，不丢帧伪装继续",async()=>
+await Test("连接前缓存严格限为 15 秒，与起录预算匹配且不丢帧伪装继续",async()=>
 {
     await using var client=new BailianClient(_=>Task.CompletedTask,new ScriptedSocket(),(_,_,_)=>Task.CompletedTask);
-    for(int i=0;i<50;i++)await client.AudioAsync(new byte[3200],CancellationToken.None);
-    try{await client.AudioAsync(new byte[3200],CancellationToken.None);throw new Exception("缓存未限流");}catch(ProviderException e){Assert(e.Message.Contains("5 秒"));}
+    for(int i=0;i<150;i++)await client.AudioAsync(new byte[3200],CancellationToken.None);
+    try{await client.AudioAsync(new byte[3200],CancellationToken.None);throw new Exception("缓存未限流");}catch(ProviderException e){Assert(e.Message.Contains("15 秒"));}
 });
 await Test("旧设置自动补齐默认提示词与词库生成参数",()=>Sync(()=>
 {
@@ -221,7 +221,7 @@ await Test("生成词库 JSON 不信任模型的 ID、范围、状态和证据",
 await Test("生成词库过滤重复、空词条、异常类别与控制字符",()=>Sync(()=>
 {
     var options=new TermGenerationOptions("HR",10,"*");
-    string json=JsonSerializer.Serialize(new{terms=new object[]{new{text="KPI",category="绩效"},new{text=" kpi ",category="绩效"},new{text="",category=""},new{text="\n",category=""},new{text="有效",category=new string('长',33)},new{text="胜任力模型",category="人才"},7}});
+    string json=JsonSerializer.Serialize(new{terms=new object[]{new{text="KPI",category="绩效"},new{text=" KPI ",category="绩效"},new{text="",category=""},new{text="\n",category=""},new{text="有效",category=new string('长',33)},new{text="胜任力模型",category="人才"},7}});
     var parsed=TermGenerationRules.Parse(json,options,10);Assert(parsed.Terms.Count==2&&parsed.Rejected==5);
     Throws<FormatException>(()=>TermGenerationRules.Parse("{\"terms\":null}",options,10));
     Throws<ArgumentException>(()=>new TermGenerationOptions("",100,"*").Validate());
@@ -441,6 +441,12 @@ await TermUsageRegression.Run(Test);
 await ConfirmedCorrectionRegression.Run(Test);
 await CorrectionMappingStorageRegression.Run(Test);
 await ControllerLexiconRegression.Run(Test);
+await AccuracyReviewRegression.Run(Test);
+await AudioReviewRegression.Run(Test);
+await InputReviewRegression.Run(Test);
+await LexiconReviewRegression.Run(Test);
+await MemoryReviewRegression.Run(Test);
+await UiReviewRegression.Run(Test);
 Console.WriteLine($"RESULT: {passed} passed; {failed} failed. Interactive desktop, microphone and paid cloud calls were not executed.");
 return failed==0?0:1;
 

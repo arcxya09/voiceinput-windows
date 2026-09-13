@@ -12,7 +12,7 @@ public sealed partial class MemoryRepository
         while (reader.Read()) result.Add(Unpack<TermData>((byte[])reader[0]));
         return result;
     }
-    private static bool SameWord(TermData a, TermData b) => a.Scope == b.Scope && string.Equals(TermGenerationRules.Normalize(a.Text), TermGenerationRules.Normalize(b.Text), StringComparison.OrdinalIgnoreCase);
+    private static bool SameWord(TermData a, TermData b) => a.Scope == b.Scope && string.Equals(TermGenerationRules.Normalize(a.Text), TermGenerationRules.Normalize(b.Text), StringComparison.Ordinal);
 
     public async Task<TermData> SaveUserTermAsync(TermData requested)
     {
@@ -50,7 +50,7 @@ public sealed partial class MemoryRepository
             foreach (var group in input.GroupBy(t => t.Scope))
             {
                 var existing = ReadTerms(c, group.Key);
-                var words = existing.Select(t => TermGenerationRules.Normalize(t.Text)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                var words = existing.Select(t => TermGenerationRules.Normalize(t.Text)).ToHashSet(StringComparer.Ordinal);
                 foreach (var value in group)
                 {
                     var term = value with { Text = TermGenerationRules.Normalize(value.Text), Evidence = [] }; term.Validate();
@@ -69,7 +69,7 @@ public sealed partial class MemoryRepository
     {
         using var tx = c.BeginTransaction();
         foreach (var scope in ReadTerms(c).GroupBy(t => t.Scope))
-        foreach (var group in scope.GroupBy(t => TermGenerationRules.Normalize(t.Text), StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
+        foreach (var group in scope.GroupBy(t => TermGenerationRules.Normalize(t.Text), StringComparer.Ordinal).Where(g => g.Count() > 1))
         {
             var winner = group.OrderByDescending(t => t.Origin is "Manual" or "UserCorrection").ThenByDescending(t => t.UpdatedAt).ThenBy(t => t.Id, StringComparer.Ordinal).First();
             var merged = winner with

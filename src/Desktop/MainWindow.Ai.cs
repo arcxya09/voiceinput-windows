@@ -14,7 +14,7 @@ public partial class MainWindow
     private CancellationTokenSource? generationCancel,promptPreviewCancel;
     private string GenerationScope=>GenerationScopeBox.SelectedIndex==1?"*":CurrentProject;
     private string GenerationScopeName=>GenerationScope=="*"?"全局词库":controller.Projects.FirstOrDefault(p=>p.Id==CurrentProject)?.Name??"当前项目";
-    private bool GeneratedExists(string word)=>controller.Terms.Any(t=>t.Scope==GenerationScope&&string.Equals(TermGenerationRules.Normalize(t.Text),TermGenerationRules.Normalize(word),StringComparison.OrdinalIgnoreCase));
+    private bool GeneratedExists(string word)=>controller.Terms.Any(t=>t.Scope==GenerationScope&&Lexicon.SameWord(t.Text,word));
 
     private async void PromptSave_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>
     {

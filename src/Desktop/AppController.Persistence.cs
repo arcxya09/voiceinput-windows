@@ -22,12 +22,14 @@ public sealed partial class AppController
     {
         forgottenSessions.Add(sessionId);
         foreach(var key in pendingSessions.Keys.Where(k=>k.Id==sessionId).ToArray())pendingSessions.Remove(key);
+        failedSessionWrites.RemoveWhere(k=>k.Id==sessionId);
         foreach(var id in failedWrites.Where(p=>p.Value.SessionId==sessionId).Select(p=>p.Key).ToArray())
         {failedWrites.Remove(id);failedSources.Remove(id);}
     }
 
     private async Task<bool> SaveSessionSafe(SessionData session,bool permissionOnly=false)
     {
+        if(!MemoryAvailable)return false;
         var key=(session.Id,permissionOnly);
         bool accepted=await OnActor(()=>
         {
@@ -51,9 +53,10 @@ public sealed partial class AppController
                 CorrectionsUpdated?.Invoke();
                 if(pendingSessions.TryGetValue(key,out var pending)&&pending.Revision<=session.Revision)pendingSessions.Remove(key);
                 if(!permissionOnly&&pendingSessions.TryGetValue((session.Id,true),out var permission)&&permission.LearningRevision<=session.LearningRevision)pendingSessions.Remove((session.Id,true));
+                foreach(var failed in failedSessionWrites.Where(k=>k.Id==session.Id&&!pendingSessions.ContainsKey(k)).ToArray())failedSessionWrites.Remove(failed);
                 Notify();
             }
-            else if(pendingSessions.ContainsKey(key))Status("会话信息未保存，正文仍可复制。请点击重试保存。");
+            else if(pendingSessions.ContainsKey(key)){failedSessionWrites.Add(key);Status("会话信息未保存，正文仍可复制。请点击重试保存。");}
         });
         // Revoking consent deletes observations in the repository transaction. Refresh the
         // vocabulary before acknowledging success, including the retry-save path.
@@ -63,6 +66,7 @@ public sealed partial class AppController
 
     public async Task SetSessionLearningAsync(bool enabled)
     {
+        if(!MemoryAvailable)throw new InvalidOperationException(MemoryStatus);
         await settingsGate.WaitAsync();
         try
         {
@@ -84,6 +88,15 @@ public sealed partial class AppController
 
     public async Task RetrySaveAsync()
     {
+        var current=await SnapshotAsync();
+        if(current.State is CaptureState.Connecting or CaptureState.Recording or CaptureState.Draining||Volatile.Read(ref activePolish)>0)
+            throw new InvalidOperationException("请等本轮输入完成后重试保存。");
+        if(!MemoryAvailable)
+        {
+            await InitializeMemoryAsync();
+            if(!MemoryAvailable)throw new InvalidOperationException(MemoryStatus);
+            if(!Settings.SaveMemory){await OnActor(()=>Status("本地记忆已恢复；文本保存保持关闭。"));return;}
+        }
         var work=await OnActor(()=>
         {
             if(state is CaptureState.Connecting or CaptureState.Recording or CaptureState.Draining||activePolish>0)throw new InvalidOperationException("请等本轮输入完成后重试保存。");

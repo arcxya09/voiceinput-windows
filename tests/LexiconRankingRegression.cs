@@ -17,7 +17,7 @@ internal static class LexiconRankingRegression
             var picked = Lexicon.Select(terms, "p", now);
             Check(picked.Count == 1 && ReferenceEquals(picked[0], project));
             var cased = Lexicon.Select([project with { Text = "JUNA" }, global with { Text = "juna" }], "p", now);
-            Check(cased.Count == 1 && cased[0].Text == "JUNA" && cased[0].Scope == "p");
+            Check(cased.Count == 2 && cased.Any(t => t.Text == "JUNA" && t.Scope == "p") && cased.Any(t => t.Text == "juna" && t.Scope == "*"));
             Check(terms.Count(t => t.State == TermState.Candidate) == 1 && terms.Count(t => t.State == TermState.Disabled) == 1);
         }));
         await test("常用全局词可进入两百条置顶项目词占满的热词列表", () => Sync(() =>
