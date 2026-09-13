@@ -1,0 +1,1 @@
+<Project><PropertyGroup><NuGetLockFilePath Condition="'$(VoiceDependencySet)' != ''">$(MSBuildProjectDirectory)/packages.$(VoiceDependencySet).lock.json</NuGetLockFilePath><NuGetLockFilePath Condition="'$(VoiceDependencySet)' == ''">$(MSBuildProjectDirectory)/packages.lock.json</NuGetLockFilePath></PropertyGroup></Project>

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="语音输入法：声纹与文本光标">
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="#226E67"/>
+  <g fill="#FFFFFF">
+    <rect x="100" y="208" width="40" height="96" rx="20"/>
+    <rect x="170" y="144" width="40" height="224" rx="20"/>
+    <rect x="240" y="184" width="40" height="144" rx="20"/>
+  </g>
+  <path d="M336 150H404M370 150V362M336 362H404" fill="none" stroke="#BCE9D4" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -1,0 +1,26 @@
+{
+  "version": "1.2.1",
+  "file": "VoiceInput-Windows-x64-1.2.1.exe",
+  "size_bytes": 77016014,
+  "sha256": "a0299d8450fd93accc89eda1698e7d58e1b5f9d73bb8ce31d10ce7bfe483ebce",
+  "machine": "0x8664",
+  "subsystem": 2,
+  "file_version": "1.2.1.0",
+  "resource_types": [
+    3,
+    10,
+    14,
+    16,
+    24
+  ],
+  "icon_sizes": 9,
+  "icon_payloads_match_source": true,
+  "unsigned": true,
+  "xaml_event_references": 53,
+  "tests_passed": 95,
+  "tests_failed": 0,
+  "sdk": "10.0.401",
+  "runtime": "10.0.12",
+  "native_windows_tested": false,
+  "real_cloud_tested": false
+}
