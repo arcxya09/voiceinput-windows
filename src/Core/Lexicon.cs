@@ -6,6 +6,9 @@ namespace RealtimeTranscription.Core;
 
 public static class Lexicon
 {
+    // Scientific terms retain letter case: mA/MA and Co/CO identify different terms.
+    public static string WordKey(string text) => text.Trim().Normalize(NormalizationForm.FormC);
+    public static bool SameWord(string left, string right) => string.Equals(WordKey(left), WordKey(right), StringComparison.Ordinal);
     /// <summary>
     /// Selects at most 200 enabled terms for the current project. A project entry overrides
     /// the same normalized global word; finite pin/project bonuses leave room for actively
@@ -15,7 +18,7 @@ public static class Lexicon
     {
         var at = now ?? DateTimeOffset.UtcNow;
         return all.Where(t => t.State == TermState.Enabled && (t.Scope == "*" || t.Scope == project))
-            .GroupBy(t => t.Text.Trim().Normalize(NormalizationForm.FormC), StringComparer.OrdinalIgnoreCase)
+            .GroupBy(t => WordKey(t.Text), StringComparer.Ordinal)
             .Select(g => g.OrderByDescending(t => t.Scope == project).ThenByDescending(t => t.UpdatedAt).ThenBy(t => t.Id, StringComparer.Ordinal).First())
             .OrderByDescending(t => RankingScore(t, project, at))
             .ThenByDescending(t => t.UpdatedAt).ThenBy(t => t.Id, StringComparer.Ordinal)

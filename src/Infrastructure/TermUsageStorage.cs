@@ -49,7 +49,7 @@ FROM terms t LEFT JOIN (
         string content=(segment.EditRevision>0?segment.FinalText:segment.RawText).Normalize(NormalizationForm.FormC);
         var applicable=ReadTerms(c,session.ProjectId).Concat(session.ProjectId=="*"?[]:ReadTerms(c,"*"))
             .Where(t=>t.State==TermState.Enabled)
-            .GroupBy(t=>TermGenerationRules.Normalize(t.Text),StringComparer.OrdinalIgnoreCase)
+            .GroupBy(t=>TermGenerationRules.Normalize(t.Text),StringComparer.Ordinal)
             .Select(g=>g.OrderByDescending(t=>t.Scope==session.ProjectId).ThenByDescending(t=>t.UpdatedAt).ThenBy(t=>t.Id,StringComparer.Ordinal).First());
         var corrections=CorrectionRules.Active(segment).Where(x=>CorrectionRules.ValidPair(x.Original,x.Corrected)).ToArray();
         var usedAt=segment.EditRevision>0&&segment.Edits.Count>0?segment.Edits.Max(e=>e.At):session.CreatedAt;

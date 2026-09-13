@@ -15,7 +15,7 @@ public sealed partial class AppController : IAsyncDisposable
     private readonly Channel<Action> events = Channel.CreateBounded<Action>(4096);
     private readonly CancellationTokenSource lifetime = new();
     private readonly SemaphoreSlim captureGate = new(1,1), knowledgeGate = new(1,1), extractionGate = new(1,1);
-    private readonly Task eventLoop, timer;
+    private readonly Task eventLoop, timer, maintenance;
     private TranscriptEngine? engine;
     private CaptureState state = CaptureState.Idle;
     private string status = "配置 Key 后即可开始录音。";
@@ -25,12 +25,14 @@ public sealed partial class AppController : IAsyncDisposable
     public string Diagnostic {get{lock(diagnosticSync)return diagnostic;}}
     private void SetDiagnostic(string stage,Exception? error=null,string? detail=null)
     {
-        lock(diagnosticSync)diagnostic=$"VoiceInput 1.3.0\n时间：{DateTimeOffset.Now:O}\n阶段：{stage}\n{detail??audio?.FormatDescription??"音频格式尚未读取"}\n异常类型：{error?.GetType().Name??"None"}\nHRESULT：0x{error?.HResult??0:X8}";
+        lock(diagnosticSync)diagnostic=$"VoiceInput {typeof(AppController).Assembly.GetName().Version?.ToString(3)}\n时间：{DateTimeOffset.Now:O}\n阶段：{stage}\n{detail??audio?.FormatDescription??"音频格式尚未读取"}\n异常类型：{error?.GetType().Name??"None"}\nHRESULT：0x{error?.HResult??0:X8}";
     }
     private void FailCapture(string text)
     {
         if(captureFailure!=null)return;
-        captureFailure=text;Status(text);InputInterrupted?.Invoke(text);
+        captureFailure=text;
+        if(engine!=null)engine.UpdateSession(engine.Session with{Gaps=[..engine.Session.Gaps,text],Revision=engine.Session.Revision+1});
+        Status(text);InputInterrupted?.Invoke(text);
     }
     private BailianClient? asr;
     private AudioCapture? audio;
@@ -39,13 +41,17 @@ public sealed partial class AppController : IAsyncDisposable
     private Task? stopping;
     private bool requestedPause;
     private volatile bool captureReleased;
-    private long lastResponse, lastVoice, lastDraftSave, knowledgeEpoch, lastContextUpdate;
+    private long lastResponse, lastVoice, lastProgress, lastDraftSave, knowledgeEpoch, lastContextUpdate;
     private bool voiceSeen, polishCircuit;
     private int activePolish;
+    private int firstAudioSeen;
     private double billedSeconds;
     private readonly Dictionary<string,SegmentData> failedWrites = [];
     private readonly Dictionary<string,TranscriptEngine> failedSources = [];
     private readonly Dictionary<(string Id,bool PermissionOnly),SessionData> pendingSessions = [];
+    private readonly HashSet<(string Id,bool PermissionOnly)> failedSessionWrites = [];
+    private int failedSaveCount;
+    public int FailedSaveCount => Volatile.Read(ref failedSaveCount);
     private readonly SemaphoreSlim settingsGate = new(1,1);
     private List<TermData> terms = [];
     private long termReloadSequence,appliedTermReload;
@@ -67,9 +73,10 @@ public sealed partial class AppController : IAsyncDisposable
         protector??=new WindowsProtector();deepseek=new(provider);settingsStore = new(folder,protector); Repository = new(Path.Combine(folder,"sessions.db"),protector);
         eventLoop = Task.Run(async()=>{await foreach(var action in events.Reader.ReadAllAsync()){try{action();}catch{Message?.Invoke("操作未完成，已保留现有文字。");}}});
         timer = Task.Run(TimerLoop);
+        maintenance = Task.Run(MaintenanceLoop);
         deepseek.Used += u => { _ = RecordUsage(u); };
     }
-    private async Task RecordUsage(UsageData u){try{await Repository.SaveUsageAsync(u);}catch{}}
+    private async Task RecordUsage(UsageData u){if(!MemoryAvailable)return;try{await Repository.SaveUsageAsync(u);}catch{}}
     private async Task<T> OnActor<T>(Func<T> fn)
     {
         var done = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -78,7 +85,11 @@ public sealed partial class AppController : IAsyncDisposable
     }
     private Task OnActor(Action fn) => OnActor(()=>{fn();return true;});
     public Task<TranscriptSnapshot> SnapshotAsync()=>OnActor(Snapshot);
-    private TranscriptSnapshot Snapshot()=>new(engine?.Session,engine?.Segments??[],state,engine?.Pending??0,UnsavedCount(),status);
+    private TranscriptSnapshot Snapshot()
+    {
+        Volatile.Write(ref failedSaveCount,failedWrites.Count+failedSessionWrites.Count);
+        return new(engine?.Session,engine?.Segments??[],state,engine?.Pending??0,UnsavedCount(),status);
+    }
     private int UnsavedCount() => (engine?.Segments.Count(s=>s.SaveState is SaveState.Pending or SaveState.Failed)??0)
         + failedWrites.Keys.Count(id=>!ReferenceEquals(failedSources[id],engine)) + pendingSessions.Count;
     private void Notify()=>Updated?.Invoke(Snapshot());
@@ -92,7 +103,7 @@ public sealed partial class AppController : IAsyncDisposable
     }
     private void Persist(TranscriptEngine source,SegmentData s)
     {
-        bool save=Settings.SaveMemory;
+        bool save=CanSaveMemory;
         if(s.AsrState==AsrState.Partial&&Environment.TickCount64-lastDraftSave<1000)return;
         if(s.AsrState==AsrState.Partial)lastDraftSave=Environment.TickCount64;
         source.MarkPending(s.Id,save);
@@ -125,18 +136,20 @@ public sealed partial class AppController : IAsyncDisposable
     public async Task InitializeAsync()
     {
         var loaded=await Task.Run(()=> (settingsStore.Load(),settingsStore.LoadCredentials()));
-        Settings=loaded.Item1;Keys=loaded.Item2;Settings.Validate();await Repository.InitializeAsync();
-        Projects=await Repository.ProjectsAsync();
-        if(Projects.Count==0){var p=new Project("default","默认项目");await Repository.SaveProjectAsync(p);Projects.Add(p);}
-        if(!Projects.Any(p=>p.Id==Settings.ProjectId))Settings=Settings with{ProjectId=Projects[0].Id};
-        await Repository.RetainAsync(Settings.RetentionDays);
-        await ReloadTerms();await OnActor(()=>Status(Keys.BailianKey.Length==0?"请先在设置中填写百炼和 DeepSeek Key。":"准备就绪。在目标文本框中按住右侧 Ctrl 说话，松开输入。"));
+        Settings=loaded.Item1;Keys=loaded.Item2;Settings.Validate();
+        await InitializeMemoryAsync();
+        await OnActor(()=>Status(Keys.BailianKey.Length==0?"请先在设置中填写百炼 Key。":!MemoryAvailable?MemoryStatus:$"准备就绪。按住 {HotkeyLabel} 说话，松开后{(Settings.DictationOnly?"查看并复制结果":"输入")}。"));
     }
     private async Task ReloadTerms()
     {
+        if(!MemoryAvailable)return;
         long request=Interlocked.Increment(ref termReloadSequence);
-        string project=Settings.ProjectId;var t=await Repository.TermsAsync(project);var s=await Repository.SuppressedAsync(project);var mappings=await Repository.ActiveCorrectionTermsAsync(project);
-        await OnActor(()=>{if(Settings.ProjectId!=project||request<appliedTermReload)return;appliedTermReload=request;terms=t;suppressed=s;approvedCorrections=mappings;TermsUpdated?.Invoke();CorrectionsUpdated?.Invoke();});
+        try
+        {
+            string project=Settings.ProjectId;var t=await Repository.TermsAsync(project);var s=await Repository.SuppressedAsync(project);var mappings=await Repository.ActiveCorrectionTermsAsync(project);
+            await OnActor(()=>{if(!MemoryAvailable||Settings.ProjectId!=project||request<appliedTermReload)return;appliedTermReload=request;terms=t;suppressed=s;approvedCorrections=mappings;TermsUpdated?.Invoke();CorrectionsUpdated?.Invoke();});
+        }
+        catch(Exception e){await DisableMemoryAsync(e);}
     }
     public async Task SaveSettingsAsync(AppSettings options,Credentials keys)
     {
@@ -147,8 +160,8 @@ public sealed partial class AppController : IAsyncDisposable
         if(keys.BailianKey.Any(char.IsControl)||keys.DeepSeekKey.Any(char.IsControl))throw new ArgumentException("Key 不能包含换行或控制字符。");
         var current=await SnapshotAsync();if(current.State is CaptureState.Recording or CaptureState.Connecting or CaptureState.Draining)throw new InvalidOperationException("请先暂停录音，再修改设置。");
         await Task.Run(()=>settingsStore.Save(options,keys));
-        await OnActor(()=>{Settings=options;Keys=keys;polishCircuit=false;knowledgeEpoch++;CancelToken(extraction);engine?.SetMemoryState(options.SaveMemory);Status("设置已保存。");});
-        await ReloadTerms();
+        await OnActor(()=>{Settings=options;Keys=keys;polishCircuit=false;knowledgeEpoch++;CancelToken(extraction);engine?.SetMemoryState(CanSaveMemory);Status("设置已保存。");});
+        await MaintainMemoryAsync();await ReloadTerms();
         }
         finally{settingsGate.Release();}
     }
@@ -172,33 +185,40 @@ public sealed partial class AppController : IAsyncDisposable
             if(!allowed)return false;
             Settings.AsrUri();if(Keys.BailianKey.Length==0)throw new ArgumentException("请先在设置页填写百炼 API Key。");
             startup=CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token,cancelled);startup.CancelAfter(15000);
-            // Finish any previous source before selecting this turn's vocabulary. Its accepted
-            // observations must be visible even if the background UI refresh has not completed.
-            await OnActor(()=>engine?.FinishAll());await Repository.BarrierAsync();await ReloadTerms();
+            // Start local capture before database work; pending observations are reconciled
+            // while audio is safely buffered, before the request vocabulary is selected.
+            await OnActor(()=>engine?.FinishAll());
             startup.Token.ThrowIfCancellationRequested();
-            var selected=await OnActor(()=>
+            await OnActor(()=>
             {
                 CancelToken(extraction);NewEngine(new SessionData{Id=turnId,ProjectId=Settings.ProjectId,AllowLearning=Settings.AllowLearning});
                 captureFailure=null;SetDiagnostic("Preparing");state=CaptureState.Connecting;
-                var chosen=NextHotwords();
-                engine!.UpdateSession(engine.Session with{Hotwords=chosen.Select(t=>new HotwordUsage(t.Text,t.Weight)).ToList(),EligibleHotwordCount=EligibleHotwords(),HotwordState=Settings.UseLexicon?"Prepared":"Disabled",Revision=engine.Session.Revision+1});
-                Status("正在准备麦克风…");return chosen;
+                lastResponse=lastVoice=lastProgress=Environment.TickCount64;voiceSeen=false;billedSeconds=0;firstAudioSeen=0;
+                Status("正在准备麦克风…");
             });
             var client=new BailianClient(ReceiveAsync);asr=client;
-            await OnActor(()=>{engine!.StartTask(client.TaskId,selected.Select(t=>t.Text).ToArray());lastResponse=lastVoice=Environment.TickCount64;voiceSeen=false;billedSeconds=0;});
-            // Local capture precedes the cloud handshake. BailianClient holds at most five seconds of PCM.
+            // Local capture precedes database refresh and the cloud handshake. Startup PCM
+            // is bounded to the same fifteen seconds as the overall startup deadline.
             var capture=await Task.Run(()=>new AudioCapture(Settings.DeviceId,client.AudioAsync,text=>AudioFault(client.TaskId,text),AudioLevel),startup.Token);audio=capture;
-            startup.Token.ThrowIfCancellationRequested();capture.Start();SetDiagnostic("MicrophoneReady");
+            startup.Token.ThrowIfCancellationRequested();capture.Start();SetDiagnostic("MicrophoneStarted");
             if(captureReleased)capture.RequestStop();
-            await OnActor(()=>Status("麦克风已就绪 · 正在连接，语音暂存本地。"));
+            await OnActor(()=>Status("麦克风已启动，正在准备识别；音频暂存本地。"));
+            await RefreshMemoryBeforeRecognitionAsync().WaitAsync(startup.Token);
+            var selected=await OnActor(()=>
+            {
+                var chosen=NextHotwords();
+                engine!.StartTask(client.TaskId,chosen.Select(t=>t.Text).ToArray());
+                engine.UpdateSession(engine.Session with{Hotwords=chosen.Select(t=>new HotwordUsage(t.Text,t.Weight)).ToList(),EligibleHotwordCount=EligibleHotwords(),HotwordState=!Settings.UseLexicon?"Disabled":MemoryAvailable?"Prepared":"Unavailable",Revision=engine.Session.Revision+1});
+                return chosen;
+            });
             int delay=(int)Math.Max(0,Settings.HoldMs-(Environment.TickCount64-pressedAt));
             if(delay>0)await Task.Delay(delay,startup.Token);
             startup.Token.ThrowIfCancellationRequested();
             if(!await targetReady.WaitAsync(startup.Token))throw new InvalidOperationException("无法确认可编辑的输入位置，未上传语音。");
             await client.StartAsync(Settings,Keys.BailianKey,selected,startup.Token);
             SetDiagnostic("Recognizing");
-            await OnActor(()=>engine!.UpdateSession(engine.Session with{HotwordState=Settings.UseLexicon?"Sent":"Disabled",Revision=engine.Session.Revision+1}));
-            await OnActor(()=>{state=captureReleased?CaptureState.Draining:CaptureState.Recording;Status(captureReleased?"录音已停止，正在收齐尾句…":"正在听 · 松开快捷键后输入，Esc 取消。");});
+            await OnActor(()=>engine!.UpdateSession(engine.Session with{HotwordState=!Settings.UseLexicon?"Disabled":MemoryAvailable?"Sent":"Unavailable",Revision=engine.Session.Revision+1}));
+            await OnActor(()=>{state=captureReleased?CaptureState.Draining:CaptureState.Recording;Status(captureReleased?"录音已停止，正在收齐尾句…":Settings.DictationOnly?"正在听 · 松开后查看并复制，Esc 取消。":"正在听 · 松开快捷键后输入，Esc 取消。");});
             return true;
         }
         catch(Exception e)
@@ -209,7 +229,7 @@ public sealed partial class AppController : IAsyncDisposable
             await OnActor(()=>{if(engine?.Session.HotwordState=="Prepared")engine.UpdateSession(engine.Session with{HotwordState="Failed",Revision=engine.Session.Revision+1});state=e is OperationCanceledException?CaptureState.Stopped:CaptureState.Faulted;Status(captureFailure??error);});
             return false;
         }
-        finally{startup?.Dispose();startup=null;captureGate.Release();}
+        finally{if(audio==null)Level?.Invoke(0);startup?.Dispose();startup=null;captureGate.Release();}
     }
     public void RequestStopCapture(){captureReleased=true;try{audio?.RequestStop();}catch{} }
     public async Task SetDeliveryAsync(string state,string reason,int accepted=0,string? turnId=null)
@@ -220,7 +240,7 @@ public sealed partial class AppController : IAsyncDisposable
             var current=engine.Session with{DeliveryState=state,DeliveryReason=reason,AcceptedInputEvents=accepted,Revision=engine.Session.Revision+1};
             engine.UpdateSession(current);Status(reason);return current;
         });
-        if(session!=null&&Settings.SaveMemory)await SaveSessionSafe(session);
+        if(session!=null&&CanSaveMemory)await SaveSessionSafe(session);
     }
     private void AudioFault(string taskId,string text)=>_=OnActor(()=>
     {
@@ -230,6 +250,7 @@ public sealed partial class AppController : IAsyncDisposable
     private void AudioLevel(float value)
     {
         Level?.Invoke(Math.Min(1,value*5));
+        if(Interlocked.Exchange(ref firstAudioSeen,1)==0)SetDiagnostic("MicrophoneReady");
         if(value>.006f){Interlocked.Exchange(ref lastVoice,Environment.TickCount64);voiceSeen=true;}
     }
     private Task ReceiveAsync(AsrEvent e)=>OnActor(()=>
@@ -240,6 +261,8 @@ public sealed partial class AppController : IAsyncDisposable
         if(e.Event=="connection-failed"){SetDiagnostic("AsrFailed",detail:e.Error);FailCapture(e.Error);_=StopAsync(true);return;}
         if(e.Event=="task-finished"){engine.SealTask(e.TaskId);Notify();return;}
         if(e.Event!="result-generated"||e.Heartbeat)return;
+        var previous=engine.Segments.FirstOrDefault(s=>s.TaskId==e.TaskId&&s.SentenceId==e.SentenceId);
+        if(previous?.AsrState!=AsrState.Confirmed&&(e.Final||e.Text.Length>0&&(previous==null||e.Text!=previous.PartialText)))lastProgress=Environment.TickCount64;
         engine.Receive(e,false,Settings.AutoParagraph,[],false);
         if(engine.Segments.Count>=50000||engine.Segments.Sum(s=>(long)(s.RawText.Length+s.FinalText.Length+s.PartialText.Length)*2)>64*1024*1024){Status("本次会话达到容量上限，停止后可导出并开启新会话。");_=StopAsync(false);}
         Notify();
@@ -263,7 +286,15 @@ public sealed partial class AppController : IAsyncDisposable
             if(asr==null){await OnActor(()=>{if(state!=CaptureState.Closing)state=requestedPause?CaptureState.Paused:CaptureState.Stopped;Notify();});return;}
             var client=asr;await OnActor(()=>{state=CaptureState.Draining;Status(captureFailure??"正在收齐尾部语音…");});
             if(emergency){audio?.Abort();client.Abort();gap="系统挂起，尾部可能不完整";}
-            else{if(audio!=null)await audio.StopAsync(budget.Token);await client.FinishAsync(budget.Token);}
+            else
+            {
+                if(audio!=null)
+                {
+                    await audio.StopAsync(budget.Token);
+                    if(audio.FailureMessage is {} failure){gap=failure;await OnActor(()=>FailCapture(failure));}
+                }
+                await client.FinishAsync(budget.Token);
+            }
         }
         catch(Exception){gap="连接或收尾超时，尾部可能不完整";CancelToken(startup);audio?.Abort();asr?.Abort();}
         finally
@@ -277,13 +308,13 @@ public sealed partial class AppController : IAsyncDisposable
             await OnActor(()=>
             {
                 if(task!=null)engine?.SealTask(task,gap);
-                if(task!=null&&engine!=null){engine.UpdateSession(engine.Session with{EndedAt=DateTimeOffset.UtcNow,Revision=engine.Session.Revision+1});if(Settings.SaveMemory)_=SaveSessionSafe(engine.Session);}
+                if(task!=null&&engine!=null){engine.UpdateSession(engine.Session with{EndedAt=DateTimeOffset.UtcNow,Revision=engine.Session.Revision+1});if(CanSaveMemory)_=SaveSessionSafe(engine.Session);}
                 state=requestedPause?CaptureState.Paused:CaptureState.Stopped;
                 Status(captureFailure??(gap.Length>0?gap:engine?.Pending>0?"录音已结束，正在完成剩余润色…":requestedPause?"已停止采集，确认文字已保留。":"本次录音已完成。"));
             });
             }
             if(billedSeconds>0){_=RecordUsage(new("asr",0,0,false,DateTimeOffset.UtcNow,billedSeconds));billedSeconds=0;}
-            if(gate)captureGate.Release();
+            Level?.Invoke(0);if(gate)captureGate.Release();
         }
     }
     public void Suspend(){CancelToken(startup);audio?.Abort();asr?.Abort();CancelToken(extraction);_=StopAsync(true,true);}
@@ -293,7 +324,7 @@ public sealed partial class AppController : IAsyncDisposable
         try{while(await clock.WaitForNextTickAsync(lifetime.Token))await OnActor(()=>
         {
             if(engine==null)return;int before=engine.Pending;bool gap=engine.Tick().Length>0;
-            bool finalWait=voiceSeen&&engine.Segments.Any(s=>s.AsrState==AsrState.Partial)&&Environment.TickCount64-Interlocked.Read(ref lastVoice)>Math.Max(20000,Settings.SilenceMs+10000);
+            bool finalWait=RecognitionTimeout.Stalled(Environment.TickCount64,lastResponse,lastProgress,Interlocked.Read(ref lastVoice),voiceSeen,engine.Segments.Any(s=>s.AsrState==AsrState.Partial),Settings.SilenceMs);
             if(state==CaptureState.Recording&&(gap||finalWait||Environment.TickCount64-lastResponse>20000)){InputInterrupted?.Invoke("识别等待超时，自动输入已取消，确认文字可复制。");Status("识别响应等待超时，正在保留已有结果并暂停。");_=StopAsync(true);}
             if(before!=engine.Pending)Notify();
         });}catch(OperationCanceledException){}
@@ -307,7 +338,7 @@ public sealed partial class AppController : IAsyncDisposable
             if(allowPolish&&!token.IsCancellationRequested&&Settings.UseLexicon)engine.ApplyConfirmedCorrections(approvedCorrections);
             var protectedTerms=Settings.UseLexicon?Lexicon.Matches(TranscriptText.Render(engine.Segments),terms,engine.Session.ProjectId):[];
             engine.UpdateSession(engine.Session with{ProtectedTermCount=protectedTerms.Length,Revision=engine.Session.Revision+1});
-            var work=engine.BeginWholePolish(allowPolish&&!token.IsCancellationRequested&&Settings.PolishEnabled&&!polishCircuit&&Keys.DeepSeekKey.Length>0,protectedTerms);
+            var work=engine.Segments.Count==0?null:engine.BeginWholePolish(allowPolish&&!token.IsCancellationRequested&&Settings.PolishEnabled&&!polishCircuit&&Keys.DeepSeekKey.Length>0,protectedTerms);
             if(work!=null){Interlocked.Increment(ref activePolish);Status("正在统一润色本次完整输入…");}else Notify();
             return (Source:(TranscriptEngine?)engine,Work:work,Key:Keys.DeepSeekKey,Prompt:Settings.EffectivePolishPrompt);
         });
@@ -325,14 +356,14 @@ public sealed partial class AppController : IAsyncDisposable
             }
         }
         var saved=await OnActor(()=>prepared.Source.Session);
-        if(Settings.SaveMemory)await SaveSessionSafe(saved);
-        await Repository.BarrierAsync();await ReloadTerms();
-        if(Settings.AutoExtract&&!token.IsCancellationRequested&&allowPolish)_=AutoExtractWhenReady();
+        if(CanSaveMemory)await SaveSessionSafe(saved);
+        await RefreshMemoryBeforeRecognitionAsync();
+        if(MemoryAvailable&&Settings.AutoExtract&&!token.IsCancellationRequested&&allowPolish)_=AutoExtractWhenReady();
     }
     public Task ParagraphAsync()=>OnActor(()=>{engine?.Paragraph();Status("将在下一个识别片段开始时换段。");});
     public Task EditAsync(string id,string text,string action="编辑")=>OnActor(()=>
     {
-        if(engine==null)return;engine.Edit(id,text,action,Settings.SaveMemory&&Settings.AllowLearning&&Settings.LearnCorrections&&engine.Session.AllowLearning);knowledgeEpoch++;CancelToken(extraction);Notify();
+        if(engine==null)return;engine.Edit(id,text,action,CanSaveMemory&&Settings.AllowLearning&&Settings.LearnCorrections&&engine.Session.AllowLearning);knowledgeEpoch++;CancelToken(extraction);Notify();
     });
     public Task UndoAsync(string id)=>EditAsync(id,"","撤销");
     public async Task<string> StopAndTextAsync(){await StopAsync(false);await FinishCurrentAsync();return TranscriptText.Render(await SnapshotAsync());}
@@ -468,7 +499,7 @@ public sealed partial class AppController : IAsyncDisposable
     public static string SafeError(Exception e)=>e is ProviderException?e.Message:e is OperationCanceledException or TimeoutException?"操作超时或已取消，确认文字已保留。":e is ArgumentException or InvalidOperationException or NotSupportedException?e.Message:"操作失败，请检查网络、设备或保存位置。";
     public async ValueTask DisposeAsync()
     {
-        CancelToken(extraction);CancelToken(generation);await StopAsync(false);await OnActor(()=>{engine?.FinishAll();state=CaptureState.Closing;});lifetime.Cancel();try{await timer;}catch{}
+        CancelToken(extraction);CancelToken(generation);await StopAsync(false);await OnActor(()=>{engine?.FinishAll();state=CaptureState.Closing;});lifetime.Cancel();try{await Task.WhenAll(timer,maintenance);}catch{}
         // Let cancelled dictionary work settle its usage before disposing the repository.
         if(await extractionGate.WaitAsync(TimeSpan.FromSeconds(2)))extractionGate.Release();
         try{await Repository.BarrierAsync().WaitAsync(TimeSpan.FromSeconds(2));await Repository.CheckpointAsync().WaitAsync(TimeSpan.FromSeconds(1));}catch{}

@@ -41,9 +41,11 @@ public static class BailianProtocol
         int id = sentence.GetProperty("sentence_id").GetInt32();
         bool heartbeat = id == 0 || (sentence.TryGetProperty("heartbeat", out var hb) && hb.ValueKind == JsonValueKind.True);
         if (heartbeat) return new(name, taskId, Heartbeat: true, Duration: duration);
+        bool knownBegin = sentence.TryGetProperty("begin_time", out var begin) && begin.ValueKind == JsonValueKind.Number && begin.TryGetInt64(out var b) && b >= 0;
+        long beginMs = knownBegin ? begin.GetInt64() : 0;
         return new(name, taskId, id, sentence.GetProperty("text").GetString() ?? "", sentence.GetProperty("sentence_end").GetBoolean(), false,
-            sentence.TryGetProperty("begin_time", out var begin) && begin.ValueKind == JsonValueKind.Number && begin.TryGetInt64(out var b) ? b : 0,
-            sentence.TryGetProperty("end_time", out var end) && end.ValueKind == JsonValueKind.Number && end.TryGetInt64(out var e) ? e : null, duration);
+            beginMs,
+            sentence.TryGetProperty("end_time", out var end) && end.ValueKind == JsonValueKind.Number && end.TryGetInt64(out var e) && e >= 0 ? e : null, duration, BeginTimeKnown: knownBegin);
     }
     private static string FailureText(JsonElement header)
     {
@@ -60,7 +62,7 @@ public sealed class BailianClient : IAsyncDisposable
     private readonly WebSocket socket;
     private readonly Func<Uri,string,CancellationToken,Task> connect;
     private ProviderException? failure;
-    private readonly Channel<Message> outgoing = Channel.CreateBounded<Message>(new BoundedChannelOptions(50) { SingleReader = true, FullMode = BoundedChannelFullMode.Wait });
+    private readonly Channel<Message> outgoing = Channel.CreateBounded<Message>(new BoundedChannelOptions(151) { SingleReader = true, FullMode = BoundedChannelFullMode.Wait });
     private readonly CancellationTokenSource lifetime = new();
     private readonly TaskCompletionSource started = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource finished = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -68,6 +70,7 @@ public sealed class BailianClient : IAsyncDisposable
     private readonly Func<AsrEvent, Task> receive;
     private volatile bool ending;
     private int bufferedPcm;
+    private int liveBudget;
     public string TaskId { get; } = JsonCodec.Id();
     public string? FailureMessage => Volatile.Read(ref failure)?.Message;
     public BailianClient(Func<AsrEvent, Task> receive)
@@ -131,7 +134,8 @@ public sealed class BailianClient : IAsyncDisposable
         }
         if (ending) throw new InvalidOperationException("任务正在结束。");
         if (bytes.Length == 0 || bytes.Length % 2 != 0 || bytes.Length > 3200) throw new ArgumentException("PCM 块长度不正确。");
-        if (Interlocked.Add(ref bufferedPcm,bytes.Length)>160000){Interlocked.Add(ref bufferedPcm,-bytes.Length);throw new ProviderException("连接或上传积压超过 5 秒，已停止采集。");}
+        int limit=Volatile.Read(ref liveBudget)==0?480000:160000;
+        if (Interlocked.Add(ref bufferedPcm,bytes.Length)>limit){Interlocked.Add(ref bufferedPcm,-bytes.Length);throw new ProviderException(limit==480000?"连接前音频缓存超过 15 秒，已停止采集。":"上传积压超过 5 秒，已停止采集。");}
         if (!outgoing.Writer.TryWrite(new(bytes, WebSocketMessageType.Binary)))
         {
             Interlocked.Add(ref bufferedPcm,-bytes.Length);
@@ -161,7 +165,16 @@ public sealed class BailianClient : IAsyncDisposable
     }
     private async Task SendLoop()
     {
-        try { await started.Task.WaitAsync(lifetime.Token); await foreach (var message in outgoing.Reader.ReadAllAsync(lifetime.Token)) {try{await socket.SendAsync(message.Bytes.AsMemory(), message.Type, true, lifetime.Token).ConfigureAwait(false);}finally{if(message.Type==WebSocketMessageType.Binary)Interlocked.Add(ref bufferedPcm,-message.Bytes.Length);}} }
+        try
+        {
+            await started.Task.WaitAsync(lifetime.Token);
+            if(Volatile.Read(ref bufferedPcm)<=160000)Volatile.Write(ref liveBudget,1);
+            await foreach(var message in outgoing.Reader.ReadAllAsync(lifetime.Token))
+            {
+                try{await socket.SendAsync(message.Bytes.AsMemory(),message.Type,true,lifetime.Token).ConfigureAwait(false);}
+                finally{if(message.Type==WebSocketMessageType.Binary&&Interlocked.Add(ref bufferedPcm,-message.Bytes.Length)<=160000)Volatile.Write(ref liveBudget,1);}
+            }
+        }
         catch (Exception e) { Fail(e); }
     }
     private async Task ReceiveLoop()

@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Runtime.InteropServices;
 using System.Threading.Channels;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
@@ -11,7 +12,7 @@ public record AudioDevice(string Id, string Name);
 public sealed class AudioCapture : IAsyncDisposable
 {
     private record Block(byte[] Buffer, int Count);
-    private readonly WasapiCapture capture;
+    private readonly NativeWasapiCapture capture;
     private readonly MMDevice device;
     private readonly Channel<Block> queue = Channel.CreateBounded<Block>(new BoundedChannelOptions(128) { SingleReader = true, FullMode = BoundedChannelFullMode.Wait });
     private readonly CancellationTokenSource abort = new();
@@ -23,7 +24,6 @@ public sealed class AudioCapture : IAsyncDisposable
     private int queuedBytes, faulted;
     private int stopRequested;
     private readonly object captureSync=new();
-    private bool captureStarted;
     private readonly PcmDecoder decoder;
     private readonly int maxQueuedBytes;
     public string FormatDescription=>decoder.Format.ToString();
@@ -38,8 +38,12 @@ public sealed class AudioCapture : IAsyncDisposable
         EndpointId=device.ID;
         try
         {
-            capture = new WasapiCapture(device, true, 100);
-            var format=capture.WaveFormat;
+            capture = new NativeWasapiCapture(device,Data,e=>
+            {
+                if(e!=null&&!abort.IsCancellationRequested)Fail(e is AudioCaptureIntegrityException?e.Message:"麦克风采集已中断，请重新选择设备。",e,"Capture");
+                queue.Writer.TryComplete();stopped.TrySetResult();
+            });
+            var format=capture.Format;
             var encoding=format.Encoding;
             if(format is WaveFormatExtensible x)
             {
@@ -50,14 +54,8 @@ public sealed class AudioCapture : IAsyncDisposable
             decoder=new(new(format.SampleRate,format.Channels,format.BitsPerSample,format.BlockAlign,encoding==WaveFormatEncoding.IeeeFloat?PcmEncoding.Float:PcmEncoding.Integer));
             maxQueuedBytes=checked(format.SampleRate*format.BlockAlign*2);
         }
-        catch{capture?.Dispose();device.Dispose();throw;}
+        catch{if(capture!=null)capture.DisposeAsync().AsTask().GetAwaiter().GetResult();device.Dispose();throw;}
         this.send=send;this.fault=fault;this.level=level;
-        capture.DataAvailable+=Data;
-        capture.RecordingStopped+=(_,e)=>
-        {
-            if(e.Exception!=null&&!abort.IsCancellationRequested)Fail("麦克风采集已中断，请重新选择设备。",e.Exception,"Capture");
-            queue.Writer.TryComplete();stopped.TrySetResult();
-        };
     }
     public static List<AudioDevice> Devices()
     {
@@ -72,19 +70,21 @@ public sealed class AudioCapture : IAsyncDisposable
             if(processing!=null)throw new InvalidOperationException("麦克风已经启动。");
             // Format is validated before any callback. The worker never reads mutable device state.
             processing=Task.Run(Process);
-            try{capture.StartRecording();captureStarted=true;if(stopRequested!=0)capture.StopRecording();}
+            try{if(stopRequested!=0)capture.RequestStop();capture.Start();}
             catch{Abort();stopped.TrySetResult();throw;}
         }
     }
-    private void Data(object? sender,WaveInEventArgs e)
+    private void Data(IntPtr pointer,int frames,bool silent)
     {
         if(abort.IsCancellationRequested||Volatile.Read(ref faulted)!=0)return;
-        int bytes=e.BytesRecorded;
+        int bytes=checked(frames*decoder.Format.BlockAlign);
         if(bytes==0)return;
-        if(bytes<0||bytes>e.Buffer.Length||bytes%decoder.Format.BlockAlign!=0){Fail("音频块没有按样本对齐，录音已暂停。");return;}
+        if(bytes<0||bytes%decoder.Format.BlockAlign!=0){Fail("音频块没有按样本对齐，录音已暂停。");return;}
         int total=Interlocked.Add(ref queuedBytes,bytes);
         if(total>maxQueuedBytes){Interlocked.Add(ref queuedBytes,-bytes);Fail("音频处理积压超过 2 秒，已暂停。中断区间不计为完整识别。");return;}
-        byte[] copy=ArrayPool<byte>.Shared.Rent(bytes);Buffer.BlockCopy(e.Buffer,0,copy,0,bytes);
+        byte[] copy=ArrayPool<byte>.Shared.Rent(bytes);
+        try{if(silent)Array.Clear(copy,0,bytes);else Marshal.Copy(pointer,copy,0,bytes);}
+        catch{Interlocked.Add(ref queuedBytes,-bytes);ArrayPool<byte>.Shared.Return(copy,true);throw;}
         if(!queue.Writer.TryWrite(new(copy,bytes))){Interlocked.Add(ref queuedBytes,-bytes);ArrayPool<byte>.Shared.Return(copy,true);Fail("音频处理队列已满，录音已暂停。");}
     }
     private void Fail(string text,Exception? error=null,string stage="Capture")
@@ -92,7 +92,9 @@ public sealed class AudioCapture : IAsyncDisposable
         if(Interlocked.Exchange(ref faulted,1)!=0)return;
         FailureMessage=text;
         Diagnostic=$"stage={stage}; format={FormatDescription}; exception={error?.GetType().Name??"None"}; hresult=0x{error?.HResult??0:X8}; pcm_samples={SamplesSent}";
-        _=Task.Run(()=>fault(text));
+        // Queue the controller's failure before publishing the stopped event. Delaying
+        // this notification on another worker could make an incomplete turn look done.
+        try{fault(text);}catch{}
     }
     private async Task Process()
     {
@@ -139,7 +141,7 @@ public sealed class AudioCapture : IAsyncDisposable
         queue.Writer.TryComplete();
         if(processing!=null)await processing.WaitAsync(token);
     }
-    public void RequestStop(){lock(captureSync){if(Interlocked.Exchange(ref stopRequested,1)==0&&captureStarted)capture.StopRecording();}}
-    public void Abort(){Interlocked.Exchange(ref stopRequested,1);abort.Cancel();try{capture.StopRecording();}catch{}queue.Writer.TryComplete();}
-    public async ValueTask DisposeAsync(){Abort();try{if(processing!=null)await processing.WaitAsync(TimeSpan.FromSeconds(1));}catch{}capture.Dispose();device.Dispose();abort.Dispose();}
+    public void RequestStop(){if(Interlocked.Exchange(ref stopRequested,1)==0)capture.RequestStop();}
+    public void Abort(){Interlocked.Exchange(ref stopRequested,1);abort.Cancel();capture.Abort();queue.Writer.TryComplete();}
+    public async ValueTask DisposeAsync(){Abort();try{if(processing!=null)await processing.WaitAsync(TimeSpan.FromSeconds(1));}catch{}await capture.DisposeAsync();device.Dispose();abort.Dispose();}
 }

@@ -32,9 +32,10 @@ public partial class MainWindow : Window
         controller.Updated+=snapshot=>Volatile.Write(ref pending,snapshot);
         controller.TermsUpdated+=()=>UI(RefreshTerms);controller.Level+=v=>Volatile.Write(ref level,v);
         controller.Message+=m=>UI(()=>StatusText.Text=m);
-        controller.CorrectionsUpdated+=()=>UI(async()=>{if(!shuttingDown)await Safe(RefreshCorrections);});
+        controller.CorrectionsUpdated+=()=>UI(async()=>{if(!shuttingDown&&controller.MemoryAvailable)await Safe(RefreshCorrections);});
         controller.Extracting+=v=>UI(()=>{ExtractButton.IsEnabled=!v;AllHistoryButton.IsEnabled=HistoryExtractAllButton.IsEnabled=!v;ExtractButton.Content=v?"正在整理…":"整理当前会话词条";});
         render.Tick+=(_,_)=>Render();render.Start();Closing+=ClosingWindow;
+        Loaded+=(_,_)=>{var area=SystemParameters.WorkArea;MinHeight=Math.Min(MinHeight,Math.Max(400,area.Height-24));Height=Math.Min(Height,Math.Max(400,area.Height-24));};
         SystemEvents.PowerModeChanged+=PowerChanged;SystemEvents.SessionSwitch+=SessionChanged;
     }
     private void UI(Action fn){if(!Dispatcher.HasShutdownStarted)Dispatcher.BeginInvoke(fn);}
@@ -42,13 +43,17 @@ public partial class MainWindow : Window
     {
         try
         {
-            await FillSettings();ProjectsRefresh();RefreshTerms();await RefreshCorrections();CreateTray();
+            CreateTray();
+            try{await FillSettings();}catch(Exception e){StatusText.Text=AppController.SafeError(e);}
+            ProjectsRefresh();RefreshTerms();
+            if(controller.MemoryAvailable)
+                try{await RefreshCorrections();}catch(Exception e){CorrectionStatus.Text="纠错记录暂不可用："+AppController.SafeError(e);}
             ptt=new(controller);ptt.Notice+=text=>UI(()=>{overlay.Update(text,dismiss:true);StatusText.Text=text;});
-            ptt.Listening+=active=>UI(()=>{if(active)overlay.Update("准备麦克风…");if(tray!=null)tray.Text=active?"语音输入法 · 正在录音":"语音输入法 · 按住说话";});
+            ptt.Listening+=active=>UI(()=>{if(active)overlay.BeginTurn();});
             await ptt.InitializeAsync();
             devices=new DeviceWatcher((id,isDefault)=>{if(ptt.Busy&&((isDefault&&controller.Settings.DeviceId=="")||(!isDefault&&controller.ActiveDeviceId==id))){ptt.Cancel("麦克风设备已变化，本轮停止，确认文字可复制。");controller.RequestStopCapture();}});ready=true;
             if(controller.Keys.BailianKey.Length==0)Tabs.SelectedIndex=3;
-            else{Hide();tray?.ShowBalloonTip(2500,"语音输入法已就绪","在文本框中按住右侧 Ctrl 说话，松开输入。",Forms.ToolTipIcon.Info);}
+            else if(controller.MemoryAvailable){Hide();tray?.ShowBalloonTip(2500,"语音输入法已就绪",controller.Settings.DictationOnly?$"按住 {UiPresentation.HotkeyName(controller.Settings.Hotkey)} 听写，完成后复制正文。":$"在文本框中按住 {UiPresentation.HotkeyName(controller.Settings.Hotkey)} 说话，松开输入。",Forms.ToolTipIcon.Info);}
             pending=await controller.SnapshotAsync();
         }
         catch(Exception e){ready=true;StatusText.Text=AppController.SafeError(e);MessageBox.Show(this,AppController.SafeError(e),"启动",MessageBoxButton.OK,MessageBoxImage.Warning);}
@@ -57,17 +62,16 @@ public partial class MainWindow : Window
     {
         ProjectBox.IsEnabled=!ManagementBusy;
         SessionLearningBox.IsEnabled=!ManagementBusy&&SessionLearningBox.Tag is string;
-        var s=Interlocked.Exchange(ref pending,null);MicLevel.Value=Volatile.Read(ref level);if(s==null)return;
-        string body=TranscriptText.Render(s);if(OutputBox.Text!=body)OutputBox.Text=body;
+        var s=Interlocked.Exchange(ref pending,null);if(s!=null)lastSnapshot=s;RefreshLiveState();if(s==null)return;
+        string body=TranscriptText.Render(s);if(OutputBox.Text!=body){bool follow=OutputBox.VerticalOffset>=Math.Max(0,OutputBox.ExtentHeight-OutputBox.ViewportHeight)-3;OutputBox.Text=body;if(follow)OutputBox.ScrollToEnd();}
         string preview=string.Join(" ",s.Segments.Where(x=>x.AsrState==AsrState.Partial).Select(x=>x.PartialText));
-        PreviewBox.Text=preview;BodyCount.Text=$"本轮正文 · {JsonCodec.Count(body)} 字";StatusText.Text=s.Status;
-        StateLabel.Text=s.State switch{CaptureState.Connecting=>"准备 / 连接",CaptureState.Recording=>"正在听",CaptureState.Draining=>"尾句处理中",CaptureState.Faulted=>"需处理",_=>ptt?.Busy==true?"整理 / 输入":ptt?.Enabled==false?"快捷键已暂停":"按住说话已就绪"};
+        PreviewBox.Text=preview;PreviewBox.ScrollToEnd();BodyCount.Text=$"本轮正文 · {JsonCodec.Count(body)} 字";StatusText.Text=s.Status;
         LexiconLiveStatus.Text=s.Session is {} session?$"本轮热词 {session.Hotwords.Count}/{session.EligibleHotwordCount} · {HotwordStateText(session.HotwordState)} · 保护词 {session.ProtectedTermCount} · 纠正 {session.AppliedCorrectionCount} 处":"尚无本轮词库记录";
         SaveLabel.Text=$"待润色 {s.Pending} · 未确认 {s.Segments.Count(x=>x.AsrState==AsrState.Unresolved)} · 未保存 {s.Unsaved} · {s.Session?.DeliveryReason}";
         updatingLearning=true;
         SessionLearningBox.Tag=s.Session?.Id;SessionLearningBox.IsChecked=s.Session?.AllowLearning==true;SessionLearningBox.IsEnabled=s.Session!=null&&!ManagementBusy;
         updatingLearning=false;
-        if(ptt?.Busy==true)overlay.Update(s.Status,preview.Length>0?JsonCodec.Take(preview,120):JsonCodec.Take(body,120));
+        if(ptt?.Busy==true&&s.Session?.DeliveryState is "Pending" or "Sending")overlay.Update(s.Status,UiPresentation.LatestText(preview.Length>0?preview:body));
     }
     private void CreateTray()
     {
@@ -75,6 +79,7 @@ public partial class MainWindow : Window
         using(var embedded=new System.Drawing.Icon(stream,32,32))trayIcon=(System.Drawing.Icon)embedded.Clone();
         tray=new Forms.NotifyIcon{Icon=trayIcon,Text="语音输入法 · 按住说话",Visible=true};var menu=new Forms.ContextMenuStrip();
         menu.Items.Add("打开管理",null,(_,_)=>UI(OpenManager));menu.Items.Add("启用 / 暂停按住说话",null,(_,_)=>UI(()=>ptt?.SetEnabled(ptt?.Enabled!=true)));
+        dictationMenu=new Forms.ToolStripMenuItem("仅听写，完成后手动复制"){Checked=controller.Settings.DictationOnly};dictationMenu.Click+=(_,_)=>UI(async()=>await Safe(()=>SetDictationMode(!controller.Settings.DictationOnly)));menu.Items.Add(dictationMenu);
         menu.Items.Add("复制最近结果",null,(_,_)=>UI(async()=>await Safe(CopyCurrent)));menu.Items.Add("设置",null,(_,_)=>UI(()=>{OpenManager();Tabs.SelectedIndex=3;}));
         menu.Items.Add(new Forms.ToolStripSeparator());menu.Items.Add("退出",null,(_,_)=>UI(()=>{exiting=true;Close();}));tray.ContextMenuStrip=menu;tray.DoubleClick+=(_,_)=>UI(OpenManager);
     }
@@ -102,7 +107,7 @@ public partial class MainWindow : Window
         });
     }
     private async void NewProject_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>{EnsureIdle();string? name=Dialogs.Ask(this,"新建项目","项目名称");if(name!=null){await controller.CreateProjectAsync(name);ProjectsRefresh();}});
-    private void Start_Click(object sender,RoutedEventArgs e){ptt?.SetEnabled(true);StatusText.Text="请在其他应用的文本框中按住说话键。";}
+    private void Start_Click(object sender,RoutedEventArgs e){if(ptt==null){StatusText.Text="快捷键未启动，请检查启动提示后重新打开程序。";return;}ptt.SetEnabled(true);StatusText.Text=controller.Settings.DictationOnly?"请按住说话键听写，完成后复制正文。":"请在其他应用的文本框中按住说话键。";}
     private void Pause_Click(object sender,RoutedEventArgs e)=>ptt?.SetEnabled(false);
     private void Stop_Click(object sender,RoutedEventArgs e)=>ptt?.Cancel();
     private async void Paragraph_Click(object sender,RoutedEventArgs e)=>await Safe(()=>controller.ParagraphAsync());
@@ -206,7 +211,9 @@ public partial class MainWindow : Window
     private void SessionChanged(object sender,SessionSwitchEventArgs e){if(e.Reason is SessionSwitchReason.SessionLock or SessionSwitchReason.SessionLogoff or SessionSwitchReason.ConsoleDisconnect or SessionSwitchReason.RemoteDisconnect){ptt?.Cancel("Windows 会话已锁定或断开，自动输入已取消。");controller.Suspend();}}
     private async void ClosingWindow(object? sender,CancelEventArgs e)
     {
-        if(closed)return;e.Cancel=true;if(!exiting&&controller.Settings.CloseToTray){Hide();return;}if(shuttingDown)return;shuttingDown=true;ready=false;generationCancel?.Cancel();promptPreviewCancel?.Cancel();controller.CancelGeneration();controller.CancelExtraction();
+        if(closed)return;e.Cancel=true;if(!exiting&&controller.Settings.CloseToTray&&tray!=null){Hide();return;}if(shuttingDown)return;
+        if(controller.FailedSaveCount>0&&MessageBox.Show(this,$"仍有 {controller.FailedSaveCount} 项保存失败。退出后未保存的部分可能无法恢复。\n选择“取消”可返回重试保存、复制或导出正文；确定继续退出？","仍有正文未保存",MessageBoxButton.OKCancel,MessageBoxImage.Warning)!=MessageBoxResult.OK){exiting=false;return;}
+        shuttingDown=true;ready=false;generationCancel?.Cancel();promptPreviewCancel?.Cancel();controller.CancelGeneration();controller.CancelExtraction();
         ptt?.SetEnabled(false);StatusText.Text="正在退出并保存…";
         try{async Task Clean(){if(ptt!=null)await ptt.DisposeAsync();await controller.DisposeAsync();}await Clean().WaitAsync(TimeSpan.FromSeconds(12));}catch{}
         search?.Cancel();render.Stop();SystemEvents.PowerModeChanged-=PowerChanged;SystemEvents.SessionSwitch-=SessionChanged;tray?.Dispose();trayIcon?.Dispose();devices?.Dispose();overlay.Close();closed=true;System.Windows.Application.Current.Shutdown();

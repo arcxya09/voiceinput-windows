@@ -5,6 +5,7 @@ namespace RealtimeTranscription.Core;
 
 public record ConfirmedCorrectionEdit(int Start, int Length, string Replacement, string TermId);
 public record ConfirmedCorrectionResult(string Text, IReadOnlyList<ConfirmedCorrectionEdit> Edits);
+public record CorrectionMappingStatus(TermData Term, bool Applicable, string Reason);
 public record AppliedCorrectionOccurrence(int Start, string Text);
 public record AppliedCorrectionRecord(string SegmentId, string CorrectedText, List<AppliedCorrectionOccurrence> Occurrences);
 
@@ -16,8 +17,9 @@ public record AppliedCorrectionRecord(string SegmentId, string CorrectedText, Li
 public static class ConfirmedCorrections
 {
     public const int MaxRecordedOccurrences = 4096;
-    private static readonly Regex Numbers = new(@"[+\-−±]?(?:[0-9０-９]+(?:[.．][0-9０-９]+)?|[.．][0-9０-９]+)(?:[eE][+\-]?[0-9]+)?|[零〇一二三四五六七八九十百千万亿两]+", RegexOptions.Compiled, TimeSpan.FromMilliseconds(100));
+    private static readonly Regex Numbers = new(@"(?:(?:正|负|負|[+\-−±])[ \t]*)?(?:(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)(?:[eE][+\-−]?[0-9]+)?|[零〇一二三四五六七八九十百千万亿两]+(?:点[零〇一二三四五六七八九]+)?)", RegexOptions.Compiled, TimeSpan.FromMilliseconds(100));
     private static readonly Regex Relations = new(@"[不没无未非否]|n['’]t(?![A-Za-z])|(?<![A-Za-z])(?:cannot|not|no|never|without|neither|nor)(?![A-Za-z])", RegexOptions.Compiled | RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(100));
+    private static readonly Regex Quantities = new(@"大于等于|小于等于|不小于|不大于|不少于|不多于|大于|小于|等于|至少|至多|超过|低于|高于|正比|反比|增加|减少|升高|降低|上升|下降|平方|立方|次方|乘以|除以|加上|减去|分之|[正负負+\-−±<>≤≥≠=≈≃≲≳×÷^→←↔]|(?<![A-Za-z])(?:less than|greater than|at least|at most|positive|negative|squared|cubed)(?![A-Za-z])", RegexOptions.Compiled | RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(100));
     private static readonly Regex Units = new(@"摄氏度|华氏度|千米|厘米|毫米|微米|纳米|公斤|千克|毫克|微克|千瓦|兆瓦|毫瓦|千伏|毫伏|毫安|微安|毫秒|微秒|纳秒|小时|分钟|百分之|摄氏|华氏|欧姆|帕斯卡|电子伏|伏特|安培|瓦特|赫兹|开尔文|毫升|(?<=[零〇一二三四五六七八九十百千万亿两0-9０-９])[ \t]*(?:米|秒|度|伏|安|瓦|升|克|吨)|(?<![A-Za-z])(?:[pnumkMGTμµ]?(?:eV|Hz|Pa|Gy|Sv|W|V|A|K|J|s|m|g|b)|kg|mol|cd|rad|deg|rpm|cm|mm|km|ms|us|ns)(?![A-Za-z])|°[CF]|[%％℃℉Ω°]", RegexOptions.Compiled, TimeSpan.FromMilliseconds(100));
 
     private static string[] Signature(Regex pattern, string text) => pattern.Matches(text).Select(m => m.Value).ToArray();
@@ -32,36 +34,49 @@ public static class ConfirmedCorrections
             string before = original.Normalize(NormalizationForm.FormKC), after = corrected.Normalize(NormalizationForm.FormKC);
             return Signature(Numbers, before).SequenceEqual(Signature(Numbers, after))
                 && Signature(Relations, before).SequenceEqual(Signature(Relations, after), StringComparer.OrdinalIgnoreCase)
+                && Signature(Quantities, before).SequenceEqual(Signature(Quantities, after), StringComparer.OrdinalIgnoreCase)
                 && Signature(Units, before).SequenceEqual(Signature(Units, after));
         }
         catch (RegexMatchTimeoutException) { return false; }
     }
 
-    public static ConfirmedCorrectionResult Apply(string raw, IReadOnlyList<TermData> approvedTerms, string projectId)
+    public static IReadOnlyList<CorrectionMappingStatus> AnalyzeMappings(IReadOnlyList<TermData> terms, string projectId)
     {
-        if (raw.Length == 0 || raw.Length > 60000 || approvedTerms.Count == 0) return new(raw, []);
-        // Conflicting project/global definitions are ambiguous and need user review.
-        var mappings = approvedTerms.Where(t => t.State == TermState.Enabled && (t.Scope == "*" || t.Scope == projectId)
-                && IsSafePair(t.Alias, t.Text))
+        var initial = terms.Select(t => new CorrectionMappingStatus(t, false,
+            t.State != TermState.Enabled ? "对应词条未启用" : t.Scope != "*" && t.Scope != projectId ? "不属于当前项目"
+            : !IsSafePair(t.Alias, t.Text) ? "写法不适合自动纠正，或涉及数字、单位、否定及数量关系变化" : "")).ToArray();
+        var usable = initial.Where(s => s.Reason.Length == 0).Select(s => s.Term).ToArray();
+        var ambiguous = usable.GroupBy(t => t.Alias, StringComparer.Ordinal)
+            .Where(g => g.Select(t => t.Text).Distinct(StringComparer.Ordinal).Count() > 1).Select(g => g.Key).ToHashSet(StringComparer.Ordinal);
+        var mappings = usable.Where(t => !ambiguous.Contains(t.Alias))
             .GroupBy(t => t.Alias, StringComparer.Ordinal)
-            .Where(g => g.Select(t => t.Text).Distinct(StringComparer.Ordinal).Count() == 1)
             .Select(g => g.OrderBy(t => t.Scope == projectId ? 0 : 1).ThenBy(t => t.Id, StringComparer.Ordinal).First())
             .OrderBy(t => t.Alias, StringComparer.Ordinal).ToArray();
-        if (mappings.Length == 0) return new(raw, []);
-
-        // A target that could feed another mapping makes both mappings unsafe to apply.
-        // This also rejects cycles and self-expanding mappings such as AB -> ABC.
         var conflicting = new HashSet<string>(StringComparer.Ordinal);
         var byAlias = mappings.ToDictionary(t => t.Alias, StringComparer.Ordinal);
-        int maxAliasLength = mappings.Max(t => t.Alias.Length);
+        int maxAliasLength = mappings.Select(t => t.Alias.Length).DefaultIfEmpty(0).Max();
         foreach (var a in mappings)
             for (int start = 0; start < a.Text.Length; start++)
                 for (int length = 2; length <= Math.Min(maxAliasLength, a.Text.Length - start); length++)
                     if (byAlias.TryGetValue(a.Text.Substring(start, length), out var b) && WordBoundary(a.Text, start, start + length))
                     { conflicting.Add(a.Alias); conflicting.Add(b.Alias); }
+        return initial.Select(s => s.Reason.Length > 0 ? s : ambiguous.Contains(s.Term.Alias)
+            ? s with { Reason = "同一旧写法对应多个标准词，需先解决冲突" }
+            : conflicting.Contains(s.Term.Alias) ? s with { Reason = "与已启用规则形成替换链、循环或自扩展，需先调整映射" }
+            : s with { Applicable = true }).ToArray();
+    }
+
+    public static ConfirmedCorrectionResult Apply(string raw, IReadOnlyList<TermData> approvedTerms, string projectId)
+    {
+        if (raw.Length == 0 || raw.Length > 60000 || approvedTerms.Count == 0) return new(raw, []);
+        // Use the same analysis as the vocabulary UI; a term id may have several approved aliases.
+        var mappings = AnalyzeMappings(approvedTerms, projectId).Where(s => s.Applicable).Select(s => s.Term)
+            .GroupBy(t => t.Alias, StringComparer.Ordinal)
+            .Select(g => g.OrderBy(t => t.Scope == projectId ? 0 : 1).ThenBy(t => t.Id, StringComparer.Ordinal).First()).ToArray();
+        if (mappings.Length == 0) return new(raw, []);
         var protectedSpans = ProtectedSpans(raw);
         var matches = new List<ConfirmedCorrectionEdit>();
-        foreach (var term in mappings.Where(t => !conflicting.Contains(t.Alias)))
+        foreach (var term in mappings)
         {
             int start = 0;
             while ((start = raw.IndexOf(term.Alias, start, StringComparison.Ordinal)) >= 0)
@@ -111,13 +126,14 @@ public static class ConfirmedCorrections
 
     // Scan the whole turn, not individual ASR sentences: a quote or code block may span them.
     // An unmatched opener protects the remaining text conservatively.
-    private static bool[] ProtectedSpans(string text)
+    internal static bool[] ProtectedSpans(string text)
     {
         var mask = new bool[text.Length];
         for (int i = 0; i < text.Length; i++)
         {
             int end = -1;
-            if (text[i] is '`' or '~')
+            if (Escaped(text, i)) continue;
+            if (text[i] is '`' or '~' or '$')
             {
                 int run = 1;
                 while (i + run < text.Length && text[i + run] == text[i]) run++;

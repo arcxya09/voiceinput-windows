@@ -42,6 +42,7 @@ public record AppSettings
     public int SilenceMs { get; init; } = 2500;
     public int DailyExtractionTokens { get; init; } = 50000;
     public string Hotkey { get; init; } = "RightCtrl";
+    public bool DictationOnly { get; init; }
     public int HoldMs { get; init; } = 150;
     public int MaxHoldSeconds { get; init; } = 600;
     public void Validate()
@@ -170,7 +171,7 @@ public record TermData
     }
 }
 public record UsageData(string Purpose, long InputTokens, long OutputTokens, bool Unknown, DateTimeOffset At, double AudioSeconds = 0);
-public record AsrEvent(string Event, string TaskId, int SentenceId = 0, string Text = "", bool Final = false, bool Heartbeat = false, long BeginMs = 0, long? EndMs = null, double? Duration = null, string Error = "");
+public record AsrEvent(string Event, string TaskId, int SentenceId = 0, string Text = "", bool Final = false, bool Heartbeat = false, long BeginMs = 0, long? EndMs = null, double? Duration = null, string Error = "", bool BeginTimeKnown = true);
 public record TranscriptSnapshot(SessionData? Session, IReadOnlyList<SegmentData> Segments, CaptureState State, int Pending, int Unsaved, string Status);
 
 public static class TranscriptText

@@ -39,14 +39,14 @@ public sealed partial class MemoryRepository
                 if(text!=snapshot.RawText)throw new InvalidOperationException("历史原文版本已变化，请重新整理。");
             }
             var existing=new List<TermData>();using(var cmd=Command(c,"SELECT payload FROM terms WHERE scope=$s",("$s",current.ProjectId)))using(var r=cmd.ExecuteReader())while(r.Read())existing.Add(Unpack<TermData>((byte[])r[0]));
-            var blocked=new HashSet<string>(StringComparer.OrdinalIgnoreCase);using(var cmd=Command(c,"SELECT payload FROM suppression WHERE scope=$s",("$s",current.ProjectId)))using(var r=cmd.ExecuteReader())while(r.Read())blocked.Add(Unpack<string>((byte[])r[0]));
+            var blocked=new HashSet<string>(StringComparer.Ordinal);using(var cmd=Command(c,"SELECT payload FROM suppression WHERE scope=$s",("$s",current.ProjectId)))using(var r=cmd.ExecuteReader())while(r.Read())blocked.Add(Unpack<string>((byte[])r[0]));
             int added=0,updated=0,skipped=0;
             foreach(var candidate in candidates)
             {
                 token.ThrowIfCancellationRequested();candidate.Validate();
                 if(candidate.Scope!=current.ProjectId||candidate.Evidence.Count==0||candidate.Evidence.Any(e=>e.SessionId!=current.Id||!slices.Any(s=>s.Segment.Id==e.SegmentId&&s.Segment.SourceRevision==e.SourceRevision&&s.Segment.EditRevision==e.EditRevision&&s.Start==e.SliceStart&&s.Segment.RawText.Contains(e.Quote,StringComparison.Ordinal)&&e.Quote.Contains(candidate.Text,StringComparison.Ordinal))))
                     throw new InvalidOperationException("词条来源校验失败，未保存该批。");
-                var old=existing.FirstOrDefault(t=>string.Equals(t.Key,candidate.Key,StringComparison.OrdinalIgnoreCase));
+                var old=existing.FirstOrDefault(t=>string.Equals(t.Key,candidate.Key,StringComparison.Ordinal));
                 if(blocked.Contains(candidate.Key)||old?.State==TermState.Disabled){skipped++;continue;}
                 if(old==null&&existing.Count>=5000)throw new InvalidOperationException("来源项目词库已达 5,000 个上限。已完成的批次保留；清理词库后可继续。");
                 var ready=old==null?candidate with{State=TermState.Candidate,Origin="Extracted"}:old with{Evidence=old.Evidence.Concat(candidate.Evidence).DistinctBy(e=>(e.SegmentId,e.SourceRevision,e.EditRevision,e.SliceStart)).ToList(),Revision=old.Revision+1};

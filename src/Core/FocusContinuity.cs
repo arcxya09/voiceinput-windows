@@ -46,3 +46,97 @@ public sealed class BoundedInputQuery
         catch (OperationCanceledException) { return null; }
     }
 }
+
+public static class InputSafety
+{
+    public const int BatchCharacters = 128;
+    public static bool HasOtherModifier(int trigger, Func<int, bool> down)
+        => new[] { 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0x5b, 0x5c }.Any(key => key != trigger && down(key));
+
+    // Every batch may require three bounded accessibility queries and two short retries.
+    // A slow, healthy provider must not consume a budget based only on typing speed.
+    public static long DeliveryBudgetMilliseconds(int characters)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(characters);
+        long batches = ((long)characters + BatchCharacters - 1) / BatchCharacters;
+        return Math.Clamp(2000 + batches * 4000, 2000, 600000);
+    }
+
+    public static async Task<T?> RecoverInitialFocusAsync<T>(Func<(FocusObservation Observation, T? Target)> sample,
+        Func<bool> valid, CancellationToken token, int graceMilliseconds = 500) where T : class
+    {
+        long deadline = Environment.TickCount64 + Math.Max(0, graceMilliseconds);
+        while (!token.IsCancellationRequested && valid())
+        {
+            var read = sample();
+            if (read.Observation == FocusObservation.Changed) return null;
+            if (read.Observation == FocusObservation.Stable && read.Target != null) return read.Target;
+            long remaining = deadline - Environment.TickCount64;
+            if (remaining <= 0) return null;
+            try { await Task.Delay((int)Math.Min(25, remaining), token); }
+            catch (OperationCanceledException) { return null; }
+        }
+        return null;
+    }
+}
+
+// Queries run in a killable process, not a cancellable wait around an unkillable COM call.
+// StopAsync must confirm process exit; an unconfirmed stop never permits a second worker.
+public interface IIsolatedInputWorker : IAsyncDisposable
+{
+    Task<string?> QueryAsync(string request, CancellationToken token);
+    Task<bool> StopAsync();
+}
+public record IsolatedInputReply(string Generation, string Value);
+public sealed class IsolatedInputQuery(Func<IIsolatedInputWorker> create) : IAsyncDisposable
+{
+    private readonly SemaphoreSlim gate = new(1, 1);
+    private IIsolatedInputWorker? worker;
+    private string generation = "";
+    private bool retired, disposed;
+    public async Task<IsolatedInputReply?> RunAsync(string request, TimeSpan timeout, CancellationToken token = default, string? expectedGeneration = null)
+    {
+        try { if (!await gate.WaitAsync(timeout, token)) return null; }
+        catch (OperationCanceledException) { return null; }
+        try
+        {
+            if (disposed || token.IsCancellationRequested) return null;
+            if (retired && !await StopWorker()) return null;
+            // Never recapture a selection after losing the process that owns the original range.
+            if (expectedGeneration != null && (worker == null || generation != expectedGeneration)) return null;
+            worker ??= CreateWorker();
+            try
+            {
+                using var limit = CancellationTokenSource.CreateLinkedTokenSource(token);
+                limit.CancelAfter(timeout);
+                var reply = await worker.QueryAsync(request, limit.Token).WaitAsync(timeout, token);
+                if (reply == null) { await StopWorker(); return null; }
+                return new(generation, reply);
+            }
+            catch { await StopWorker(); return null; }
+        }
+        catch { return null; }
+        finally { gate.Release(); }
+    }
+    private IIsolatedInputWorker CreateWorker()
+    {
+        var next = create(); generation = Guid.NewGuid().ToString("N"); retired = false; return next;
+    }
+    private async Task<bool> StopWorker()
+    {
+        if (worker == null) return true;
+        retired = true;
+        bool stopped;
+        try { stopped = await worker.StopAsync().WaitAsync(TimeSpan.FromSeconds(2)); }
+        catch { stopped = false; }
+        if (!stopped) return false;
+        try { await worker.DisposeAsync(); } catch { }
+        worker = null; generation = ""; retired = false; return true;
+    }
+    public async ValueTask DisposeAsync()
+    {
+        await gate.WaitAsync();
+        try { disposed = true; await StopWorker(); }
+        finally { gate.Release(); }
+    }
+}

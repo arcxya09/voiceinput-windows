@@ -8,7 +8,7 @@ public sealed class LexiconGenerator(Func<TermGenerationBatch,CancellationToken,
 {
     public async Task<GeneratedLexicon> GenerateAsync(TermGenerationOptions options,IProgress<TermGenerationProgress>? progress,CancellationToken token)
     {
-        options.Validate();var terms=new List<TermData>();var seen=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        options.Validate();var terms=new List<TermData>();var seen=new HashSet<string>(StringComparer.Ordinal);
         int requests=0,rejected=0,stalled=0,maxRequests=(options.Count+49)/50+2;
         string note="";bool cancelled=false;
         try

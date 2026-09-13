@@ -5,10 +5,11 @@ public record PolishWork(string SessionId, long Generation, string SegmentId, lo
 /// <summary>Pure state machine. Its caller serializes every operation through one actor.</summary>
 public sealed partial class TranscriptEngine
 {
-    private sealed class TaskState(int order, string[] terms) { public int Order = order; public bool Sealed; public long? GapSince; public string[] Terms = terms; public long LastEnd; }
+    private sealed class TaskState(int order, string[] terms) { public int Order = order; public bool Sealed; public long? GapSince; public string[] Terms = terms; }
     private readonly Dictionary<string, TaskState> tasks = [];
     private readonly Dictionary<string, SegmentData> segments = [];
     private readonly Dictionary<string, PolishWork> pending = [];
+    private readonly HashSet<string> knownBeginnings = [], explicitParagraphs = [], automaticParagraphs = [];
     private readonly Func<long> clock;
     private int taskOrder, sequence;
     private bool nextParagraph;
@@ -121,14 +122,17 @@ public sealed partial class TranscriptEngine
         if (s?.AsrState == AsrState.Confirmed) return null;
         if (s == null)
         {
-            bool paragraph = nextParagraph || (autoParagraph && task.LastEnd > 0 && e.BeginMs - task.LastEnd >= 2000);
+            bool paragraph = nextParagraph;
             nextParagraph = false;
             s = new SegmentData { SessionId = Session.Id, TaskId = e.TaskId, TaskOrder = task.Order, SentenceId = e.SentenceId, BeginMs = e.BeginMs, ParagraphBefore = paragraph, InjectedTerms = task.Terms.ToList() };
+            if (paragraph) explicitParagraphs.Add(s.Id);
+            if (autoParagraph) automaticParagraphs.Add(s.Id);
         }
-        if (!e.Final) { Put(s with { PartialText = e.Text, Revision = s.Revision + 1 }); CheckGaps(); return null; }
-        s = s with { RawText = e.Text, PartialText = "", EndMs = e.EndMs, AsrState = AsrState.Confirmed, SourceRevision = 1, Revision = s.Revision + 1, Operation = s.Operation + 1, Reason = "等待润色" };
-        task.LastEnd = e.EndMs ?? task.LastEnd;
-        Put(s); CheckGaps();
+        if (e.BeginTimeKnown && e.BeginMs >= 0) { s = s with { BeginMs = e.BeginMs }; knownBeginnings.Add(s.Id); }
+        if (!e.Final) { Put(s with { PartialText = e.Text, Revision = s.Revision + 1 }); CalibrateParagraphs(e.TaskId); CheckGaps(); return null; }
+        long? end = e.EndMs is >= 0 && (!knownBeginnings.Contains(s.Id) || e.EndMs >= s.BeginMs) ? e.EndMs : null;
+        s = s with { RawText = e.Text, PartialText = "", EndMs = end, AsrState = AsrState.Confirmed, SourceRevision = 1, Revision = s.Revision + 1, Operation = s.Operation + 1, Reason = "等待润色" };
+        Put(s); CalibrateParagraphs(e.TaskId); CheckGaps();
         if (!wholeTurn && PolishRules.PureFiller(s.RawText)) { Put(s with { OutputState = OutputState.Suppressed, Reason = "纯填充", Revision = s.Revision + 1 }); Publish(); return null; }
         if (wholeTurn || !polish || JsonCodec.Count(s.RawText) > 600 || pending.Count >= 22 || protectedTerms.Length > 100 || protectedTerms.Sum(JsonCodec.Count) > 1000)
         { Original(s.Id, !polish ? "原文" : "处理上限，保留原文"); return null; }
@@ -137,6 +141,22 @@ public sealed partial class TranscriptEngine
         var work = new PolishWork(Session.Id, Session.Generation, s.Id, s.EditRevision, s.Operation, clock() + 10000, s.RawText, previous, protectedTerms);
         pending[s.Id] = work;
         return work;
+    }
+    private void CalibrateParagraphs(string taskId)
+    {
+        // The provider may omit a partial's start time or deliver finals out of order.
+        // Compare adjacent sentence ids using their latest known timing, never the last
+        // event received. Explicit/manual breaks survive later timestamp corrections.
+        SegmentData? previous = null;
+        foreach (var segment in Segments.Where(s => s.TaskId == taskId))
+        {
+            bool gap = automaticParagraphs.Contains(segment.Id) && knownBeginnings.Contains(segment.Id)
+                && previous is { AsrState: AsrState.Confirmed, EndMs: >= 0 }
+                && previous.SentenceId + 1 == segment.SentenceId && segment.BeginMs - previous.EndMs.Value >= 2000;
+            bool paragraph = explicitParagraphs.Contains(segment.Id) || gap;
+            if (segment.ParagraphBefore != paragraph) Put(segment with { ParagraphBefore = paragraph, Revision = segment.Revision + 1 });
+            previous = segment;
+        }
     }
     public bool IsCurrent(PolishWork work) => Session.Id == work.SessionId && Session.Generation == work.Generation && segments.TryGetValue(work.SegmentId, out var s) && !s.UserLocked && s.EditRevision == work.EditRevision && s.Operation == work.Operation && s.OutputState == OutputState.Waiting && pending.ContainsKey(s.Id);
     public void Complete(PolishWork work, string? candidate, string? error = null)

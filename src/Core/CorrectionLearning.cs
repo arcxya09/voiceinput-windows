@@ -19,6 +19,7 @@ public record CorrectionCandidate
     public string LearnedAlias { get; init; } = "";
     public bool AutomaticReplacement { get; init; }
     [JsonIgnore] public bool ReplacementValid { get; init; } = true;
+    [JsonIgnore] public string ReplacementReason { get; init; } = "";
     [JsonIgnore] public string ReplacementLabel => State!=CorrectionState.Learned?"—":!AutomaticReplacement?"自动纠正关闭":ReplacementValid?"自动纠正开启":"规则已失效";
     public string? TermId { get; init; }
     public long AppliedTermRevision { get; init; }
@@ -41,7 +42,7 @@ public static class CorrectionRules
     private static bool Word(Rune r)=>Rune.IsLetterOrDigit(r)||r.Value is '-' or '_' or '+' or '#';
     private static bool LatinWord(Rune r)=>Latin(r)||Rune.IsDigit(r)||r.Value is '-' or '_' or '+' or '#';
     private static bool HasLetter(string text)=>text.EnumerateRunes().Any(Rune.IsLetter);
-    public static bool SamePair(CorrectionCandidate candidate,CorrectionChange change)=>string.Equals(candidate.Original,change.Original,StringComparison.OrdinalIgnoreCase)&&candidate.Corrected==change.Corrected;
+    public static bool SamePair(CorrectionCandidate candidate,CorrectionChange change)=>string.Equals(candidate.Original,change.Original,StringComparison.Ordinal)&&candidate.Corrected==change.Corrected;
     public static IReadOnlyList<CorrectionChange> Active(SegmentData segment)=>segment.OutputState == OutputState.Published && segment.UndoHistory is { Count: > 0 } states
         && segment.UndoPosition >= 0 && segment.UndoPosition < states.Count ? states[segment.UndoPosition].Corrections ?? [] : [];
 
@@ -88,7 +89,10 @@ public static class CorrectionRules
                 if(left+right+Math.Max(h.OldEnd-h.OldStart,h.NewEnd-h.NewStart)>16)continue;
             }
             string original=Join(a,h.OldStart-left,h.OldEnd+right).Trim(),corrected=Join(b,h.NewStart-left,h.NewEnd+right).Trim();
-            if(!ValidPair(original,corrected))continue;
+            // Numerical corrections and changed logical/quantity relations are edits to the
+            // statement, not reusable spelling rules. Share the execution-time guard so a
+            // candidate cannot later turn a one-off value change into a global replacement.
+            if(!ConfirmedCorrections.IsSafePair(original,corrected))continue;
             // Do not combine a second changed span into this suggestion through an expanded boundary.
             if(hunks.Any(x=>x!=h&&x.NewStart<h.NewEnd+right&&x.NewEnd>h.NewStart-left))continue;
             string contextBefore=Join(a,Math.Max(0,h.OldStart-left-24),Math.Min(a.Length,h.OldEnd+right+24));

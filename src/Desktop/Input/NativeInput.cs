@@ -1,13 +1,11 @@
-using System.Diagnostics;
 using RealtimeTranscription.Core;
 using System.Runtime.InteropServices;
-using System.Windows.Automation;
-using System.Windows.Automation.Text;
+using System.Text.Json;
 
 namespace RealtimeTranscription.Desktop.Input;
 
 public record NativeTarget(IntPtr Window,IntPtr Focus,uint Thread,uint Process);
-public record InputTarget(NativeTarget Native,int[] RuntimeId,AutomationElement Element,TextPatternRange? Selection);
+public record InputTarget(NativeTarget Native,string WorkerId,string CaptureId,bool CheckSelection=true);
 public record DeliveryResult(string State,string Message,int Accepted=0);
 public record PhysicalSignal(string Kind,int Key=0,long At=0,NativeTarget? Target=null,long ActivityVersion=0);
 public record TargetCapture(InputTarget? Target,string Code,string Message);
@@ -45,25 +43,27 @@ internal static class Win32
     [DllImport("imm32.dll")]public static extern bool ImmReleaseContext(IntPtr hwnd,IntPtr context);
     [DllImport("imm32.dll",CharSet=CharSet.Unicode)]public static extern int ImmGetCompositionStringW(IntPtr context,uint index,IntPtr buffer,uint length);
     public static bool Down(int key)=>(GetAsyncKeyState(key)&0x8000)!=0;
-    public static NativeTarget? Current()
+    public static NativeTarget? Current(bool allowMissingFocus=false)
     {
         var hwnd=GetForegroundWindow();if(hwnd==IntPtr.Zero||!IsWindowEnabled(hwnd))return null;
         uint thread=GetWindowThreadProcessId(hwnd,out uint process);if(process==(uint)Environment.ProcessId)return null;
         var gui=new Gui{Size=(uint)Marshal.SizeOf<Gui>()};
-        if(thread==0||!GetGUIThreadInfo(thread,ref gui)||gui.Focus==IntPtr.Zero||!IsWindow(gui.Focus)||GetForegroundWindow()!=hwnd)return null;
-        return new(hwnd,gui.Focus,thread,process);
+        if(thread==0||GetForegroundWindow()!=hwnd)return null;
+        bool hasFocus=GetGUIThreadInfo(thread,ref gui)&&gui.Focus!=IntPtr.Zero&&IsWindow(gui.Focus);
+        if(GetForegroundWindow()!=hwnd)return null;
+        return hasFocus?new(hwnd,gui.Focus,thread,process):allowMissingFocus?new(hwnd,IntPtr.Zero,thread,process):null;
     }
     public static FocusObservation Observe(NativeTarget target)
     {
         var foreground=GetForegroundWindow();
         if(foreground==IntPtr.Zero)return FocusObservation.Unavailable;
-        if(foreground!=target.Window||!IsWindow(target.Window)||!IsWindow(target.Focus)||!IsWindowEnabled(target.Window))return FocusObservation.Changed;
+        if(foreground!=target.Window||!IsWindow(target.Window)||(target.Focus!=IntPtr.Zero&&!IsWindow(target.Focus))||!IsWindowEnabled(target.Window))return FocusObservation.Changed;
         uint thread=GetWindowThreadProcessId(foreground,out uint process);
         if(thread!=target.Thread||process!=target.Process)return FocusObservation.Changed;
         var gui=new Gui{Size=(uint)Marshal.SizeOf<Gui>()};
         if(!GetGUIThreadInfo(thread,ref gui)||gui.Focus==IntPtr.Zero)return FocusObservation.Unavailable;
         if(GetForegroundWindow()!=foreground)return FocusObservation.Changed;
-        return gui.Focus==target.Focus?FocusObservation.Stable:FocusObservation.Changed;
+        return target.Focus==IntPtr.Zero?FocusObservation.Unavailable:gui.Focus==target.Focus?FocusObservation.Stable:FocusObservation.Changed;
     }
     public static bool Composing(IntPtr hwnd)
     {
@@ -116,7 +116,7 @@ public sealed class PhysicalHook : IDisposable
                 bool down=w.ToInt64() is 0x100 or 0x104;bool up=w.ToInt64() is 0x101 or 0x105;
                 if(vk==Trigger)
                 {
-                    if(down&&!held){held=true;if(enabled)signal(new("down",vk,Environment.TickCount64,Win32.Current()));}
+                    if(down&&!held){held=true;if(enabled)signal(new("down",vk,Environment.TickCount64,Win32.Current(allowMissingFocus:true)));}
                     if(up&&held){held=false;signal(new("up",vk,Environment.TickCount64));}
                 }
                 else if(down)signal(new(vk==27?"escape":"activity",vk,Environment.TickCount64));
@@ -137,9 +137,19 @@ public sealed class PhysicalHook : IDisposable
 
 public static class TextDelivery
 {
-    private static readonly BoundedInputQuery queries=new();
-    private static Task<T?> Query<T>(Func<T?> fn,CancellationToken token=default) where T:class
-        =>queries.RunAsync(fn,TimeSpan.FromMilliseconds(1200),token);
+    private static readonly IsolatedInputQuery queries=new(()=>new UiaProcess());
+    public static async Task InitializeAsync()
+    { _ = await queries.RunAsync(JsonSerializer.Serialize(new UiaRequest("Ping")),TimeSpan.FromSeconds(5)); }
+    public static ValueTask ShutdownAsync()=>queries.DisposeAsync();
+    private static async Task<(UiaResponse Reply,string Worker)?> Query(UiaRequest request,CancellationToken token,string? worker=null,int timeoutMs=1200)
+    {
+        var reply=await queries.RunAsync(JsonSerializer.Serialize(request),TimeSpan.FromMilliseconds(timeoutMs),token,worker);
+        if(reply==null)return null;
+        try{var parsed=JsonSerializer.Deserialize<UiaResponse>(reply.Value);return parsed==null?null:(parsed,reply.Generation);}
+        catch{return null;}
+    }
+    public static async Task ReleaseAsync(InputTarget target)
+    { _ = await Query(new("Release"),CancellationToken.None,target.WorkerId); }
 
     public static async Task<TargetCapture> CaptureAsync(NativeTarget native,Func<bool> valid,CancellationToken token)
     {
@@ -149,77 +159,27 @@ public static class TextDelivery
             token.ThrowIfCancellationRequested();
             if(!valid()||Win32.Observe(native)==FocusObservation.Changed)
                 return new(null,"TargetChanged","输入窗口或按键状态已改变，未上传语音。");
-            var result=await Query(()=>Capture(native),token);
-            if(result!=null&&result.Code!="Unavailable")return result;
+            var result=await Query(new("Capture",native.Window.ToInt64(),native.Focus.ToInt64(),native.Thread,native.Process),token,timeoutMs:2500);
+            if(result is {} response&&response.Reply.Code!="Unavailable")
+                return new(response.Reply.Code=="Ready"?new(native,response.Worker,response.Reply.CaptureId):null,response.Reply.Code,response.Reply.Message);
             if(attempt<2)await Task.Delay(80,token);
         }
         return new(null,"ProviderUnavailable","输入框的辅助功能接口暂时无响应，未上传语音。请稍后重试。");
     }
-    private static TargetCapture Capture(NativeTarget native)
-    {
-        if(Win32.Observe(native)!=FocusObservation.Stable)return new(null,"Unavailable","");
-        if(Win32.Composing(native.Focus))return new(null,"Composing","请先确认或取消输入法候选词，再按住说话。");
-        var element=AutomationElement.FocusedElement;
-        if(element==null)return new(null,"Unavailable","");
-        if(element.Current.IsPassword)return new(null,"Password","密码输入框不支持语音输入，未上传语音。");
-        if(!element.Current.IsEnabled)return new(null,"Disabled","当前输入框不可用，未上传语音。");
-        // Browser/editor accessibility providers can live outside the top-level window process.
-        // Confirm the native ancestor instead of requiring an identical process id.
-        if(!BelongsToTarget(element,native))return new(null,"Unavailable","");
-        bool editable=false;TextPatternRange? selection=null;
-        if(element.TryGetCurrentPattern(ValuePattern.Pattern,out var vp))editable=!((ValuePattern)vp).Current.IsReadOnly;
-        if(element.TryGetCurrentPattern(TextPattern.Pattern,out var tp))
-        {
-            var pattern=(TextPattern)tp;object attribute=pattern.DocumentRange.GetAttributeValue(TextPattern.IsReadOnlyAttribute);
-            editable|=attribute is bool readOnly&&!readOnly;
-            var ranges=pattern.GetSelection();if(ranges.Length==1)selection=ranges[0].Clone();
-        }
-        if(!editable)return new(null,"NotEditable","当前控件未提供可编辑接口，未上传语音。请点击可编辑文本区域后重试。");
-        if(Win32.Observe(native)!=FocusObservation.Stable)return new(null,"Unavailable","");
-        return new(new InputTarget(native,element.GetRuntimeId(),element,selection),"Ready","");
-    }
-    private static bool BelongsToTarget(AutomationElement element,NativeTarget target)
-    {
-        for(int depth=0;depth<24&&element!=null;depth++)
-        {
-            var hwnd=new IntPtr(element.Current.NativeWindowHandle);
-            if(hwnd==target.Focus||hwnd==target.Window)return true;
-            element=TreeWalker.RawViewWalker.GetParent(element);
-        }
-        return false;
-    }
-    private static async Task<InputTarget?> ValidateAsync(InputTarget target,CancellationToken token)
+    private static async Task<bool> ValidateAsync(InputTarget target,CancellationToken token)
     {
         for(int attempt=0;attempt<3&&!token.IsCancellationRequested;attempt++)
         {
-            var result=await Query(()=>Validate(target),token);
-            if(result!=null&&result.Code!="Unavailable")return result.Target;
-            if(attempt<2&&!token.IsCancellationRequested)await Task.Delay(80);
-        }
-        return null;
-    }
-    private static TargetCapture Validate(InputTarget target)
-    {
-        var observation=Win32.Observe(target.Native);
-        if(observation==FocusObservation.Unavailable)return new(null,"Unavailable","");
-        if(observation==FocusObservation.Changed||Win32.Composing(target.Native.Focus))return new(null,"Changed","");
-        var current=AutomationElement.FocusedElement;
-        if(current==null)return new(null,"Unavailable","");
-        if(current.Current.IsPassword||!current.Current.IsEnabled||!current.GetRuntimeId().SequenceEqual(target.RuntimeId))return new(null,"Changed","");
-        if(current.TryGetCurrentPattern(ValuePattern.Pattern,out var value)&&((ValuePattern)value).Current.IsReadOnly)return new(null,"ReadOnly","");
-        if(current.TryGetCurrentPattern(TextPattern.Pattern,out var p))
-        {
-            var pattern=(TextPattern)p;
-            if(pattern.DocumentRange.GetAttributeValue(TextPattern.IsReadOnlyAttribute) is bool readOnly&&readOnly)return new(null,"ReadOnly","");
-            if(target.Selection!=null)
+            var result=await Query(new("Validate",CaptureId:target.CaptureId,CheckSelection:target.CheckSelection),token,target.WorkerId);
+            // A timeout kills the worker and its selection. Do not recover a different range mid-send.
+            if(result==null)return false;
+            if(result.Value.Reply.Code!="Unavailable")return result.Value.Reply.Code=="Ready";
+            if(attempt<2&&!token.IsCancellationRequested)
             {
-                var selected=pattern.GetSelection();
-                if(selected.Length!=1||!selected[0].Compare(target.Selection))return new(null,"SelectionChanged","");
+                try{await Task.Delay(80,token);}catch(OperationCanceledException){return false;}
             }
         }
-        else if(target.Selection!=null)return new(null,"SelectionUnavailable","");
-        if(Win32.Observe(target.Native)!=FocusObservation.Stable)return new(null,"Unavailable","");
-        return new(target,"Ready","");
+        return false;
     }
     public static async Task<DeliveryResult> SendAsync(InputTarget target,string text,Func<bool> valid,CancellationToken token)
     {
@@ -230,14 +190,14 @@ public static class TextDelivery
         if(Modified())return new("Blocked","修饰键仍未释放，文字已保留，可手动复制。");
         if(!valid()||token.IsCancellationRequested)return new("Blocked","检测到其他操作，文字已保留，可手动复制。");
         if(Win32.Composing(target.Native.Focus))return new("Blocked","输入法仍有未确认的候选词，文字已保留，可手动复制。");
-        if(await ValidateAsync(target,token)==null)return new("Blocked","输入框或光标选区已变化，或辅助功能接口无响应。文字已保留，可手动复制。");
-        int accepted=0;long deadline=Environment.TickCount64+Math.Clamp(2000L+text.Length*2L,2000L,60000L);
+        if(!await ValidateAsync(target,token))return new("Blocked","输入框或光标选区已变化，或辅助功能接口无响应。文字已保留，可手动复制。");
+        int accepted=0;long deadline=Environment.TickCount64+InputSafety.DeliveryBudgetMilliseconds(text.Length);
         // Recheck window and activity per batch. Selection is expected to move after our first batch.
         for(int offset=0;offset<text.Length;)
         {
             if(!valid()||token.IsCancellationRequested||Win32.Current()!=target.Native||Modified()||Win32.Composing(target.Native.Focus)||Environment.TickCount64>=deadline)
                 return new(accepted>0?"Partial":"Blocked",accepted>0?"文字可能只输入了一部分。请检查目标内容，不会自动重发。":"输入目标已变化，文字已保留。",accepted);
-            int length=Math.Min(128,text.Length-offset);if(offset+length<text.Length&&char.IsHighSurrogate(text[offset+length-1]))length--;
+            int length=Math.Min(InputSafety.BatchCharacters,text.Length-offset);if(offset+length<text.Length&&char.IsHighSurrogate(text[offset+length-1]))length--;
             var input=new Win32.Input[length*2];
             for(int i=0;i<length;i++)
             {
@@ -252,7 +212,7 @@ public static class TextDelivery
             }
             offset+=length;
             // Revalidate the focused automation element without comparing the original selection.
-            if(offset<text.Length&&await ValidateAsync(target with{Selection=null},token)==null)return new("Partial","输入期间焦点已变化，已停止后续文字。请检查目标内容。",accepted);
+            if(offset<text.Length&&!await ValidateAsync(target with{CheckSelection=false},token))return new("Partial","输入期间焦点已变化，已停止后续文字。请检查目标内容。",accepted);
         }
         return new("Sent","文字已交给目标应用。",accepted);
     }

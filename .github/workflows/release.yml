@@ -2,25 +2,33 @@ name: Build and release Windows
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 permissions:
-  contents: write
+  contents: read
 concurrency:
-  group: windows-release
+  group: windows-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 jobs:
-  release:
+  build:
     runs-on: windows-latest
     timeout-minutes: 30
+    outputs:
+      version: ${{ steps.assets.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
           global-json-file: global.json
+      - name: Verify release recovery logic offline
+        shell: pwsh
+        run: ./scripts/TestReleasePublication.ps1 *>&1 | Tee-Object -FilePath build-output.log
       - name: Test and publish Windows x64
         shell: pwsh
-        run: |
-          ./build.ps1 *>&1 | Tee-Object -FilePath build-output.log
+        run: ./build.ps1 *>&1 | Tee-Object -FilePath build-output.log -Append
+      - name: Exercise actual Windows executable without microphone or cloud
+        shell: pwsh
+        run: ./scripts/WindowsSmoke.ps1 *>&1 | Tee-Object -FilePath build-output.log -Append
       - name: Prepare release assets
         id: assets
         shell: pwsh
@@ -43,76 +51,33 @@ jobs:
           name: VoiceInput-Windows-x64-${{ steps.assets.outputs.version }}
           path: artifacts/*.*
           if-no-files-found: error
-      - name: Publish versioned release
+      - name: Preserve offline desktop evidence and failure logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-verification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            windows-smoke.json
+            windows-smoke.png
+            build-output.log
+          if-no-files-found: ignore
+  release:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: VoiceInput-Windows-x64-${{ needs.build.outputs.version }}
+          path: artifacts
+      - name: Publish and verify versioned release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_VERSION: ${{ steps.assets.outputs.version }}
-        run: |
-          $currentHead = gh api "repos/$env:GH_REPO/git/ref/heads/main" --jq '.object.sha'
-          if ($LASTEXITCODE -ne 0) { throw 'Unable to verify release commit' }
-          if ($currentHead -ne $env:GITHUB_SHA) {
-            Write-Host 'A newer commit is queued; skipping publication of this superseded build.'
-            exit 0
-          }
-          $tag = "v$env:RELEASE_VERSION"
-          $notes = "docs/releases/$env:RELEASE_VERSION.md"
-          if (!(Test-Path $notes)) { throw "Missing release notes: $notes" }
-          $files = @(Get-ChildItem artifacts -File)
-          $expected = @("VoiceInput-Windows-x64-$env:RELEASE_VERSION.exe", "VoiceInput-Source-$env:RELEASE_VERSION.zip", 'build-output.log', 'SHA256SUMS.txt')
-          if ($files.Count -ne 4 -or @($files | Where-Object { $_.Name -notin $expected -or $_.Length -eq 0 }).Count -ne 0) {
-            throw 'The release asset set is incomplete'
-          }
-          $existing = gh release view $tag --json isDraft,targetCommitish,assets 2>$null
-          if ($LASTEXITCODE -ne 0) {
-            # Create metadata first: an HTTP error can still leave a recoverable draft.
-            gh release create $tag --draft --target $env:GITHUB_SHA --title "VoiceInput $env:RELEASE_VERSION" --notes-file $notes
-            for ($attempt = 0; $attempt -lt 3; $attempt++) {
-              $existing = gh release view $tag --json isDraft,targetCommitish,assets 2>$null
-              if ($LASTEXITCODE -eq 0) { break }
-              Start-Sleep -Seconds 3
-            }
-            if ($LASTEXITCODE -ne 0) { throw 'Release draft creation failed' }
-          }
-          $draft = $existing | ConvertFrom-Json
-          if (!$draft.isDraft) {
-            Write-Host "$tag is already published; leaving its assets unchanged."
-            exit 0
-          }
-          if ($draft.targetCommitish -ne $env:GITHUB_SHA) {
-            # A workflow-only repair may resume the same version after a publication error.
-            # Refuse a draft that belongs to different application code or a divergent branch.
-            $comparison = gh api "repos/$env:GH_REPO/compare/$($draft.targetCommitish)...$env:GITHUB_SHA"
-            if ($LASTEXITCODE -ne 0) { throw 'Unable to inspect existing draft source' }
-            $comparison = $comparison | ConvertFrom-Json
-            if ($comparison.status -notin @('ahead', 'identical') -or $comparison.total_commits -gt 20 -or
-                @($comparison.files | Where-Object { $_.filename -ne '.github/workflows/release.yml' }).Count -ne 0) {
-              throw 'Existing draft belongs to different source; retained for manual review'
-            }
-          }
-          if (@($draft.assets | Where-Object { $_.name -notin $expected }).Count -ne 0) {
-            throw 'Existing draft has unexpected assets; retained for manual review'
-          }
-          gh release edit $tag --draft --target $env:GITHUB_SHA --title "VoiceInput $env:RELEASE_VERSION" --notes-file $notes
-          if ($LASTEXITCODE -ne 0) { throw 'Unable to prepare verified draft' }
-          $paths = @($files | ForEach-Object { $_.FullName })
-          for ($attempt = 0; $attempt -lt 3; $attempt++) {
-            gh release upload $tag @paths --clobber
-            if ($LASTEXITCODE -eq 0) { break }
-            Start-Sleep -Seconds 3
-          }
-          if ($LASTEXITCODE -ne 0) { throw 'Asset upload incomplete; draft retained for retry' }
-          # Download the uploaded draft and compare every file before making it public.
-          $verification = Join-Path $env:RUNNER_TEMP "release-verify-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
-          gh release download $tag --dir $verification
-          if ($LASTEXITCODE -ne 0) { throw 'Unable to verify uploaded release assets' }
-          foreach ($file in $files) {
-            $downloaded = Join-Path $verification $file.Name
-            if (!(Test-Path $downloaded) -or (Get-FileHash $downloaded -Algorithm SHA256).Hash -ne (Get-FileHash $file.FullName -Algorithm SHA256).Hash) {
-              throw "Uploaded asset verification failed: $($file.Name)"
-            }
-          }
-          Write-Host 'Verified all four uploaded release assets against local SHA-256 hashes.'
-          gh release edit $tag --draft=false --latest
-          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed; verified draft retained' }
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+        run: ./scripts/PublishRelease.ps1

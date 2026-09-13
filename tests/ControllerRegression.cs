@@ -103,7 +103,7 @@ static class ControllerRegression
         await test("R03 手工导入在写事务中忽略规范化重名，无效记录整批回滚",async()=>
         {
             await using var f=await ControllerFixture.Create();await f.App.SaveTermAsync(new(){Text="KPI"});
-            Check(await f.App.ImportTermsAsync([new(){Text=" kpi "},new(){Text="人才盘点"}])==1);
+            Check(await f.App.ImportTermsAsync([new(){Text=" KPI "},new(){Text=" kpi "},new(){Text="人才盘点"}])==2);
             var invalid=new TermData{Text="坏权重",Weight=6};bool rejected=false;
             try{await f.App.Repository.ImportUserTermsAsync([new(){Text="应回滚"},invalid]);}catch(ArgumentException){rejected=true;}
             Check(rejected&&!(await f.App.Repository.TermsAsync("default")).Any(t=>t.Text=="应回滚"));

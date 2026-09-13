@@ -14,10 +14,11 @@ public sealed partial class MemoryRepository
     }
     public Task<List<CorrectionCandidate>> CorrectionsAsync(string project)=>Task.Run(()=>
     {
-        using var c=Open();var rows=ReadCorrections(c,project);var terms=ReadTerms(c).ToDictionary(t=>t.Id);
-        return rows.Select(d=>d with{ReplacementValid=d.TermId!=null&&terms.TryGetValue(d.TermId,out var term)
-            &&term.State==TermState.Enabled&&term.Scope==d.LearnedScope&&term.Text==d.LearnedText&&term.Alias==d.LearnedAlias
-            &&ConfirmedCorrections.IsSafePair(term.Alias,term.Text)}).ToList();
+        using var c=Open();using var tx=c.BeginTransaction(deferred:true);
+        var rows=ReadCorrections(c,project);var terms=ReadTerms(c).ToDictionary(t=>t.Id);
+        var decisions=ReadAllCorrectionDecisions(c);
+        var status=AnalyzeCorrectionDecisions(decisions,terms,project);
+        return rows.Select(d=>d with{ReplacementValid=status[d.Id].Valid,ReplacementReason=status[d.Id].Reason}).ToList();
     });
     public Task<List<CorrectionEvidence>> CorrectionEvidenceAsync(string id)=>Task.Run(()=>
     {
@@ -104,11 +105,19 @@ public sealed partial class MemoryRepository
             var existing=ReadTerms(c,requested.Scope);var old=existing.FirstOrDefault(t=>SameWord(t,requested));
             if(old?.State==TermState.Disabled)throw new InvalidOperationException("词库中已有禁用的同名词条。请先在词库中启用，再确认学习。");
             if(old==null&&existing.Count>=5000)throw new InvalidOperationException("此范围达到 5,000 个词条上限。");
-            // Explicit correction approval makes an extracted term independent of its old evidence.
-            result=old==null?requested:old with{Text=word,Alias=alias,Origin=old.Origin=="Extracted"?"CorrectionLearning":old.Origin,State=TermState.Enabled,Weight=Math.Max(old.Weight,requested.Weight),Pinned=true,Protect=true,Revision=old.Revision+1,UpdatedAt=DateTimeOffset.UtcNow};
+            // Each decision owns its confirmed alias. The shared vocabulary entry carries only
+            // a legacy display alias; adding another pronunciation never replaces an older rule.
+            var related=old==null?[]:ReadAllCorrectionDecisions(c).Where(d=>d.State==CorrectionState.Learned&&d.TermId==old.Id).ToArray();
+            var baseline=CorrectionBaseline(old,related);
+            result=old==null?requested:old with{Text=word,Alias=old.Alias.Length==0?alias:old.Alias,Origin=old.Origin=="Extracted"?"CorrectionLearning":old.Origin,State=TermState.Enabled,Weight=Math.Max(old.Weight,requested.Weight),Pinned=true,Protect=true,Revision=old.Revision+1,UpdatedAt=DateTimeOffset.UtcNow};
             SaveTerm(c,result);
+            // Sibling mapping changes are not a manual edit of the vocabulary. Keep their
+            // rollback watermark current while retaining guards against actual later user edits.
+            foreach(var decision in baseline.Owners)
+                SaveCorrection(c,decision with{PriorTerm=baseline.Prior is null?null:baseline.Prior with{Evidence=[]},AppliedTermRevision=result.Revision,Revision=decision.Revision+1});
             // Keep only vocabulary settings for undo; do not duplicate historic source text in a backup snapshot.
-            SaveCorrection(c,candidate with{State=CorrectionState.Learned,Revision=candidate.Revision+1,LearnedText=word,LearnedScope=approval.Scope,LearnedAlias=alias,AutomaticReplacement=approval.AutomaticReplacement,TermId=result.Id,AppliedTermRevision=result.Revision,PriorTerm=old is null?null:old with{Evidence=[]}});
+            var prior=baseline.Prior;
+            SaveCorrection(c,candidate with{State=CorrectionState.Learned,Revision=candidate.Revision+1,LearnedText=word,LearnedScope=approval.Scope,LearnedAlias=alias,AutomaticReplacement=approval.AutomaticReplacement,TermId=result.Id,AppliedTermRevision=result.Revision,PriorTerm=prior is null?null:prior with{Evidence=[]}});
             MarkCorrectionDecision(c,id,true);
             foreach(var source in learnUsage?sources:[])
             {
@@ -123,17 +132,52 @@ public sealed partial class MemoryRepository
     }
     public Task<List<TermData>> ActiveCorrectionTermsAsync(string project)=>Task.Run(()=>
     {
-        using var c=Open();
+        using var c=Open();using var tx=c.BeginTransaction(deferred:true);
         // Payloads are encrypted; resolve ids from the decrypted decisions, never from imported aliases.
         var decisions=ReadAllCorrectionDecisions(c);var terms=ReadTerms(c).ToDictionary(t=>t.Id);
-        return decisions.Where(d=>d.State==CorrectionState.Learned&&d.AutomaticReplacement)
-            .Where(d=>d.TermId!=null&&terms.TryGetValue(d.TermId,out var term)&&term.State==TermState.Enabled&&(term.Scope=="*"||term.Scope==project)&&term.Scope==d.LearnedScope&&term.Text==d.LearnedText&&term.Alias==d.LearnedAlias)
-            .Select(d=>terms[d.TermId!]).DistinctBy(t=>t.Id).ToList();
+        var status=AnalyzeCorrectionDecisions(decisions,terms,project);
+        return decisions.Where(d=>status[d.Id].Valid).Select(d=>MappingTerm(d,terms[d.TermId!]))
+            .DistinctBy(t=>(t.Id,t.Alias,t.Text)).ToList();
     });
+    private static TermData MappingTerm(CorrectionCandidate decision,TermData term)=>term with{Alias=decision.LearnedAlias};
+    private static Dictionary<string,(bool Valid,string Reason)> AnalyzeCorrectionDecisions(IReadOnlyList<CorrectionCandidate> decisions,IReadOnlyDictionary<string,TermData> terms,string project)
+    {
+        var result=new Dictionary<string,(bool Valid,string Reason)>();
+        var approved=new List<(CorrectionCandidate Decision,TermData Mapping)>();
+        foreach(var decision in decisions)
+        {
+            string reason=decision.State!=CorrectionState.Learned?"尚未确认学习":!decision.AutomaticReplacement?"自动纠正已关闭"
+                :decision.TermId==null||!terms.TryGetValue(decision.TermId,out var term)?"对应词条已删除"
+                :term.State!=TermState.Enabled?"对应词条未启用"
+                :term.Scope!=decision.LearnedScope||term.Text!=decision.LearnedText?"标准词或适用范围已修改，需要重新确认"
+                :term.Scope!="*"&&term.Scope!=project?"不适用于当前项目"
+                :decision.LearnedAlias.Length==0?"旧版记录尚未单独确认自动纠正写法":"";
+            if(reason.Length>0){result[decision.Id]=(false,reason);continue;}
+            approved.Add((decision,MappingTerm(decision,terms[decision.TermId!])));
+        }
+        var analysis=ConfirmedCorrections.AnalyzeMappings(approved.Select(p=>p.Mapping).ToArray(),project);
+        for(int i=0;i<approved.Count;i++)result[approved[i].Decision.Id]=(analysis[i].Applicable,analysis[i].Reason);
+        return result;
+    }
     private List<CorrectionCandidate> ReadAllCorrectionDecisions(SqliteConnection c)
     {
         using var command=Command(c,"SELECT payload FROM corrections");using var reader=command.ExecuteReader();var list=new List<CorrectionCandidate>();
         while(reader.Read())list.Add(Unpack<CorrectionCandidate>((byte[])reader[0]));return list;
+    }
+    private static (TermData? Prior,List<CorrectionCandidate> Owners) CorrectionBaseline(TermData? current,IReadOnlyList<CorrectionCandidate> decisions)
+    {
+        // Old versions stored a stack of single-alias changes. Follow only an unbroken
+        // revision chain, so migrating that stack cannot jump over a user's manual edit.
+        var owners=new List<CorrectionCandidate>();var cursor=current;
+        while(cursor!=null)
+        {
+            var matching=decisions.Where(d=>d.AppliedTermRevision==cursor.Revision&&!owners.Any(o=>o.Id==d.Id)).OrderBy(d=>d.Id,StringComparer.Ordinal).ToArray();
+            if(matching.Length==0)break;
+            var prior=matching[0].PriorTerm;
+            if(prior!=null&&prior.Revision>=cursor.Revision)break;
+            owners.AddRange(matching);cursor=prior;
+        }
+        return(cursor,owners);
     }
     public Task SetAutomaticCorrectionAsync(string id,string project,bool enabled)=>WriteAsync(c=>
     {
@@ -141,8 +185,11 @@ public sealed partial class MemoryRepository
         if(decision.ProjectId!=project||decision.State!=CorrectionState.Learned)throw new InvalidOperationException("请选择本项目已学习的纠错记录。");
         using var query=Command(c,"SELECT payload FROM terms WHERE id=$id",("$id",decision.TermId));
         var term=query.ExecuteScalar() is byte[] bytes?Unpack<TermData>(bytes):throw new InvalidOperationException("对应词条已删除。");
-        if(enabled&&(term.State!=TermState.Enabled||term.Text!=decision.LearnedText||term.Scope!=decision.LearnedScope||term.Alias.Length==0))throw new InvalidOperationException("词条已改变或禁用，请先重新确认标准写法。");
-        SaveCorrection(c,decision with{AutomaticReplacement=enabled,LearnedAlias=term.Alias,Revision=decision.Revision+1});tx.Commit();
+        // Pre-1.4 decisions have no LearnedAlias. Explicitly enabling one approves that
+        // candidate's original spelling, not a shared term alias overwritten by another pair.
+        string alias=decision.LearnedAlias.Length>0?decision.LearnedAlias:decision.Original;
+        if(enabled&&(term.State!=TermState.Enabled||term.Text!=decision.LearnedText||term.Scope!=decision.LearnedScope||alias.Length==0))throw new InvalidOperationException("词条已改变或禁用，请先重新确认标准写法。");
+        SaveCorrection(c,decision with{AutomaticReplacement=enabled,LearnedAlias=alias,Revision=decision.Revision+1});tx.Commit();
     });
     public Task SetCorrectionIgnoredAsync(string id,string project,bool ignored)=>WriteAsync(c=>
     {
@@ -158,10 +205,17 @@ public sealed partial class MemoryRepository
         if(value.ProjectId!=project||value.State!=CorrectionState.Learned)throw new InvalidOperationException("请选择本项目已学习的纠错记录。");
         using var query=Command(c,"SELECT payload FROM terms WHERE id=$id",("$id",value.TermId));
         var current=query.ExecuteScalar() is byte[] bytes?Unpack<TermData>(bytes):null;
-        if(current!=null)
+        // Other learned aliases still own this standard word. Revoke only the selected
+        // decision; the final owner performs the existing guarded vocabulary rollback.
+        var related=ReadAllCorrectionDecisions(c).Where(d=>d.State==CorrectionState.Learned&&d.TermId==value.TermId).ToArray();
+        bool shared=related.Any(d=>d.Id!=id);
+        var baseline=CorrectionBaseline(current,related);
+        foreach(var owner in baseline.Owners.Where(d=>d.Id!=id))
+            SaveCorrection(c,owner with{PriorTerm=baseline.Prior is null?null:baseline.Prior with{Evidence=[]},AppliedTermRevision=current!.Revision,Revision=owner.Revision+1});
+        if(current!=null&&!shared)
         {
             if(current.Revision!=value.AppliedTermRevision)throw new InvalidOperationException("该词条在学习后又被修改，已保留最新设置。请到词库中手动调整或删除。");
-            if(value.PriorTerm!=null)SaveTerm(c,value.PriorTerm with{Evidence=current.Evidence,Revision=current.Revision+1,UpdatedAt=DateTimeOffset.UtcNow});
+            if(baseline.Prior!=null)SaveTerm(c,baseline.Prior with{Evidence=current.Evidence,Revision=current.Revision+1,UpdatedAt=DateTimeOffset.UtcNow});
             else{Tombstone(c,"term",current.Id);using var remove=Command(c,"DELETE FROM terms WHERE id=$id",("$id",current.Id));remove.ExecuteNonQuery();}
         }
         SaveCorrection(c,value with{State=CorrectionState.Ignored,Revision=value.Revision+1,TermId=null,PriorTerm=null,AppliedTermRevision=0,LearnedText="",LearnedScope=""});MarkCorrectionDecision(c,id,true);tx.Commit();

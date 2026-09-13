@@ -11,6 +11,12 @@ public partial class MainWindow
     private async Task RefreshCorrections()
     {
         if(CorrectionsGrid==null||shuttingDown)return;
+        if(!controller.MemoryAvailable)
+        {
+            ++correctionRefresh;CorrectionsGrid.ItemsSource=Array.Empty<CorrectionCandidate>();
+            CorrectionTabLabel.Text="纠错学习";CorrectionStatus.Text=controller.MemoryStatus;
+            return;
+        }
         int serial=++correctionRefresh;string project=CurrentProject;string? selection=(CorrectionsGrid.SelectedItem as CorrectionCandidate)?.Id;
         var all=await controller.Repository.CorrectionsAsync(project);
         if(serial!=correctionRefresh||CurrentProject!=project||shuttingDown)return;
@@ -46,7 +52,7 @@ public partial class MainWindow
     {
         if(CorrectionsGrid.SelectedItem is not CorrectionCandidate c)return;
         var sources=await controller.Repository.CorrectionEvidenceAsync(c.Id);
-        Dialogs.Text(this,"纠错来源",$"{c.Original} → {c.DisplayText}\n状态：{c.StateLabel} · 不同片段：{c.Count}\n\n"+
+        Dialogs.Text(this,"纠错来源",$"{c.Original} → {c.DisplayText}\n状态：{c.StateLabel} · 不同片段：{c.Count}\n自动纠正：{c.ReplacementLabel}\n{c.ReplacementReason}\n\n"+
             (sources.Count==0?"原始来源已删除、撤销或关闭学习许可。已确认词条和忽略偏好仍可单独管理。":string.Join("\n\n",sources.Select(s=>$"{s.At.LocalDateTime:g}\n修改前：{s.BeforeContext}\n修改后：{s.AfterContext}\n会话：{s.SessionId}\n片段：{s.SegmentId} · 版本：{s.EditRevision}")))+
             (c.Count>30?"\n\n仅显示最近 30 个来源，统计包含全部有效来源。":""));
     });
