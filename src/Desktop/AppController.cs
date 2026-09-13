@@ -262,7 +262,7 @@ public sealed partial class AppController : IAsyncDisposable
         if(e.Event=="task-finished"){engine.SealTask(e.TaskId);Notify();return;}
         if(e.Event!="result-generated"||e.Heartbeat)return;
         var previous=engine.Segments.FirstOrDefault(s=>s.TaskId==e.TaskId&&s.SentenceId==e.SentenceId);
-        if(e.Final||previous==null||e.Text!=(previous.AsrState==AsrState.Partial?previous.PartialText:previous.RawText))lastProgress=Environment.TickCount64;
+        if(previous?.AsrState!=AsrState.Confirmed&&(e.Final||e.Text.Length>0&&(previous==null||e.Text!=previous.PartialText)))lastProgress=Environment.TickCount64;
         engine.Receive(e,false,Settings.AutoParagraph,[],false);
         if(engine.Segments.Count>=50000||engine.Segments.Sum(s=>(long)(s.RawText.Length+s.FinalText.Length+s.PartialText.Length)*2)>64*1024*1024){Status("本次会话达到容量上限，停止后可导出并开启新会话。");_=StopAsync(false);}
         Notify();

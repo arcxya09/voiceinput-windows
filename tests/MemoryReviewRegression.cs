@@ -67,8 +67,10 @@ static class MemoryReviewRegression
         await test("R18 投递成功不清除真实保存失败状态，重试成功后复位",async()=>
         {
             await using var f=await ControllerFixture.Create();var source=await f.Seed("保存状态。");await f.App.LoadSessionAsync(source.Session);
+            var failed=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            f.App.Updated+=snapshot=>{if(snapshot.Segments.Any(s=>s.SaveState==SaveState.Failed))failed.TrySetResult();};
             f.Protector.Fail=j=>j.TryGetProperty("finalText",out var value)&&value.GetString()=="修订失败。";
-            await f.App.EditAsync(source.Segment.Id,"修订失败。");await f.App.Repository.BarrierAsync();await f.App.SnapshotAsync();
+            await f.App.EditAsync(source.Segment.Id,"修订失败。");await failed.Task.WaitAsync(TimeSpan.FromSeconds(5));
             Check(f.App.FailedSaveCount>0);
             await f.App.SetDeliveryAsync("Sent","已输入");Check(f.App.FailedSaveCount>0);
             f.Protector.Fail=null;await f.App.RetrySaveAsync();Check(f.App.FailedSaveCount==0);
