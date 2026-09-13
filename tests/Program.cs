@@ -74,7 +74,14 @@ await Test("SQLite 加密、原子导入、删除不复活和来源联动",async
             Assert((await repo.SearchAsync("p","口述",null,CancellationToken.None)).Count==1);
             var evidence=new TermEvidence(session.Id,segment.Id,1,0,segment.RawText,false);var derived=new TermData{Scope="p",Text="派生术语",Origin="Extracted",Evidence=[evidence]};var manual=new TermData{Scope="*",Text="手动术语",Origin="Manual",Evidence=[evidence]};await repo.ImportTermsAsync([derived,manual]);
             bool atomic=false;try{await repo.ImportTermsAsync([new(){Scope="p",Text="应当回滚"},new(){Scope="p",Text="非法",Weight=6}]);}catch(ArgumentException){atomic=true;}Assert(atomic&&!(await repo.TermsAsync("p")).Any(t=>t.Text=="应当回滚"));
-            await repo.CheckpointAsync();Assert(!Encoding.UTF8.GetString(await File.ReadAllBytesAsync(path)).Contains("绝不可明文存储"));
+            await repo.CheckpointAsync();
+            // SQLite keeps pooled read/write handles open. Share access explicitly on Windows.
+            await using (var database = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            {
+                using var snapshot = new MemoryStream();
+                await database.CopyToAsync(snapshot);
+                Assert(!Encoding.UTF8.GetString(snapshot.ToArray()).Contains("绝不可明文存储"));
+            }
             await repo.DeleteSessionAsync(session.Id);Assert((await repo.SegmentsAsync(session.Id)).Count==0);var terms=await repo.TermsAsync("p");Assert(terms.Count==1&&terms[0].Id==manual.Id&&terms[0].Evidence.Count==0);
             bool dead=false;try{await repo.SaveSegmentAsync(session,segment with{Revision=100});}catch(InvalidOperationException){dead=true;}Assert(dead);
             await repo.DeleteTermAsync(manual);Assert((await repo.SuppressedAsync("p")).Contains(manual.Key));
