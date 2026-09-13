@@ -42,7 +42,35 @@ function Invoke-GitHubCommand([string[]]$Arguments) {
 }
 
 function Read-Release([string]$Tag, [switch]$AllowMissing) {
-    return Invoke-GitHubRead "releases/tags/$Tag" -AllowMissing:$AllowMissing
+    # GitHub's by-tag REST endpoint returns published releases only. A draft may
+    # already exist while both that endpoint and the git tag ref return 404.
+    # Enumerate the drafts visible to this write-authorized token before deciding
+    # that creation is safe, then read the matching release by its immutable ID.
+    for ($attempt = 0; $attempt -lt 5; $attempt++) {
+        $published = Invoke-GitHubRead "releases/tags/$Tag" -AllowMissing
+        if ($null -ne $published) { return $published }
+        $matchingReleases = @()
+        $complete = $false
+        for ($page = 1; $page -le 20; $page++) {
+            $releases = @(Invoke-GitHubRead "releases?per_page=100&page=$page")
+            $matchingReleases += @($releases | Where-Object { $_.tag_name -ceq $Tag })
+            if ($matchingReleases.Count -gt 1) { throw 'Multiple releases match the intended tag; none were changed.' }
+            if ($releases.Count -lt 100) { $complete = $true; break }
+        }
+        if (!$complete) { throw 'Release listing exceeded the inspection limit; absence could not be established.' }
+        if ($matchingReleases.Count -eq 1) {
+            $id = $matchingReleases[0].id
+            if ("$id" -notmatch '^[1-9][0-9]*$') { throw 'The matching release has no valid immutable ID.' }
+            $release = Invoke-GitHubRead "releases/$id"
+            if ($release.id -ne $id -or $release.tag_name -cne $Tag) { throw 'Release identity changed between listing and read-back.' }
+            return $release
+        }
+        if ($AllowMissing) { return $null }
+        # Creation may have completed even if its response was lost. Only repeat
+        # discovery reads while waiting for the draft; never create it again here.
+        if ($attempt -lt 4) { Start-Sleep -Seconds 3 }
+    }
+    throw 'The expected release was not visible after repeated published/draft discovery; no duplicate was created.'
 }
 
 function Get-TagCommit([string]$Tag, [switch]$AllowMissing) {
