@@ -17,8 +17,8 @@ public static class ConfirmedCorrections
 {
     public const int MaxRecordedOccurrences = 4096;
     private static readonly Regex Numbers = new(@"[+\-−±]?(?:[0-9０-９]+(?:[.．][0-9０-９]+)?|[.．][0-9０-９]+)(?:[eE][+\-]?[0-9]+)?|[零〇一二三四五六七八九十百千万亿两]+", RegexOptions.Compiled, TimeSpan.FromMilliseconds(100));
-    private static readonly Regex Relations = new(@"[不没无未非否]|(?<![A-Za-z])(?:not|no|never|without|neither|nor)(?![A-Za-z])", RegexOptions.Compiled | RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(100));
-    private static readonly Regex Units = new(@"摄氏度|华氏度|千米|厘米|毫米|微米|纳米|公斤|千克|毫克|微克|千瓦|兆瓦|毫瓦|千伏|毫伏|毫安|微安|毫秒|微秒|纳秒|小时|分钟|百分之|摄氏|华氏|欧姆|帕斯卡|电子伏|伏特|安培|瓦特|赫兹|开尔文|毫升|(?<=[零〇一二三四五六七八九十百千万亿两0-9０-９])[ \t]*(?:米|秒|度|伏|安|瓦|升|克|吨)|(?<![A-Za-z])(?:[pnumkMGTμµ]?(?:eV|Hz|Pa|Gy|Sv|W|V|A|K|J|s|m|g|b)|kg|mol|cd|rad|deg|rpm|cm|mm|km|ms|us|ns)(?![A-Za-z])|[%％℃℉Ω°]", RegexOptions.Compiled, TimeSpan.FromMilliseconds(100));
+    private static readonly Regex Relations = new(@"[不没无未非否]|n['’]t(?![A-Za-z])|(?<![A-Za-z])(?:cannot|not|no|never|without|neither|nor)(?![A-Za-z])", RegexOptions.Compiled | RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(100));
+    private static readonly Regex Units = new(@"摄氏度|华氏度|千米|厘米|毫米|微米|纳米|公斤|千克|毫克|微克|千瓦|兆瓦|毫瓦|千伏|毫伏|毫安|微安|毫秒|微秒|纳秒|小时|分钟|百分之|摄氏|华氏|欧姆|帕斯卡|电子伏|伏特|安培|瓦特|赫兹|开尔文|毫升|(?<=[零〇一二三四五六七八九十百千万亿两0-9０-９])[ \t]*(?:米|秒|度|伏|安|瓦|升|克|吨)|(?<![A-Za-z])(?:[pnumkMGTμµ]?(?:eV|Hz|Pa|Gy|Sv|W|V|A|K|J|s|m|g|b)|kg|mol|cd|rad|deg|rpm|cm|mm|km|ms|us|ns)(?![A-Za-z])|°[CF]|[%％℃℉Ω°]", RegexOptions.Compiled, TimeSpan.FromMilliseconds(100));
 
     private static string[] Signature(Regex pattern, string text) => pattern.Matches(text).Select(m => m.Value).ToArray();
     public static bool IsSafePair(string original, string corrected)
@@ -26,9 +26,13 @@ public static class ConfirmedCorrections
         if (!CorrectionRules.ValidPair(original, corrected)) return false;
         try
         {
-            return Signature(Numbers, original).SequenceEqual(Signature(Numbers, corrected))
-                && Signature(Relations, original).SequenceEqual(Signature(Relations, corrected), StringComparer.OrdinalIgnoreCase)
-                && Signature(Units, original).SequenceEqual(Signature(Units, corrected));
+            // Compare semantic guards in compatibility-normalized form so full-width
+            // letters/digits cannot hide a changed unit or English negation. Match/output
+            // text itself remains byte-for-byte as explicitly approved by the user.
+            string before = original.Normalize(NormalizationForm.FormKC), after = corrected.Normalize(NormalizationForm.FormKC);
+            return Signature(Numbers, before).SequenceEqual(Signature(Numbers, after))
+                && Signature(Relations, before).SequenceEqual(Signature(Relations, after), StringComparer.OrdinalIgnoreCase)
+                && Signature(Units, before).SequenceEqual(Signature(Units, after));
         }
         catch (RegexMatchTimeoutException) { return false; }
     }

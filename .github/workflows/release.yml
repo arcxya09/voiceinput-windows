@@ -7,7 +7,7 @@ permissions:
   contents: write
 concurrency:
   group: windows-release
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   release:
     runs-on: windows-latest
@@ -50,6 +50,12 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_VERSION: ${{ steps.assets.outputs.version }}
         run: |
+          $currentHead = gh api "repos/$env:GH_REPO/git/ref/heads/main" --jq '.object.sha'
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to verify release commit' }
+          if ($currentHead -ne $env:GITHUB_SHA) {
+            Write-Host 'A newer commit is queued; skipping publication of this superseded build.'
+            exit 0
+          }
           $tag = "v$env:RELEASE_VERSION"
           $existing = gh release view $tag --json isDraft 2>$null
           if ($LASTEXITCODE -eq 0) {

@@ -50,7 +50,7 @@ internal static class ConfirmedCorrectionRegression
         });
         await test("确认纠错拒绝改变数字、单位和否定，允许保留相同数值的术语纠错", () =>
         {
-            foreach (var pair in new[] { ("温度30度", "温度40度"), ("长度两米", "长度两秒"), ("长度30 米", "长度30 秒"), ("束流10keV", "束流10MeV"), ("毫安", "微安"), ("可以提交", "不可以提交"), ("not ready", "ready now"), ("第一实验室", "第二实验室"), ("温度30℃", "温度30℉") })
+            foreach (var pair in new[] { ("温度30度", "温度40度"), ("长度两米", "长度两秒"), ("长度30 米", "长度30 秒"), ("束流10keV", "束流10MeV"), ("束流30ＭｅＶ", "束流30ｋｅＶ"), ("毫安", "微安"), ("可以提交", "不可以提交"), ("not ready", "ready now"), ("can't submit", "can submit"), ("don't use", "do use"), ("isn't ready", "is ready"), ("won’t run", "will run"), ("cannot submit", "can submit"), ("ｃａｎｎｏｔ ｓｕｂｍｉｔ", "ｃａｎ ｓｕｂｍｉｔ"), ("第一实验室", "第二实验室"), ("温度30℃", "温度30℉") })
             {
                 Check(!ConfirmedCorrections.IsSafePair(pair.Item1, pair.Item2), pair.ToString());
                 Check(ConfirmedCorrections.Apply(pair.Item1, [Mapping(pair.Item1, pair.Item2)], "default").Text == pair.Item1);
