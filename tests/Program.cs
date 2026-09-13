@@ -435,7 +435,8 @@ await Test("全部历史不复活已删词条，不覆盖已禁用和人工状�
 });
 await ControllerRegression.Run(Test);
 await CorrectionRegression.Run(Test);
-Console.WriteLine($"RESULT: {passed} passed; {failed} failed. Native Windows, microphone and paid cloud calls were not executed.");
+await FocusRegression.Run(Test);
+Console.WriteLine($"RESULT: {passed} passed; {failed} failed. Interactive desktop, microphone and paid cloud calls were not executed.");
 return failed==0?0:1;
 
 sealed class FakeHandler(Func<HttpRequestMessage,HttpResponseMessage> response):HttpMessageHandler
