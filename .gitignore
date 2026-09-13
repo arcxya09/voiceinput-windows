@@ -1,0 +1,7 @@
+**/bin/
+**/obj/
+artifacts/
+*.log
+credentials.dat
+sessions.db*
+settings.json
