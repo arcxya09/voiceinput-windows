@@ -1,6 +1,6 @@
 using System.Collections.ObjectModel;
-using System.Windows;
-using System.Windows.Controls;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 using RealtimeTranscription.Core;
 using RealtimeTranscription.Infrastructure;
 
@@ -70,7 +70,7 @@ public partial class MainWindow
         EnsureIdle();
         if(!int.TryParse(GenerationCountBox.Text.Trim(),out int count))throw new ArgumentException("目标词数应为 1—500 的整数。");
         var options=new TermGenerationOptions(GenerationRequirementBox.Text.Trim(),count,GenerationScope,GenerationMaxThinkingBox.IsChecked==true);options.Validate();
-        string key=DeepSeekKeyBox.Password.Trim();if(key.Length==0)throw new ArgumentException("请在上方填写 DeepSeek API Key。");
+        string key=DeepSeekKeyBox.Password.Trim();if(key.Length==0)throw new ArgumentException("请先在设置中填写 DeepSeek API Key。");
         generatingTerms=true;int serial=++generationSerial;generationCancel=new();
         GenerateTermsButton.IsEnabled=false;CancelGenerationButton.IsEnabled=true;GenerationRequestPanel.IsEnabled=false;GeneratedTermsGrid.IsEnabled=false;
         GeneratedSelectAllButton.IsEnabled=GeneratedSelectNoneButton.IsEnabled=false;
@@ -100,7 +100,7 @@ public partial class MainWindow
     {generationCancel?.Cancel();controller.CancelGeneration();CancelGenerationButton.IsEnabled=false;GenerationStatus.Text="正在取消，已完成的批次会保留。";}
     private async void ImportGenerated_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>
     {
-        EnsureIdle();GeneratedTermsGrid.CommitEdit(DataGridEditingUnit.Cell,true);GeneratedTermsGrid.CommitEdit(DataGridEditingUnit.Row,true);
+        EnsureIdle();
         string scope=GenerationScope;bool enable=GeneratedEnableBox.IsChecked==true;
         var rows=generatedRows.Where(r=>r.Selected).ToArray();
         var batch=rows.Select(r=>r.ToTerm(scope,enable)).ToArray();
@@ -143,3 +143,4 @@ public partial class MainWindow
     private void CancelHistory_Click(object sender,RoutedEventArgs e)
     {controller.CancelExtraction();CancelHistoryButton.IsEnabled=HistoryCancelButton.IsEnabled=false;HistoryExtractionStatus.Text="正在取消，已完成的批次保留。";}
 }
+

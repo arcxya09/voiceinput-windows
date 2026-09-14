@@ -1,125 +1,290 @@
+using System.Globalization;
 using System.Runtime.InteropServices;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Interop;
-using System.Windows.Media;
+using Microsoft.UI;
+using Microsoft.UI.Windowing;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
+using RealtimeTranscription.Core;
+using Windows.Foundation;
 
 namespace RealtimeTranscription.Desktop;
 
+/// <summary>A small, non-activating WinUI window. All public methods run on the UI thread.</summary>
 public sealed class VoiceOverlay : Window
 {
-    private readonly TextBlock title, preview, elapsed, warning;
-    private readonly ProgressBar meter;
-    private readonly System.Windows.Threading.DispatcherTimer hide = new() { Interval = TimeSpan.FromSeconds(4) };
+    private const double WidthDip = 360, HeightDip = 76, BottomMarginDip = 24;
+    private readonly TextBlock title, preview, elapsed, warning, measure;
+    private readonly Border root;
+    private readonly Border[] levels = new Border[5];
+    private readonly DispatcherTimer hide = new() { Interval = TimeSpan.FromSeconds(3) };
+    private readonly SubclassProc windowProc;
+    private readonly IntPtr hwnd;
     private IntPtr targetMonitor;
     private long startedAt;
-    private bool positioning, dismissPending;
+    private string previewSource = "", persistentWarning = "";
+    private bool positioning, dismissPending, closed, repositionQueued;
 
     public VoiceOverlay()
     {
-        Width = 610; SizeToContent = SizeToContent.Height; WindowStyle = WindowStyle.None;
-        AllowsTransparency = true; Background = Brushes.Transparent; ShowActivated = false;
-        ShowInTaskbar = false; Topmost = true; ResizeMode = ResizeMode.NoResize; Focusable = false;
-        var border = new Border { Background = new SolidColorBrush(Color.FromRgb(25, 46, 62)), CornerRadius = new CornerRadius(12), Padding = new Thickness(20, 14, 20, 16), Margin = new Thickness(6), BorderBrush = new SolidColorBrush(Color.FromRgb(92, 140, 145)), BorderThickness = new Thickness(1) };
-        var stack = new StackPanel();
-        var heading = new DockPanel();
-        elapsed = new TextBlock { FontSize = 12, Foreground = new SolidColorBrush(Color.FromRgb(164, 193, 194)), Margin = new Thickness(12, 2, 0, 0) };
-        DockPanel.SetDock(elapsed, Dock.Right); heading.Children.Add(elapsed);
-        title = new TextBlock { Text = "准备麦克风…", FontSize = 14, Foreground = Brushes.White, TextWrapping = TextWrapping.Wrap }; heading.Children.Add(title);
-        preview = new TextBlock { FontSize = 19, Foreground = new SolidColorBrush(Color.FromRgb(205, 233, 225)), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 9, 0, 0) };
-        meter = new ProgressBar { Minimum = 0, Maximum = 1, Height = 4, Foreground = new SolidColorBrush(Color.FromRgb(110, 206, 178)), Background = new SolidColorBrush(Color.FromRgb(48, 73, 87)), Margin = new Thickness(0, 12, 0, 0), Visibility = Visibility.Collapsed };
-        warning = new TextBlock { FontSize = 13, Foreground = new SolidColorBrush(Color.FromRgb(255, 208, 145)), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 10, 0, 0), Visibility = Visibility.Collapsed };
-        stack.Children.Add(heading); stack.Children.Add(preview); stack.Children.Add(meter); stack.Children.Add(warning); border.Child = stack; Content = border;
-        SourceInitialized += (_, _) =>
+        Title = "VoiceInput";
+        var white = Brush(241, 245, 249);
+        var muted = Brush(157, 175, 193);
+        var accent = Brush(104, 219, 186);
+        title = Label("OverlayStatus", 12, white);
+        title.Text = "准备麦克风…";
+        title.FontWeight = Microsoft.UI.Text.FontWeights.SemiBold;
+        title.TextAlignment = TextAlignment.Center;
+        title.HorizontalAlignment = HorizontalAlignment.Stretch;
+        title.TextTrimming = TextTrimming.CharacterEllipsis;
+        elapsed = Label("OverlayElapsed", 11, muted);
+        elapsed.HorizontalAlignment = HorizontalAlignment.Right;
+        warning = Label("OverlayWarning", 10, Brush(255, 202, 119));
+        warning.Visibility = Visibility.Collapsed;
+        preview = Label("OverlayPreview", 14, white);
+        preview.TextAlignment = TextAlignment.Center;
+        preview.HorizontalAlignment = HorizontalAlignment.Stretch;
+        preview.TextTrimming = TextTrimming.None;
+        measure = Label("", preview.FontSize, white);
+
+        // Equal side columns keep the status on the true centreline even when
+        // the timer grows or the save-warning badge replaces the audio meter.
+        var heading = new Grid { Height = 22, ColumnSpacing = 8 };
+        heading.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(58) });
+        heading.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        heading.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(58) });
+        var left = new Grid { HorizontalAlignment = HorizontalAlignment.Left };
+        var wave = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 3, Height = 18, VerticalAlignment = VerticalAlignment.Center };
+        for (int i = 0; i < levels.Length; i++)
         {
-            var h = new WindowInteropHelper(this).Handle;
-            SetWindowLongPtr(h, -20, new IntPtr(GetWindowLongPtr(h, -20).ToInt64() | 0x08000000 | 0x80 | 0x20));
-            HwndSource.FromHwnd(h)?.AddHook((IntPtr hwnd, int message, IntPtr w, IntPtr l, ref bool handled) =>
-            {
-                if (message == 0x21) { handled = true; return new IntPtr(3); }
-                return IntPtr.Zero;
-            });
+            levels[i] = new Border { Width = 3, Height = 4, CornerRadius = new CornerRadius(2), Background = accent, VerticalAlignment = VerticalAlignment.Center, Opacity = .35 };
+            wave.Children.Add(levels[i]);
+        }
+        left.Children.Add(wave);
+        left.Children.Add(warning);
+        Grid.SetColumn(title, 1); Grid.SetColumn(elapsed, 2);
+        heading.Children.Add(left); heading.Children.Add(title); heading.Children.Add(elapsed);
+        var rows = new Grid { RowSpacing = 4 };
+        rows.RowDefinitions.Add(new RowDefinition { Height = new GridLength(22) });
+        rows.RowDefinitions.Add(new RowDefinition { Height = new GridLength(22) });
+        Grid.SetRow(preview, 1);
+        rows.Children.Add(heading); rows.Children.Add(preview);
+        root = new Border
+        {
+            Name = "OverlayRoot", RequestedTheme = ElementTheme.Dark,
+            Background = Brush(24, 31, 42), BorderBrush = Brush(67, 80, 96),
+            BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(14),
+            Padding = new Thickness(16, 12, 16, 12), Child = rows,
+            IsHitTestVisible = false
         };
-        SizeChanged += (_, _) => Position();
-        hide.Tick += (_, _) => { hide.Stop(); if (warning.Text.Length == 0) Hide(); };
+        Content = root;
+        hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+        var presenter = OverlappedPresenter.Create();
+        presenter.IsResizable = false; presenter.IsMinimizable = false;
+        presenter.IsMaximizable = false; presenter.IsAlwaysOnTop = true;
+        presenter.SetBorderAndTitleBar(false, false);
+        AppWindow.SetPresenter(presenter);
+        AppWindow.IsShownInSwitchers = false;
+
+        // Layered + transparent makes mouse hit testing pass through to other
+        // processes. Keep alpha fully opaque: WinUI renders via composition and
+        // must not use a GDI colour key to fake a transparent XAML background.
+        long exStyle = GetWindowLongPtr(hwnd, -20).ToInt64();
+        SetWindowLongPtr(hwnd, -20, new IntPtr((exStyle | 0x08000000 | 0x80 | 0x20 | 0x80000) & ~0x40000L));
+        SetLayeredWindowAttributes(hwnd, 0, 255, 2);
+        windowProc = WindowProc;
+        SetWindowSubclass(hwnd, windowProc, 1, 0);
+        root.Loaded += (_, _) => { Position(); FitPreview(); };
+        preview.SizeChanged += (_, _) => FitPreview();
+        hide.Tick += (_, _) =>
+        {
+            hide.Stop();
+            if (!closed && persistentWarning.Length == 0) AppWindow.Hide();
+        };
+        Closed += (_, _) =>
+        {
+            closed = true; hide.Stop();
+            RemoveWindowSubclass(hwnd, windowProc, 1);
+        };
     }
 
     public void BeginTurn()
     {
+        if (closed) return;
         targetMonitor = MonitorFromWindow(GetForegroundWindow(), 2);
         startedAt = Environment.TickCount64;
+        dismissPending = false;
+        SetMeter(0, true);
         Update("准备麦克风…");
     }
 
     public void SetMeter(float value, bool recording)
     {
-        meter.Value = recording ? Math.Clamp(value, 0, 1) : 0;
-        meter.Visibility = recording ? Visibility.Visible : Visibility.Collapsed;
-        elapsed.Text = recording && startedAt > 0 ? TimeSpan.FromMilliseconds(Environment.TickCount64 - startedAt).ToString(@"m\:ss") : "";
+        if (closed) return;
+        double level = recording && float.IsFinite(value) ? Math.Clamp(value, 0, 1) : 0;
+        for (int i = 0; i < levels.Length; i++)
+        {
+            double shape = 1 - Math.Abs(i - 2) * .22;
+            levels[i].Height = 4 + 14 * level * shape;
+            levels[i].Opacity = recording ? .65 + .35 * level : .35;
+            levels[i].Visibility = persistentWarning.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+        }
+        if (startedAt > 0 && !dismissPending)
+        {
+            var duration = TimeSpan.FromMilliseconds(Math.Max(0, Environment.TickCount64 - startedAt));
+            elapsed.Text = duration.TotalHours >= 1 ? duration.ToString(@"h\:mm\:ss") : duration.ToString(@"m\:ss");
+        }
+        else if (startedAt == 0) elapsed.Text = "";
     }
 
     public void Update(string status, string text = "", bool dismiss = false)
     {
+        if (closed) return;
         dismissPending = dismiss;
-        title.Text = status; preview.Text = text;
-        preview.Visibility = text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        title.Text = UiPresentation.LatestText(status ?? "", 36);
+        previewSource = UiPresentation.LatestText(text ?? "", 80);
+        FitPreview();
         hide.Stop();
-        if (dismiss) { SetMeter(0, false); startedAt = 0; }
+        if (dismiss) SetMeter(0, false);
         if (targetMonitor == IntPtr.Zero) targetMonitor = MonitorFromWindow(GetForegroundWindow(), 2);
-        new WindowInteropHelper(this).EnsureHandle();
         Position();
-        if (!IsVisible) Show();
-        UpdateLayout(); Position();
-        if (dismiss) hide.Start();
+        if (!AppWindow.IsVisible) AppWindow.Show(false);
+        // No Window.Activate call: showing feedback must preserve the target caret.
+        Position();
+        if (dismiss && persistentWarning.Length == 0) hide.Start();
     }
 
     public void SetPersistentWarning(string text)
     {
-        if (warning.Text == text) return;
-        warning.Text = text; warning.Visibility = text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
-        if (text.Length > 0 && !IsVisible) Update("有内容尚未保存", dismiss: true);
-        else if (text.Length == 0 && dismissPending) hide.Start();
-        if (IsVisible) { UpdateLayout(); Position(); }
+        if (closed || persistentWarning == text) return;
+        persistentWarning = text ?? "";
+        warning.Text = persistentWarning.Length == 0 ? "" : "未保存";
+        AutomationProperties.SetName(warning, persistentWarning);
+        warning.Visibility = persistentWarning.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+        foreach (var bar in levels) bar.Visibility = persistentWarning.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+        if (persistentWarning.Length > 0)
+        {
+            hide.Stop();
+            if (!AppWindow.IsVisible) Update("有内容尚未保存", "请在主窗口重试保存", dismiss: true);
+        }
+        else if (dismissPending) hide.Start();
+    }
+
+    public void Clear()
+    {
+        if (closed) return;
+        hide.Stop(); startedAt = 0; dismissPending = true; previewSource = "";
+        SetMeter(0, false);
+        if (persistentWarning.Length > 0) Update("有内容尚未保存", "请在主窗口重试保存", dismiss: true);
+        else AppWindow.Hide();
+    }
+
+    private void FitPreview()
+    {
+        if (closed) return;
+        string source = previewSource.Length == 0 ? "说话时会在这里显示文字" : previewSource;
+        // Measure a separate native TextBlock so the displayed line is never
+        // constrained while fitting. Trim whole graphemes from the beginning,
+        // preserving the newest spoken words, combining marks and emoji.
+        double available = preview.ActualWidth > 1 ? preview.ActualWidth : WidthDip - 34;
+        var starts = StringInfo.ParseCombiningCharacters(source);
+        string fitted = source;
+        for (int skip = 0; skip <= starts.Length; skip++)
+        {
+            fitted = skip == 0 ? source : skip < starts.Length ? "…" + source[starts[skip]..] : "…";
+            measure.Text = fitted;
+            measure.Measure(new Size(double.PositiveInfinity, HeightDip));
+            if (measure.DesiredSize.Width <= available || skip == starts.Length) break;
+        }
+        if (preview.Text != fitted) preview.Text = fitted;
+        preview.Opacity = previewSource.Length == 0 ? .55 : 1;
     }
 
     private void Position()
     {
-        if (positioning || targetMonitor == IntPtr.Zero) return;
+        if (closed || positioning || targetMonitor == IntPtr.Zero) return;
         var info = new MonitorInfo { Size = Marshal.SizeOf<MonitorInfo>() };
         if (!GetMonitorInfo(targetMonitor, ref info))
         {
             targetMonitor = MonitorFromWindow(GetForegroundWindow(), 2);
             if (!GetMonitorInfo(targetMonitor, ref info)) return;
         }
-        IntPtr hwnd = new WindowInteropHelper(this).Handle;
-        if (hwnd == IntPtr.Zero) return;
         positioning = true;
         try
         {
-            // Native coordinates preserve negative monitor origins and avoid applying
-            // the primary screen's DPI to a target on another monitor.
+            // Move first so GetDpiForWindow reflects the target display. Native
+            // work-area coordinates correctly preserve negative monitor origins.
             if (MonitorFromWindow(hwnd, 2) != targetMonitor)
-                SetWindowPos(hwnd, IntPtr.Zero, info.Work.Left + 16, info.Work.Top + 16, 0, 0, 0x15);
-            uint dpi = GetDpiForWindow(hwnd); double scale = (dpi == 0 ? 96 : dpi) / 96.0;
-            double available = Math.Max(160, (info.Work.Right - info.Work.Left) / scale - 32);
-            Width = Math.Min(610, available); UpdateLayout();
-            int width = (int)Math.Ceiling((ActualWidth > 0 ? ActualWidth : Width) * scale);
-            int height = (int)Math.Ceiling((ActualHeight > 0 ? ActualHeight : 160) * scale);
-            int left = info.Work.Left + Math.Max(0, (info.Work.Right - info.Work.Left - width) / 2);
-            int top = Math.Max(info.Work.Top + 8, info.Work.Bottom - height - (int)(28 * scale));
-            SetWindowPos(hwnd, IntPtr.Zero, left, top, 0, 0, 0x15);
+                SetWindowPos(hwnd, IntPtr.Zero, info.Work.Left + 8, info.Work.Top + 8, 0, 0, 0x0015);
+            uint dpi = GetDpiForWindow(hwnd);
+            double scale = (dpi == 0 ? 96 : dpi) / 96.0;
+            int workWidth = Math.Max(1, info.Work.Right - info.Work.Left);
+            int workHeight = Math.Max(1, info.Work.Bottom - info.Work.Top);
+            int width = Math.Min((int)Math.Round(WidthDip * scale), Math.Max(1, workWidth - (int)Math.Round(32 * scale)));
+            int height = Math.Min((int)Math.Round(HeightDip * scale), workHeight);
+            SetWindowPos(hwnd, new IntPtr(-1), 0, 0, width, height, 0x0012);
+            // Centre the actual HWND, not XAML's desired size; neither long text
+            // nor an unsaved badge can change its footprint.
+            if (GetWindowRect(hwnd, out var actual))
+            {
+                width = actual.Right - actual.Left;
+                height = actual.Bottom - actual.Top;
+            }
+            int left = info.Work.Left + (workWidth - width) / 2;
+            int top = Math.Max(info.Work.Top, info.Work.Bottom - height - (int)Math.Round(BottomMarginDip * scale));
+            SetWindowPos(hwnd, new IntPtr(-1), left, top, 0, 0, 0x0011);
+            // A native rounded region also works on Windows 10 and clips the
+            // rectangular composition surface without unsupported transparency.
+            IntPtr region = CreateRoundRectRgn(0, 0, width + 1, height + 1, (int)Math.Round(28 * scale), (int)Math.Round(28 * scale));
+            if (region != IntPtr.Zero && SetWindowRgn(hwnd, region, true) == 0) DeleteObject(region);
         }
         finally { positioning = false; }
     }
 
-    public void Clear() { hide.Stop(); startedAt = 0; SetMeter(0, false); Hide(); }
+    private IntPtr WindowProc(IntPtr window, uint message, IntPtr wParam, IntPtr lParam, nuint id, nuint data)
+    {
+        if (message == 0x0021) return new IntPtr(3); // WM_MOUSEACTIVATE: MA_NOACTIVATE
+        if (message == 0x0084) return new IntPtr(-1); // WM_NCHITTEST: HTTRANSPARENT
+        var result = DefSubclassProc(window, message, wParam, lParam);
+        if (!closed && (message == 0x02E0 || message == 0x007E || message == 0x001A) && !repositionQueued)
+        {
+            // Let WinUI process WM_DPICHANGED before restoring the bottom centre.
+            repositionQueued = true;
+            if (!DispatcherQueue.TryEnqueue(() => { repositionQueued = false; Position(); FitPreview(); })) repositionQueued = false;
+        }
+        return result;
+    }
+
+    private static SolidColorBrush Brush(byte r, byte g, byte b) => new(Windows.UI.Color.FromArgb(255, r, g, b));
+    private static TextBlock Label(string name, double size, SolidColorBrush foreground)
+    {
+        var label = new TextBlock
+        {
+            Name = name, FontFamily = new FontFamily("Segoe UI Variable, Microsoft YaHei UI, Segoe UI"),
+            FontSize = size, Foreground = foreground, VerticalAlignment = VerticalAlignment.Center,
+            TextWrapping = TextWrapping.NoWrap, MaxLines = 1, IsTextSelectionEnabled = false
+        };
+        if (name.Length > 0) AutomationProperties.SetAutomationId(label, name);
+        return label;
+    }
+
     [StructLayout(LayoutKind.Sequential)] private struct Rect { public int Left, Top, Right, Bottom; }
     [StructLayout(LayoutKind.Sequential)] private struct MonitorInfo { public int Size; public Rect Monitor, Work; public uint Flags; }
+    [UnmanagedFunctionPointer(CallingConvention.Winapi)] private delegate IntPtr SubclassProc(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam, nuint id, nuint data);
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetWindowRect(IntPtr hwnd, out Rect rect);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int width, int height, uint flags);
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] private static extern IntPtr GetWindowLongPtr(IntPtr hwnd, int index);
     [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")] private static extern IntPtr SetWindowLongPtr(IntPtr hwnd, int index, IntPtr value);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint key, byte alpha, uint flags);
+    [DllImport("user32.dll")] private static extern int SetWindowRgn(IntPtr hwnd, IntPtr region, [MarshalAs(UnmanagedType.Bool)] bool redraw);
+    [DllImport("gdi32.dll")] private static extern IntPtr CreateRoundRectRgn(int left, int top, int right, int bottom, int ellipseWidth, int ellipseHeight);
+    [DllImport("gdi32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool DeleteObject(IntPtr value);
+    [DllImport("comctl32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SetWindowSubclass(IntPtr hwnd, SubclassProc callback, nuint id, nuint data);
+    [DllImport("comctl32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool RemoveWindowSubclass(IntPtr hwnd, SubclassProc callback, nuint id);
+    [DllImport("comctl32.dll")] private static extern IntPtr DefSubclassProc(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam);
 }

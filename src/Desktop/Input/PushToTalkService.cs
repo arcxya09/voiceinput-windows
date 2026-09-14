@@ -30,6 +30,7 @@ public sealed class PushToTalkService : IAsyncDisposable
     private Task? running;
     private bool disposed;
     public bool Enabled {get;private set;}=true;
+    public Func<bool>? CanStart { get; set; }
     public bool Busy=>Volatile.Read(ref active)!=null;
     public bool DictationOnly=>controller.Settings.DictationOnly;
     public event Action<string>? Notice;
@@ -61,7 +62,7 @@ public sealed class PushToTalkService : IAsyncDisposable
             {
                 if(s.Kind=="down")
                 {
-                    if(!Enabled)continue;
+                    if(!Enabled||CanStart?.Invoke()==false)continue;
                     if(active!=null){Notice?.Invoke("上一段仍在整理，请稍后再按。");continue;}
                     var native=s.Target;bool dictationOnly=DictationOnly;
                     if(!dictationOnly&&native==null){Notice?.Invoke("暂时无法确认外部输入窗口，请重新按住说话；也可开启“只听写，不自动输入”。");continue;}
@@ -161,3 +162,4 @@ public sealed class PushToTalkService : IAsyncDisposable
         controller.InputInterrupted-=Cancel;hook.Dispose();lifetime.Cancel();signals.Writer.TryComplete();try{await Task.WhenAll(loop,watchdog);}catch{}await TextDelivery.ShutdownAsync();lifetime.Dispose();
     }
 }
+

@@ -173,7 +173,7 @@ function Publish-VoiceInputRelease {
         return
     }
     $tag = "v$Version"
-    $expected = @("VoiceInput-Windows-x64-$Version.exe", "VoiceInput-Source-$Version.zip", 'build-output.log', 'SHA256SUMS.txt')
+    $expected = @("VoiceInput-Windows-x64-$Version.zip", "VoiceInput-Source-$Version.zip", 'build-output.log', 'SHA256SUMS.txt')
     Assert-DownloadedAssets $ArtifactDirectory $expected $Commit
     $release = Read-Release $tag -AllowMissing
     if ($null -eq $release) {
@@ -237,3 +237,4 @@ if (!$FunctionsOnly) {
     if (!$Notes) { $Notes = "docs/releases/$Version.md" }
     Publish-VoiceInputRelease
 }
+

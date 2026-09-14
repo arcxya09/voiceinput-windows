@@ -4,6 +4,12 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      refresh_dependency_locks:
+        description: Refresh and export NuGet lock files for review (never publishes)
+        required: false
+        default: false
+        type: boolean
 permissions:
   contents: read
 concurrency:
@@ -25,7 +31,9 @@ jobs:
         run: ./scripts/TestReleasePublication.ps1 *>&1 | Tee-Object -FilePath build-output.log
       - name: Test and publish Windows x64
         shell: pwsh
-        run: ./build.ps1 *>&1 | Tee-Object -FilePath build-output.log -Append
+        env:
+          REFRESH_DEPENDENCY_LOCKS: ${{ inputs.refresh_dependency_locks || (github.event_name == 'pull_request' && github.head_ref == 'refactor/winui-2.0') }}
+        run: ./build.ps1 -UpdateDependencyLocks:($env:REFRESH_DEPENDENCY_LOCKS -eq 'true') *>&1 | Tee-Object -FilePath build-output.log -Append
       - name: Exercise actual Windows executable without microphone or cloud
         shell: pwsh
         run: ./scripts/WindowsSmoke.ps1 *>&1 | Tee-Object -FilePath build-output.log -Append
@@ -36,8 +44,8 @@ jobs:
           $version = ([xml](Get-Content Directory.Build.props -Raw)).Project.PropertyGroup.Version
           if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid release version' }
           "version=$version" >> $env:GITHUB_OUTPUT
-          $exe = "artifacts/VoiceInput-Windows-x64-$version.exe"
-          if (!(Test-Path $exe)) { throw 'Missing executable' }
+          $portable = "artifacts/VoiceInput-Windows-x64-$version.zip"
+          if (!(Test-Path $portable)) { throw 'Missing portable WinUI package' }
           git archive --format=zip --prefix=VoiceInput/ --output="artifacts/VoiceInput-Source-$version.zip" HEAD
           if ($LASTEXITCODE -ne 0) { throw 'Source archive failed' }
           Copy-Item build-output.log artifacts/build-output.log
@@ -51,6 +59,15 @@ jobs:
           name: VoiceInput-Windows-x64-${{ steps.assets.outputs.version }}
           path: artifacts/*.*
           if-no-files-found: error
+      - name: Preserve generated dependency locks
+        if: always() && inputs.refresh_dependency_locks == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-locks-${{ github.run_id }}
+          path: |
+            src/**/packages*.lock.json
+            tests/packages*.lock.json
+          if-no-files-found: error
       - name: Preserve offline desktop evidence and failure logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -58,11 +75,13 @@ jobs:
           name: windows-verification-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             windows-smoke.json
+            windows-smoke.log
             windows-smoke.png
+            windows-overlay.png
             build-output.log
           if-no-files-found: ignore
   release:
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && inputs.refresh_dependency_locks != true
     needs: build
     runs-on: windows-latest
     timeout-minutes: 15
