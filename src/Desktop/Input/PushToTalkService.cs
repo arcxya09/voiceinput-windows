@@ -151,13 +151,18 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
     private async Task CompletePreviewAsync(Turn turn, string status)
     {
         string text = "";
+        string? deliveryState = null;
         try
         {
             var snapshot = await controller.SnapshotAsync();
-            if (snapshot.Session?.Id == turn.Id) text = TranscriptText.Render(snapshot);
+            if (snapshot.Session?.Id == turn.Id)
+            {
+                text = TranscriptText.Render(snapshot);
+                deliveryState = snapshot.Session.DeliveryState;
+            }
         }
         catch { /* A controller being disposed cannot supply another snapshot. */ }
-        TurnCompleted?.Invoke(new(turn.Id, status, text));
+        TurnCompleted?.Invoke(new(turn.Id, status, text) { DeliveryState = deliveryState });
     }
 
     private async Task Watchdog()

@@ -1,8 +1,14 @@
 namespace RealtimeTranscription.Core;
 
-public record VoiceTurnCompletion(string TurnId, string Status, string Text);
+public record VoiceTurnCompletion(string TurnId, string Status, string Text)
+{
+    public string? DeliveryState { get; init; }
+}
 public record VoiceInputNotice(string Status, string? TurnId = null);
-public record VoicePreviewFrame(string Status, string Text, bool Dismiss);
+public record VoicePreviewFrame(string Status, string Text, bool Dismiss)
+{
+    public string? DeliveryState { get; init; }
+}
 
 /// <summary>Feedback events carry their originating turn across the UI dispatcher.</summary>
 public interface IVoicePreviewEvents
@@ -39,7 +45,7 @@ public sealed class VoicePreviewState
     {
         if (TurnId != result.TurnId || IsCompleted) return null;
         IsCompleted = true;
-        return new(result.Status, result.Text, true);
+        return new(result.Status, result.Text, true) { DeliveryState = result.DeliveryState };
     }
 
     // In-turn reminders must not dismiss a recording, overwrite its final result,
