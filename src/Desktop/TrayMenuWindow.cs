@@ -99,7 +99,8 @@ public sealed class TrayMenuWindow : Window, IDisposable
         root.Loaded += (_, _) => { if (IsOpen) Position(); };
         uiSettings.TextScaleFactorChanged += SystemAppearanceChanged;
         uiSettings.ColorValuesChanged += SystemAppearanceChanged;
-        accessibility.HighContrastChanged += HighContrastChanged;
+        // Native setting/color/theme broadcasts cover high-contrast changes.
+        // Its WinRT event registration is unavailable on some desktop sessions.
         Activated += (_, args) =>
         {
             if (args.WindowActivationState == WindowActivationState.Deactivated && IsOpen)
@@ -116,7 +117,6 @@ public sealed class TrayMenuWindow : Window, IDisposable
             chrome.Dispose();
             uiSettings.TextScaleFactorChanged -= SystemAppearanceChanged;
             uiSettings.ColorValuesChanged -= SystemAppearanceChanged;
-            accessibility.HighContrastChanged -= HighContrastChanged;
         };
     }
 
@@ -227,7 +227,6 @@ public sealed class TrayMenuWindow : Window, IDisposable
         root.BorderBrush = new SolidColorBrush(highContrast ? uiSettings.GetColorValue(UIColorType.Foreground) : dark ? Windows.UI.Color.FromArgb(255, 64, 64, 64) : Windows.UI.Color.FromArgb(255, 218, 218, 218));
     }
 
-    private void HighContrastChanged(AccessibilitySettings sender, object args) => QueueAppearanceUpdate();
     private void SystemAppearanceChanged(UISettings sender, object args) => QueueAppearanceUpdate();
 
     private void QueueAppearanceUpdate()
@@ -274,10 +273,17 @@ public sealed class TrayMenuWindow : Window, IDisposable
     {
         if (message == 0x0100 && wParam.ToInt64() == 27) { HideMenu(); return IntPtr.Zero; }
         var result = DefSubclassProc(window, message, wParam, lParam);
-        if (message is 0x02E0 or 0x007E or 0x001A && !closed && !repositionQueued)
+        if (message is 0x02E0 or 0x007E or 0x001A or 0x0015 or 0x031A && !closed && !repositionQueued)
         {
             repositionQueued = true;
-            if (!DispatcherQueue.TryEnqueue(() => { repositionQueued = false; if (!closed && IsOpen) Position(); })) repositionQueued = false;
+            if (!DispatcherQueue.TryEnqueue(() =>
+            {
+                repositionQueued = false;
+                if (closed) return;
+                ApplyTheme();
+                root.InvalidateMeasure();
+                if (IsOpen) Position();
+            })) repositionQueued = false;
         }
         return result;
     }

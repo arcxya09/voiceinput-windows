@@ -106,7 +106,9 @@ public sealed class VoiceOverlay : Window
         root.Loaded += (_, _) => { Position(); FitPreview(); };
         uiSettings.TextScaleFactorChanged += SystemAppearanceChanged;
         uiSettings.ColorValuesChanged += SystemAppearanceChanged;
-        accessibility.HighContrastChanged += HighContrastChanged;
+        // AccessibilitySettings.HighContrastChanged cannot be registered on
+        // some unpackaged desktops (ERROR_NOT_FOUND). Read its supported state
+        // property when native setting/color/theme broadcasts arrive instead.
         preview.SizeChanged += (_, _) => FitPreview();
         hide.Tick += (_, _) =>
         {
@@ -120,7 +122,6 @@ public sealed class VoiceOverlay : Window
             chrome.Dispose();
             uiSettings.TextScaleFactorChanged -= SystemAppearanceChanged;
             uiSettings.ColorValuesChanged -= SystemAppearanceChanged;
-            accessibility.HighContrastChanged -= HighContrastChanged;
         };
     }
 
@@ -217,7 +218,6 @@ public sealed class VoiceOverlay : Window
             ? root.ActualTheme == ElementTheme.Dark ? .55 : .72 : 1;
     }
 
-    private void HighContrastChanged(AccessibilitySettings sender, object args) => QueueAppearanceUpdate();
     private void SystemAppearanceChanged(UISettings sender, object args) => QueueAppearanceUpdate();
 
     private void QueueAppearanceUpdate()
@@ -299,11 +299,19 @@ public sealed class VoiceOverlay : Window
         if (message == 0x0021) return new IntPtr(3); // WM_MOUSEACTIVATE: MA_NOACTIVATE
         if (message == 0x0084) return new IntPtr(-1); // WM_NCHITTEST: HTTRANSPARENT
         var result = DefSubclassProc(window, message, wParam, lParam);
-        if (!closed && (message == 0x02E0 || message == 0x007E || message == 0x001A) && !repositionQueued)
+        if (!closed && message is 0x02E0 or 0x007E or 0x001A or 0x0015 or 0x031A && !repositionQueued)
         {
-            // Let WinUI process WM_DPICHANGED before restoring the bottom centre.
+            // Let WinUI process DPI/theme messages before restoring the bottom
+            // centre. WM_SYSCOLORCHANGE also signals native high-contrast changes.
             repositionQueued = true;
-            if (!DispatcherQueue.TryEnqueue(() => { repositionQueued = false; Position(); FitPreview(); })) repositionQueued = false;
+            if (!DispatcherQueue.TryEnqueue(() =>
+            {
+                repositionQueued = false;
+                if (closed) return;
+                ApplyAccessibility();
+                Position();
+                FitPreview();
+            })) repositionQueued = false;
         }
         return result;
     }
