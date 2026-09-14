@@ -131,7 +131,7 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
             else if(t.DictationOnly)result=new("Dictated","听写完成，文字已保留，可复制。");
             else
             {
-                await controller.SetDeliveryAsync("Sending","正在输入…",turnId:t.Id);
+                await controller.SetDeliveryAsync("Sending","正在粘贴…",turnId:t.Id);
                 result=await TextDelivery.SendAsync(target!,text,()=>!t.Invalid&&activity.Matches(t.ActivityVersion)&&ReferenceEquals(active,t),t.Cancel.Token);
             }
             await controller.SetDeliveryAsync(result.State,result.Message,result.Accepted,t.Id);
@@ -190,4 +190,3 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
         controller.InputInterrupted-=Cancel;hook.Dispose();lifetime.Cancel();signals.Writer.TryComplete();try{await Task.WhenAll(loop,watchdog);}catch{}await TextDelivery.ShutdownAsync();lifetime.Dispose();
     }
 }
-

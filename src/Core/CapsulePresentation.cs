@@ -6,6 +6,7 @@ public static class CapsulePresentation
     public static string CompletionLabel(string? state) => state switch
     {
         "Sent" => "已输入",
+        "PasteSent" => "已发起粘贴",
         "Dictated" or "Blocked" => "待复制",
         "Cancelled" => "已取消",
         "Partial" => "部分输入",

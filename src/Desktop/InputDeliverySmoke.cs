@@ -11,8 +11,61 @@ namespace RealtimeTranscription.Desktop;
 internal static class InputDeliverySmoke
 {
     private const string TargetArgument = "--voiceinput-delivery-target";
-    private sealed record Request(string Operation, string Mode = "plain", string Text = "", int Start = 0, int Length = 0);
-    private sealed record Reply(string Code, long Window = 0, long Focus = 0, uint Thread = 0, uint Process = 0, string Text = "");
+    private const string ClipboardSeed = "VoiceInput isolated paste fixture seed";
+    private sealed record Request(string Operation, string Mode = "plain", string Text = "", int Start = 0, int Length = 0, bool DelayPaste = false);
+    private sealed record Reply(string Code, long Window = 0, long Focus = 0, uint Thread = 0, uint Process = 0,
+        string Text = "", string ClipboardText = "", int PasteDown = 0, int PasteUp = 0, int PacketKeys = 0,
+        int PasteMessages = 0, int DelayedPastes = 0);
+
+    // Observe the native control messages, independently of the production
+    // dispatch result. A successful text readback alone would also pass for the
+    // old per-character input path that this regression is meant to replace.
+    private sealed class InputProbe : IDisposable
+    {
+        private Forms.Timer? delayedPaste;
+        internal bool DelayPaste;
+        internal int PasteDown, PasteUp, PacketKeys, PasteMessages, DelayedPastes;
+        internal void Reset(bool delayPaste)
+        {
+            delayedPaste?.Dispose(); delayedPaste = null;
+            DelayPaste = delayPaste;
+            PasteDown = PasteUp = PacketKeys = PasteMessages = DelayedPastes = 0;
+        }
+        internal bool Observe(Forms.Message message, Forms.TextBoxBase editor)
+        {
+            if (message.Msg == 0x0302) PasteMessages++; // WM_PASTE, if emitted by this control.
+            if (DelayPaste && message.Msg == 0x0102 && message.WParam.ToInt64() == 0x16) return true; // WM_CHAR Ctrl+V.
+            if (message.Msg is not (0x0100 or 0x0101)) return false;
+            int key = unchecked((int)message.WParam.ToInt64());
+            if (key == 0xE7 && message.Msg == 0x0100) PacketKeys++; // VK_PACKET.
+            if (key != 0x56 || (GetKeyState(0x11) & 0x8000) == 0) return false;
+            if (message.Msg == 0x0100) PasteDown++; else PasteUp++;
+            if (!DelayPaste || message.Msg != 0x0100) return false;
+            delayedPaste?.Dispose();
+            delayedPaste = new Forms.Timer { Interval = 250 };
+            delayedPaste.Tick += (_, _) =>
+            {
+                delayedPaste?.Stop();
+                DelayedPastes++;
+                editor.Paste();
+            };
+            delayedPaste.Start();
+            return true;
+        }
+        public void Dispose() => delayedPaste?.Dispose();
+    }
+
+    private sealed class PlainEditor(InputProbe probe) : Forms.TextBox
+    {
+        protected override void WndProc(ref Forms.Message message)
+        { if (!probe.Observe(message, this)) base.WndProc(ref message); }
+    }
+
+    private sealed class RichEditor(InputProbe probe) : Forms.RichTextBox
+    {
+        protected override void WndProc(ref Forms.Message message)
+        { if (!probe.Observe(message, this)) base.WndProc(ref message); }
+    }
 
     internal static bool IsTarget(string[] args) => args.Length == 2 && args[0] == TargetArgument
         && int.TryParse(args[1], out int parent) && parent > 0;
@@ -21,29 +74,73 @@ internal static class InputDeliverySmoke
     {
         using var form = new Forms.Form { Text = "VoiceInput isolated input fixture", Width = 640, Height = 220,
             StartPosition = Forms.FormStartPosition.CenterScreen, ShowInTaskbar = false };
-        using var plain = new Forms.TextBox { Multiline = true, Dock = Forms.DockStyle.Fill };
-        using var rich = new Forms.RichTextBox { Dock = Forms.DockStyle.Fill, Visible = false, DetectUrls = false };
+        using var probe = new InputProbe();
+        using var plain = new PlainEditor(probe) { Multiline = true, Dock = Forms.DockStyle.Fill };
+        using var rich = new RichEditor(probe) { Dock = Forms.DockStyle.Fill, Visible = false, DetectUrls = false };
         form.Controls.Add(plain); form.Controls.Add(rich);
         Forms.TextBoxBase editor = plain;
+        // Smoke tests run on an isolated Windows desktop. Preserve an initial
+        // empty/text clipboard, and refuse richer formats instead of discarding
+        // them if somebody launches this fixture on their own desktop.
+        string? originalText = null;
+        uint ownedClipboardSequence = 0;
+        bool clipboardPrepared = false;
+        void PreserveClipboard()
+        {
+            var original = Forms.Clipboard.GetDataObject();
+            var formats = original?.GetFormats(autoConvert: false) ?? [];
+            string[] textFormats = [Forms.DataFormats.Text, Forms.DataFormats.UnicodeText,
+                Forms.DataFormats.OemText, Forms.DataFormats.Locale, Forms.DataFormats.StringFormat];
+            if (formats.Any(format => !textFormats.Contains(format, StringComparer.Ordinal)))
+                throw new InvalidOperationException("The isolated paste fixture requires an empty or text-only clipboard.");
+            originalText = formats.Length == 0 ? null : Forms.Clipboard.GetText(Forms.TextDataFormat.UnicodeText);
+            clipboardPrepared = true;
+        }
+        void RestoreClipboard()
+        {
+            if (!clipboardPrepared || ownedClipboardSequence == 0 || GetClipboardSequenceNumber() != ownedClipboardSequence) return;
+            try
+            {
+                if (originalText == null || originalText.Length == 0) Forms.Clipboard.Clear();
+                else Forms.Clipboard.SetText(originalText, Forms.TextDataFormat.UnicodeText);
+            }
+            catch { } // Do not mask an earlier assertion or overwrite a newer clipboard on retry.
+        }
         void Respond(Reply reply) { Console.Out.WriteLine(JsonSerializer.Serialize(reply)); Console.Out.Flush(); }
-        Reply Current(string code = "Ready")
+        Reply Current(string code = "Ready", string clipboardText = "")
         {
             uint thread = Win32.GetWindowThreadProcessId(form.Handle, out uint process);
-            return new(code, form.Handle.ToInt64(), editor.Handle.ToInt64(), thread, process, editor.Text);
+            return new(code, form.Handle.ToInt64(), editor.Handle.ToInt64(), thread, process, editor.Text,
+                clipboardText, probe.PasteDown, probe.PasteUp, probe.PacketKeys, probe.PasteMessages, probe.DelayedPastes);
         }
         void Dispatch(Request request)
         {
-            if (request.Operation == "Prepare")
+            try
             {
-                editor = request.Mode == "rich" ? rich : plain;
-                plain.Visible = ReferenceEquals(editor, plain); rich.Visible = ReferenceEquals(editor, rich);
-                editor.BringToFront(); editor.Text = request.Text;
-                editor.Select(request.Start, request.Length); form.Activate(); editor.Focus();
-                Respond(Current());
+                if (request.Operation == "Prepare")
+                {
+                    if (!clipboardPrepared) PreserveClipboard();
+                    Forms.Clipboard.SetText(ClipboardSeed, Forms.TextDataFormat.UnicodeText);
+                    ownedClipboardSequence = GetClipboardSequenceNumber();
+                    probe.Reset(request.DelayPaste);
+                    editor = request.Mode == "rich" ? rich : plain;
+                    plain.Visible = ReferenceEquals(editor, plain); rich.Visible = ReferenceEquals(editor, rich);
+                    editor.BringToFront(); editor.Text = request.Text;
+                    editor.Select(request.Start, request.Length); form.Activate(); editor.Focus();
+                    Respond(Current());
+                }
+                else if (request.Operation == "Read")
+                {
+                    uint beforeRead = GetClipboardSequenceNumber();
+                    string clipboardText = Forms.Clipboard.GetText(Forms.TextDataFormat.UnicodeText);
+                    uint afterRead = GetClipboardSequenceNumber();
+                    if (beforeRead == afterRead && clipboardText == request.Text) ownedClipboardSequence = afterRead;
+                    Respond(Current(clipboardText: clipboardText));
+                }
+                else if (request.Operation == "Exit") form.Close();
+                else Respond(new("Invalid"));
             }
-            else if (request.Operation == "Read") Respond(Current());
-            else if (request.Operation == "Exit") form.Close();
-            else Respond(new("Invalid"));
+            catch (Exception ex) { Respond(new("Error", Text: ex.Message)); }
         }
         form.Shown += (_, _) =>
         {
@@ -69,7 +166,8 @@ internal static class InputDeliverySmoke
             catch { }
             Environment.Exit(0);
         }) { IsBackground = true, Name = "Input fixture parent lifetime" }.Start();
-        Forms.Application.Run(form);
+        try { Forms.Application.Run(form); }
+        finally { RestoreClipboard(); }
         return 0;
     }
 
@@ -108,16 +206,23 @@ internal static class InputDeliverySmoke
             Require(initial.Code == "Ready" && initial.Process == (uint)process.Id, "The fixture identity is not the child process.");
             await TextDelivery.InitializeAsync();
             const string sentence = "感觉好像就不太准确。";
+            const string twoSentences = "测试一下这次的输入是否准确。看起来没有什么问题。";
             foreach (string mode in new[] { "plain", "rich" })
             foreach (var sample in new[]
             {
-                (Initial: "", Start: 0, Length: 0, Text: sentence),
-                (Initial: "前文旧词后文", Start: 2, Length: 2, Text: sentence),
-                (Initial: "", Start: 0, Length: 0, Text: "🧪" + sentence + "e\u0301👩🏽‍🔬"),
-                (Initial: "", Start: 0, Length: 0, Text: new string('中', 127) + "🧪" + sentence)
+                (Initial: "", Start: 0, Length: 0, Text: sentence, Delayed: false),
+                (Initial: "", Start: 0, Length: 0, Text: twoSentences, Delayed: false),
+                (Initial: "前文旧词后文", Start: 2, Length: 2, Text: sentence, Delayed: false),
+                (Initial: "前文旧词后文", Start: 2, Length: 2, Text: twoSentences, Delayed: false),
+                (Initial: "", Start: 0, Length: 0, Text: "🧪" + sentence + "e\u0301👩🏽‍🔬", Delayed: false),
+                (Initial: "", Start: 0, Length: 0, Text: new string('中', 127) + "🧪" + sentence, Delayed: false),
+                (Initial: "", Start: 0, Length: 0, Text: sentence + "\r\n" + twoSentences + "\r\n🧪e\u0301", Delayed: false),
+                (Initial: "", Start: 0, Length: 0, Text: sentence + "\n" + twoSentences + "\r🧪e\u0301", Delayed: false),
+                (Initial: "", Start: 0, Length: 0, Text: twoSentences, Delayed: true)
             })
             {
-                var prepared = await Query(new("Prepare", mode, sample.Initial, sample.Start, sample.Length));
+                var prepared = await Query(new("Prepare", mode, sample.Initial, sample.Start, sample.Length, sample.Delayed));
+                Require(prepared.Code == "Ready", "The fixture could not prepare " + mode + ": " + prepared.Text);
                 Require(prepared.Process == (uint)process.Id && prepared.Window == initial.Window, "The fixture moved to a foreign window.");
                 var native = new NativeTarget(new IntPtr(prepared.Window), new IntPtr(prepared.Focus), prepared.Thread, prepared.Process);
                 _ = SetForegroundWindow(native.Window);
@@ -130,22 +235,55 @@ internal static class InputDeliverySmoke
                 try
                 {
                     var result = await TextDelivery.SendAsync(capture.Target!, sample.Text, Safe, token);
-                    Require(result.State == "Sent" && result.Accepted == sample.Text.Length * 2,
-                        "The production input path stopped unexpectedly: " + result.State + " / " + result.Message);
+                    Require(result.State == "PasteSent" && result.Accepted == 4,
+                        "The production input path stopped unexpectedly: " + result.State + " / " + result.Diagnostic + " / " + result.Message);
                     string expected = sample.Initial[..sample.Start] + sample.Text + sample.Initial[(sample.Start + sample.Length)..];
-                    string actual = "";
+                    Reply readback = new("Pending");
+                    // WinForms plain edit exposes CRLF; rich edit exposes LF.
+                    // CF_UNICODETEXT uses Windows CRLF. Every non-newline
+                    // character must remain exact in clipboard and control.
+                    static string Lines(string text) => text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+                    string expectedClipboard = Lines(sample.Text).Replace("\n", "\r\n", StringComparison.Ordinal);
                     for (int i = 0; i < 50; i++)
                     {
-                        actual = (await Query(new("Read"))).Text;
-                        if (actual == expected) break;
+                        readback = await Query(new("Read", Text: expectedClipboard));
+                        Require(readback.Code == "Ready", "The fixture read failed: " + readback.Text);
+                        if (Lines(readback.Text) == Lines(expected) && readback.PasteUp == 1) break;
                         await Task.Delay(20, token);
                     }
-                    Require(actual == expected, mode + " text mismatch. Expected fixture=" + JsonSerializer.Serialize(expected)
-                        + "; actual fixture=" + JsonSerializer.Serialize(actual));
+                    Require(Lines(readback.Text) == Lines(expected), mode + " text mismatch. Expected fixture=" + JsonSerializer.Serialize(expected)
+                        + "; actual fixture=" + JsonSerializer.Serialize(readback.Text));
+                    Require(readback.PasteDown == 1 && readback.PasteUp == 1 && readback.PacketKeys == 0 && readback.PasteMessages <= 1,
+                        mode + " must receive one Ctrl+V gesture and no per-character Unicode input: "
+                        + $"down={readback.PasteDown}, up={readback.PasteUp}, packets={readback.PacketKeys}, WM_PASTE={readback.PasteMessages}");
+                    Require(readback.ClipboardText == expectedClipboard, mode + " clipboard did not retain the full recognition result with Windows line endings.");
+                    Require(readback.DelayedPastes == (sample.Delayed ? 1 : 0), mode + " delayed clipboard consumption did not run as requested.");
                 }
                 finally { await TextDelivery.ReleaseAsync(capture.Target!); }
             }
-            return ["Production Unicode delivery reads back the exact reported Chinese sentence in independent plain and rich edit controls, including selection replacement, emoji and a 128-unit boundary"];
+            var beforeFocusChange = await Query(new("Prepare", Text: "original control"));
+            Require(beforeFocusChange.Code == "Ready", "The focus-change fixture could not prepare.");
+            var originalNative = new NativeTarget(new IntPtr(beforeFocusChange.Window), new IntPtr(beforeFocusChange.Focus),
+                beforeFocusChange.Thread, beforeFocusChange.Process);
+            bool OriginalSafe() => !process.HasExited && originalNative.Process == (uint)process.Id && Win32.Current() == originalNative;
+            var originalCapture = await TextDelivery.CaptureAsync(originalNative, OriginalSafe, token);
+            Require(originalCapture.Target != null, "The original control could not be captured before the focus-change check.");
+            try
+            {
+                var changed = await Query(new("Prepare", "rich", "new control remains unchanged"));
+                Require(changed.Code == "Ready" && changed.Process == (uint)process.Id && changed.Window == initial.Window
+                    && changed.Focus != beforeFocusChange.Focus && !OriginalSafe(), "The fixture did not move focus to its other control.");
+                var blocked = await TextDelivery.SendAsync(originalCapture.Target!, twoSentences, OriginalSafe, token);
+                Require(blocked.State == "Blocked" && blocked.Accepted == 0, "A changed input focus must block clipboard preparation and paste.");
+                var unchanged = await Query(new("Read", Text: ClipboardSeed));
+                Require(unchanged.Code == "Ready" && unchanged.Text == "new control remains unchanged"
+                    && unchanged.ClipboardText == ClipboardSeed && unchanged.PasteDown == 0 && unchanged.PasteUp == 0
+                    && unchanged.PacketKeys == 0 && unchanged.PasteMessages == 0,
+                    "Changing focus must leave both the new control and clipboard unchanged.");
+            }
+            finally { await TextDelivery.ReleaseAsync(originalCapture.Target!); }
+            return ["Production full-text clipboard delivery reads back both reported Chinese examples in independent plain and rich edit controls, including selection replacement, emoji, long text, multiple lines and delayed paste; each receives exactly one Ctrl+V, zero Unicode packet keys, and retains the complete result on the clipboard",
+                "Changing focus to another isolated control blocks delivery before changing the clipboard or sending a paste gesture"];
         }
         finally
         {
@@ -159,4 +297,6 @@ internal static class InputDeliverySmoke
 
     [DllImport("user32.dll")] private static extern bool AllowSetForegroundWindow(uint process);
     [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr window);
+    [DllImport("user32.dll")] private static extern short GetKeyState(int key);
+    [DllImport("user32.dll")] private static extern uint GetClipboardSequenceNumber();
 }
