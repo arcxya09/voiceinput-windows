@@ -43,4 +43,30 @@
     <Content Update="Assets/AppIcon.ico" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Update="Assets/Logo.png" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
+  <!-- Unpackaged publish must carry the application's generated PRI as well as
+       native runtime files. Use the generator's exact current-build output; do
+       not select a framework PRI or an old index by recursively guessing names. -->
+  <Target Name="PublishVoiceInputResourceIndex" AfterTargets="ComputeFilesToPublish">
+    <Message Importance="High" Text="WinUI PRI: ProjectPriFullPath=$(ProjectPriFullPath); ProjectPriFileName=$(ProjectPriFileName); TargetDir=$(TargetDir); IntermediateOutputPath=$(IntermediateOutputPath)" />
+    <ItemGroup>
+      <_VoiceGeneratedPri Include="$(ProjectPriFullPath)" Condition="'$(ProjectPriFullPath)' != '' and Exists('$(ProjectPriFullPath)')" />
+      <_VoiceResourceDiagnostics Include="$(MSBuildProjectDirectory)/bin/**/*.pri;$(MSBuildProjectDirectory)/obj/**/*.pri;$(MSBuildProjectDirectory)/bin/**/*.xbf;$(MSBuildProjectDirectory)/obj/**/*.xbf" />
+    </ItemGroup>
+    <Message Importance="High" Condition="'@(_VoiceGeneratedPri)' == ''" Text="WinUI generated resources: @(_VoiceResourceDiagnostics, '; ')" />
+    <Error Condition="'@(_VoiceGeneratedPri)' == ''" Text="The current WinUI build did not expose an existing ProjectPriFullPath. Application resources cannot be published." />
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(_VoiceGeneratedPri)" />
+      <ResolvedFileToPublish Include="@(_VoiceGeneratedPri)">
+        <RelativePath>$(AssemblyName).pri</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+      <!-- Some WinUI configurations keep root XBF payloads alongside the PRI. -->
+      <_VoiceRootXbf Include="$(TargetDir)*.xbf" />
+      <ResolvedFileToPublish Remove="@(_VoiceRootXbf)" />
+      <ResolvedFileToPublish Include="@(_VoiceRootXbf)">
+        <RelativePath>%(Filename)%(Extension)</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
 </Project>

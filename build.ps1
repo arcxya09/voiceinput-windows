@@ -27,12 +27,39 @@ Invoke-Dotnet -DotnetArgs @('tests/bin/Release/net10.0/Tests.dll')
 Invoke-Dotnet -DotnetArgs @('restore','src/Desktop/Desktop.csproj','-r','win-x64','-p:VoiceDependencySet=win-x64','--locked-mode','-m:1')
 $PublishDirectory = 'artifacts/publish/win-x64'
 if (Test-Path $PublishDirectory) { Remove-Item $PublishDirectory -Recurse -Force }
-Invoke-Dotnet -DotnetArgs @('publish','src/Desktop/Desktop.csproj','-c','Release','-r','win-x64','-p:VoiceDependencySet=win-x64','--self-contained','true','--no-restore','-m:1','-o',$PublishDirectory)
+function Write-WinUIResourceDiagnostics {
+    Write-Host 'WinUI application resource output paths:'
+    foreach ($directory in @('src/Desktop/bin', 'src/Desktop/obj', $PublishDirectory)) {
+        if (Test-Path $directory) {
+            Get-ChildItem $directory -Recurse -File | Where-Object { $_.Extension -in @('.pri', '.xbf') } | ForEach-Object { Write-Host "$($_.FullName) ($($_.Length) bytes)" }
+        }
+    }
+    if (Test-Path $PublishDirectory) {
+        Write-Host 'Portable output root files:'
+        Get-ChildItem $PublishDirectory -File | ForEach-Object { Write-Host $_.Name }
+    }
+    # Inspect only public SDK build definitions, never application data or secrets.
+    $nugetRoot = if ($env:NUGET_PACKAGES) { $env:NUGET_PACKAGES } else { Join-Path ([Environment]::GetFolderPath('UserProfile')) '.nuget/packages' }
+    $msixPackage = Join-Path $nugetRoot 'microsoft.windows.sdk.buildtools.msix'
+    if (Test-Path $msixPackage) {
+        Get-ChildItem $msixPackage -Recurse -File -Filter '*.Pri.targets' | ForEach-Object {
+            Write-Host "SDK PRI targets: $($_.FullName)"
+            Select-String -LiteralPath $_.FullName -Pattern 'ProjectPri|OutputFile|ResolvedFileToPublish|ComputeFilesToPublish' -Context 1,1 | ForEach-Object { Write-Host $_.ToString() }
+        }
+    }
+}
+try {
+    Invoke-Dotnet -DotnetArgs @('publish','src/Desktop/Desktop.csproj','-c','Release','-r','win-x64','-p:VoiceDependencySet=win-x64','--self-contained','true','--no-restore','-m:1','-o',$PublishDirectory)
+}
+catch {
+    Write-WinUIResourceDiagnostics
+    throw
+}
 foreach ($required in @('RealtimeTranscription.exe','Microsoft.UI.Xaml.dll','coreclr.dll','Assets/AppIcon.ico','Assets/Logo.png')) {
     if (!(Test-Path (Join-Path $PublishDirectory $required))) { throw "Portable WinUI package is missing $required" }
 }
 $ResourceIndices = @(Get-ChildItem -LiteralPath $PublishDirectory -Filter '*.pri' -File | Where-Object { $_.Name -notlike 'Microsoft.*' })
-if ($ResourceIndices.Count -eq 0) { throw 'Portable WinUI package is missing its application resource index.' }
+if ($ResourceIndices.Count -eq 0) { Write-WinUIResourceDiagnostics; throw 'Portable WinUI package is missing its application resource index.' }
 Write-Host "Application resource indices: $($ResourceIndices.Name -join ', ')"
 Copy-Item -Path 'licenses' -Destination (Join-Path $PublishDirectory 'licenses') -Recurse -Force
 $AppVersion = ([xml](Get-Content Directory.Build.props -Raw)).Project.PropertyGroup.Version
