@@ -413,6 +413,8 @@ public static class DesktopSmoke
             checks.Add("Listening, processing, completion and save warnings keep the same capsule footprint and focus; save warnings stay visible until cleared");
             checks.Add("Terminal badges distinguish sent, dictation-only, blocked, canceled, partial, unknown and empty results without inferring success from status text");
             overlay.Clear();
+            Stage("Verify production Unicode delivery against isolated external controls");
+            checks.AddRange(await InputDeliverySmoke.CheckAsync());
             Stage("Desktop UI verification completed");
         }
         catch (Exception e)

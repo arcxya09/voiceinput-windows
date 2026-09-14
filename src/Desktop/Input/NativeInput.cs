@@ -191,29 +191,31 @@ public static class TextDelivery
         if(!valid()||token.IsCancellationRequested)return new("Blocked","检测到其他操作，文字已保留，可手动复制。");
         if(Win32.Composing(target.Native.Focus))return new("Blocked","输入法仍有未确认的候选词，文字已保留，可手动复制。");
         if(!await ValidateAsync(target,token))return new("Blocked","输入框或光标选区已变化，或辅助功能接口无响应。文字已保留，可手动复制。");
-        int accepted=0;long deadline=Environment.TickCount64+InputSafety.DeliveryBudgetMilliseconds(text.Length);
-        // Recheck window and activity per batch. Selection is expected to move after our first batch.
-        for(int offset=0;offset<text.Length;)
+        var result=await PacedTextInput.SendAsync(text,SendScalar,
+            ()=>valid()&&Win32.Current()==target.Native&&!Modified()&&!Win32.Composing(target.Native.Focus),
+            cancellation=>ValidateAsync(target with{CheckSelection=false},cancellation),token);
+        return result.State switch
         {
-            if(!valid()||token.IsCancellationRequested||Win32.Current()!=target.Native||Modified()||Win32.Composing(target.Native.Focus)||Environment.TickCount64>=deadline)
-                return new(accepted>0?"Partial":"Blocked",accepted>0?"文字可能只输入了一部分。请检查目标内容，不会自动重发。":"输入目标已变化，文字已保留。",accepted);
-            int length=Math.Min(InputSafety.BatchCharacters,text.Length-offset);if(offset+length<text.Length&&char.IsHighSurrogate(text[offset+length-1]))length--;
-            var input=new Win32.Input[length*2];
-            for(int i=0;i<length;i++)
-            {
-                input[i*2]=new(){Type=1,Data=new(){Key=new(){Scan=text[offset+i],Flags=4,Extra=new UIntPtr(Win32.Marker)}}};
-                input[i*2+1]=new(){Type=1,Data=new(){Key=new(){Scan=text[offset+i],Flags=6,Extra=new UIntPtr(Win32.Marker)}}};
-            }
-            uint count=Win32.SendInput((uint)input.Length,input,Marshal.SizeOf<Win32.Input>());accepted+=(int)count;
-            if(count!=input.Length)
-            {
-                if(count%2==1){var release=input[(int)count];Win32.SendInput(1,[release],Marshal.SizeOf<Win32.Input>());}
-                return new(accepted==0?"Blocked":"Partial",accepted==0?"目标未接受文字，可能受权限或控件限制。请手动复制。":"文字可能只输入了一部分。请检查目标内容，不会自动重发。",accepted);
-            }
-            offset+=length;
-            // Revalidate the focused automation element without comparing the original selection.
-            if(offset<text.Length&&!await ValidateAsync(target with{CheckSelection=false},token))return new("Partial","输入期间焦点已变化，已停止后续文字。请检查目标内容。",accepted);
+            "Sent"=>new("Sent","文字已交给目标应用。",result.Accepted),
+            "Partial"=>new("Partial","文字可能只输入了一部分。请检查目标内容，不会自动重发。",result.Accepted),
+            _=>new("Blocked","目标未接受文字，或输入位置及按键状态已变化。文字已保留，可手动复制。",result.Accepted)
+        };
+    }
+    private static int SendScalar(string scalar)
+    {
+        var input=new Win32.Input[scalar.Length*2];
+        for(int i=0;i<scalar.Length;i++)
+        {
+            input[i*2]=new(){Type=1,Data=new(){Key=new(){Scan=scalar[i],Flags=4,Extra=new UIntPtr(Win32.Marker)}}};
+            input[i*2+1]=new(){Type=1,Data=new(){Key=new(){Scan=scalar[i],Flags=6,Extra=new UIntPtr(Win32.Marker)}}};
         }
-        return new("Sent","文字已交给目标应用。",accepted);
+        uint count=Win32.SendInput((uint)input.Length,input,Marshal.SizeOf<Win32.Input>());
+        if(count<input.Length&&count%2==1)
+        {
+            // Release only the accepted scalar's unmatched key-down. Cleanup
+            // failure cannot hide the events already accepted by the first call.
+            try{var release=input[(int)count];Win32.SendInput(1,[release],Marshal.SizeOf<Win32.Input>());}catch{}
+        }
+        return (int)count;
     }
 }

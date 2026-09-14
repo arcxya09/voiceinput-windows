@@ -15,6 +15,7 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        if (InputDeliverySmoke.IsTarget(args)) return InputDeliverySmoke.RunTarget(args);
         // Handle the private worker before creating WinUI, a window, credentials,
         // or a mutex. UI Automation must run on the dedicated MTA task thread.
         if (UiaWorker.IsWorker(args))
