@@ -28,9 +28,12 @@ Invoke-Dotnet -DotnetArgs @('restore','src/Desktop/Desktop.csproj','-r','win-x64
 $PublishDirectory = 'artifacts/publish/win-x64'
 if (Test-Path $PublishDirectory) { Remove-Item $PublishDirectory -Recurse -Force }
 Invoke-Dotnet -DotnetArgs @('publish','src/Desktop/Desktop.csproj','-c','Release','-r','win-x64','-p:VoiceDependencySet=win-x64','--self-contained','true','--no-restore','-m:1','-o',$PublishDirectory)
-foreach ($required in @('RealtimeTranscription.exe','Microsoft.UI.Xaml.dll','resources.pri','coreclr.dll')) {
+foreach ($required in @('RealtimeTranscription.exe','Microsoft.UI.Xaml.dll','coreclr.dll','Assets/AppIcon.ico','Assets/Logo.png')) {
     if (!(Test-Path (Join-Path $PublishDirectory $required))) { throw "Portable WinUI package is missing $required" }
 }
+$ResourceIndices = @(Get-ChildItem -LiteralPath $PublishDirectory -Filter '*.pri' -File | Where-Object { $_.Name -notlike 'Microsoft.*' })
+if ($ResourceIndices.Count -eq 0) { throw 'Portable WinUI package is missing its application resource index.' }
+Write-Host "Application resource indices: $($ResourceIndices.Name -join ', ')"
 Copy-Item -Path 'licenses' -Destination (Join-Path $PublishDirectory 'licenses') -Recurse -Force
 $AppVersion = ([xml](Get-Content Directory.Build.props -Raw)).Project.PropertyGroup.Version
 $OutputZip = "artifacts/VoiceInput-Windows-x64-$AppVersion.zip"
