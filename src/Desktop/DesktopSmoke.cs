@@ -30,18 +30,33 @@ public static class DesktopSmoke
         var errors = new List<string>();
         var captures = new List<object>();
         var desktopImages = new List<Pixels>();
+        var stages = new List<string>();
+        string stage = "Starting isolated smoke verification";
+        void Stage(string value)
+        {
+            stage = value;
+            stages.Add(value);
+            Console.WriteLine("SMOKE STAGE: " + value);
+        }
+        string Describe(Exception exception, string context)
+            => context + " [HRESULT 0x" + exception.HResult.ToString("X8", CultureInfo.InvariantCulture) + "] " + exception;
         MainWindow? window = null;
         VoiceOverlay? overlay = null;
         TrayMenuWindow? trayMenu = null;
         AppController? controller = null;
-        Microsoft.UI.Xaml.UnhandledExceptionEventHandler unhandled = (_, e) => { errors.Add("WinUI dispatcher: " + e.Exception.GetType().Name + ": " + e.Exception.Message); e.Handled = true; };
-        void BindingFailed(object sender, BindingFailedEventArgs e) => errors.Add("WinUI binding: " + e.Message);
+        Microsoft.UI.Xaml.UnhandledExceptionEventHandler unhandled = (_, e) =>
+        {
+            string diagnostic = Describe(e.Exception, "WinUI dispatcher during " + stage);
+            errors.Add(diagnostic); Console.Error.WriteLine(diagnostic); e.Handled = true;
+        };
+        void BindingFailed(object sender, BindingFailedEventArgs e) => errors.Add("WinUI binding during " + stage + ": " + e.Message);
         Application.Current.UnhandledException += unhandled;
         Application.Current.DebugSettings.BindingFailed += BindingFailed;
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(report)!);
             Directory.CreateDirectory(folder);
+            Stage("Initialize isolated controller, database, and credentials");
             // Ready() intentionally remains uncalled: it owns global hooks, device
             // watchers and real capture. These checks use an isolated database and
             // a handler that rejects any accidental outbound provider request.
@@ -51,15 +66,22 @@ public static class DesktopSmoke
             var credentials = new SettingsStore(folder, new WindowsProtector()).LoadCredentials();
             Require(credentials == new Credentials("SMOKE_LOCAL_ONLY", "SMOKE_LOCAL_ONLY"), "Windows DPAPI credential round-trip failed.");
             checks.Add("Windows DPAPI credentials and SQLite initialized in an isolated temporary directory");
+            Stage("Verify startup registry behavior in temporary keys");
             checks.AddRange(StartupServiceSmoke.RunIsolatedChecks());
 
+            Stage("Construct MainWindow, including auxiliary window fields and XAML initialization");
             window = new MainWindow(controller);
+            Stage("Activate MainWindow");
             window.Activate();
+            Stage("Resize MainWindow to 1040 by 760 physical pixels");
             window.AppWindow.Resize(new SizeInt32(1040, 760));
+            Stage("Attach and measure MainWindow XAML layout");
             await LayoutAsync(window);
+            Stage("Verify MainWindow native frame");
             CheckMainWindowFrame(WinRT.Interop.WindowNative.GetWindowHandle(window));
             checks.Add("Main window retains its native resizable frame and taskbar system menu");
 
+            Stage("Load offline transcript and lexicon fixtures");
             const string text = "离线界面验收：JUNA 测量 12C(α,γ)16O。\r\n\r\n第二段核对完整正文。";
             var session = new SessionData { Title = "离线界面验收", WholePolishState = "Fallback", DeliveryState = "NotRequested" };
             var segment = new SegmentData { SessionId = session.Id, TaskId = "smoke", TaskOrder = 1, SentenceId = 1,
@@ -104,6 +126,7 @@ public static class DesktopSmoke
             checks.Add("Version and dictation hotkey labels follow current production settings");
 
             window.ShowPage(1);
+            Stage("Invoke native history search");
             await LayoutAsync(window);
             var searchButton = Find<Button>(window, "HistorySearchButton");
             var searchPeer = FrameworkElementAutomationPeer.CreatePeerForElement(searchButton) ?? new ButtonAutomationPeer(searchButton);
@@ -117,6 +140,7 @@ public static class DesktopSmoke
             Require(Find<NavigationView>(window, "Navigation") != null, "Native navigation is missing.");
             for (int i = 0; i < pageNames.Length; i++)
             {
+                Stage("Capture and inspect full-size " + pageNames[i]);
                 window.ShowPage(i);
                 await LayoutAsync(window);
                 // Preserve the current native page before any geometry gate, so
@@ -181,6 +205,7 @@ public static class DesktopSmoke
                 window.AppWindow.Resize(new SizeInt32((int)Math.Round(size.Width * mainScale), (int)Math.Round(size.Height * mainScale)));
                 for (int i = 0; i < pageNames.Length; i++)
                 {
+                    Stage($"Inspect {pageNames[i]} at {size.Width} by {size.Height} DIPs");
                     window.ShowPage(i);
                     await LayoutAsync(window);
                     responsiveImages.Add(await CaptureAsync((FrameworkElement)window.Content));
@@ -205,6 +230,7 @@ public static class DesktopSmoke
             // Exercise a tray-origin dialog while its owner is hidden, including
             // the production owner restore, XamlRoot and modal queue. Change only
             // the editor, then invoke Cancel; the repository must remain unchanged.
+            Stage("Open native term editor from a hidden minimum-size owner");
             var originalTerm = controller.Terms.Single();
             window.Hide();
             Require(!window.AppWindow.IsVisible, "The dialog smoke precondition requires a hidden main window.");
@@ -245,6 +271,7 @@ public static class DesktopSmoke
             // The native menu is tested independently of the Shell icon. Its
             // injected callback records commands instead of touching clipboard,
             // hooks, settings, or shutdown. Test both visible and hidden owners.
+            Stage("Construct and open native tray context menu");
             var commands = new List<TrayMenuCommand>();
             var menu = new TrayMenuWindow(command => { commands.Add(command); return Task.CompletedTask; });
             trayMenu = menu;
@@ -258,6 +285,7 @@ public static class DesktopSmoke
             CheckTrayBounds(menuHwnd);
             foreach (var theme in new[] { ElementTheme.Light, ElementTheme.Dark })
             {
+                Stage("Inspect actual tray outer frame in " + theme + " theme");
                 ((FrameworkElement)menu.Content).RequestedTheme = theme;
                 await LayoutAsync(menu);
                 desktopImages.Add(CaptureDesktopWindow(menuHwnd));
@@ -295,6 +323,7 @@ public static class DesktopSmoke
             await SaveContactSheetAsync(Path.ChangeExtension(report, ".png"), pageImages, columns: 2);
             checks.Add("Five actual WinUI pages, the term ContentDialog and native tray menu captured with RenderTargetBitmap into windows-smoke.png");
 
+            Stage("Construct and show recognition overlay");
             overlay = new VoiceOverlay();
             IntPtr foreground = GetForegroundWindow();
             overlay.BeginTurn();
@@ -310,6 +339,7 @@ public static class DesktopSmoke
             var original = CheckOverlayBounds(hwnd);
             foreach (var theme in new[] { ElementTheme.Light, ElementTheme.Dark })
             {
+                Stage("Inspect actual recognition outer frame in " + theme + " theme");
                 ((FrameworkElement)overlay.Content).RequestedTheme = theme;
                 await LayoutAsync(overlay);
                 desktopImages.Add(CaptureDesktopWindow(hwnd));
@@ -346,15 +376,20 @@ public static class DesktopSmoke
             await SaveContactSheetAsync(EvidencePath(report, "overlay"), overlayImages, columns: 1);
             checks.Add("Listening, processing, complete and save-warning overlays captured without expanding the window or taking focus");
             overlay.Clear();
+            Stage("Desktop UI verification completed");
         }
-        catch (Exception e) { errors.Add(e.GetType().Name + ": " + e.Message); }
+        catch (Exception e)
+        {
+            string diagnostic = Describe(e, "Smoke failure during " + stage);
+            errors.Add(diagnostic); Console.Error.WriteLine(diagnostic);
+        }
         finally
         {
-            trayMenu?.Dispose();
-            overlay?.Close();
-            window?.AppWindow.Hide();
+            try { trayMenu?.Dispose(); } catch (Exception e) { errors.Add(Describe(e, "Tray menu shutdown")); }
+            try { overlay?.Close(); } catch (Exception e) { errors.Add(Describe(e, "Overlay shutdown")); }
+            try { window?.AppWindow.Hide(); } catch (Exception e) { errors.Add(Describe(e, "Main window shutdown")); }
             if (controller != null)
-                try { await controller.DisposeAsync(); } catch (Exception e) { errors.Add("Shutdown: " + e.GetType().Name); }
+                try { await controller.DisposeAsync(); } catch (Exception e) { errors.Add(Describe(e, "Isolated controller shutdown")); }
             Application.Current.DebugSettings.BindingFailed -= BindingFailed;
             Application.Current.UnhandledException -= unhandled;
             try { Directory.Delete(folder, recursive: true); } catch { /* OS file cleanup can lag process shutdown. */ }
@@ -362,7 +397,7 @@ public static class DesktopSmoke
         bool passed = errors.Count == 0;
         try
         {
-            await File.WriteAllTextAsync(report, JsonSerializer.Serialize(new { passed, checks, errors, captures,
+            await File.WriteAllTextAsync(report, JsonSerializer.Serialize(new { passed, checks, errors, captures, stages, lastStage = stage,
                 version = typeof(App).Assembly.GetName().Version?.ToString(), framework = "Microsoft.UI.Xaml (WinUI 3)",
                 microphone = "not started", cloud = "blocked", globalInputHooks = "not installed" }, new JsonSerializerOptions { WriteIndented = true }));
         }

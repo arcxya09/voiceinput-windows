@@ -21,7 +21,9 @@ AppSupportURL=https://github.com/arcxya09/voiceinput-windows/issues
 AppUpdatesURL=https://github.com/arcxya09/voiceinput-windows/releases
 DefaultDirName={localappdata}\Programs\VoiceInput
 DefaultGroupName=VoiceInput
-DisableProgramGroupPage=yes
+; Keep /GROUP functional for managed installs and isolated verification.
+; Inno ignores that command-line override when this directive is yes.
+DisableProgramGroupPage=auto
 AllowNoIcons=yes
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
