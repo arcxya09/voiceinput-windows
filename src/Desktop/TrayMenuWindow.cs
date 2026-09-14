@@ -9,6 +9,7 @@ using Microsoft.UI.Xaml.Media;
 using Windows.Foundation;
 using Windows.Graphics;
 using Windows.System;
+using Windows.UI.ViewManagement;
 
 namespace RealtimeTranscription.Desktop;
 
@@ -20,6 +21,10 @@ public sealed class TrayMenuWindow : Window, IDisposable
     private const double WidthDip = 292, EdgeGapDip = 8;
     private readonly Func<TrayMenuCommand, Task> execute;
     private readonly Border root;
+    private readonly Grid surface;
+    private readonly PopupWindowChrome chrome;
+    private readonly UISettings uiSettings = new();
+    private readonly AccessibilitySettings accessibility = new();
     private readonly List<ButtonBase> buttons = [];
     private readonly Button enabledButton;
     private readonly ToggleButton dictationButton;
@@ -56,6 +61,7 @@ public sealed class TrayMenuWindow : Window, IDisposable
             MinHeight = 36, Padding = new Thickness(12, 6, 12, 6), BorderThickness = new Thickness(0)
         };
         AutomationProperties.SetName(dictationButton, "仅听写，完成后手动复制");
+        ToolTipService.SetToolTip(dictationButton, "仅听写，完成后手动复制");
         dictationButton.Click += Command_Click;
         buttons.Add(dictationButton); stack.Children.Add(dictationButton);
         AddButton(stack, "TrayCopy", "复制最近结果", "\uE8C8", TrayMenuCommand.Copy);
@@ -66,9 +72,17 @@ public sealed class TrayMenuWindow : Window, IDisposable
         {
             Name = "TrayMenuRoot", Padding = new Thickness(8),
             CornerRadius = new CornerRadius(10), BorderThickness = new Thickness(1),
-            Child = stack, RequestedTheme = ElementTheme.Default
+            Child = new ScrollViewer
+            {
+                Content = stack, HorizontalScrollMode = ScrollMode.Disabled,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+            },
+            RequestedTheme = ElementTheme.Default
         };
-        Content = root;
+        surface = new Grid();
+        surface.Children.Add(root);
+        Content = surface;
         ApplyTheme();
         root.ActualThemeChanged += (_, _) => ApplyTheme();
         root.KeyDown += Menu_KeyDown;
@@ -79,12 +93,14 @@ public sealed class TrayMenuWindow : Window, IDisposable
         presenter.SetBorderAndTitleBar(false, false);
         AppWindow.SetPresenter(presenter);
         AppWindow.IsShownInSwitchers = false;
-        // A menu must be interactive and activatable. Do not borrow the dictation
-        // overlay's NOACTIVATE/TRANSPARENT/LAYERED styles.
-        long exStyle = GetWindowLongPtr(hwnd, -20).ToInt64();
-        SetWindowLongPtr(hwnd, -20, new IntPtr((exStyle | 0x80) & ~0x40000L));
+        chrome = new PopupWindowChrome(hwnd, 10, clickThrough: false);
         windowProc = WindowProc;
         SetWindowSubclass(hwnd, windowProc, 1, 0);
+        root.Loaded += (_, _) => { if (IsOpen) Position(); };
+        uiSettings.TextScaleFactorChanged += SystemAppearanceChanged;
+        uiSettings.ColorValuesChanged += SystemAppearanceChanged;
+        // Native setting/color/theme broadcasts cover high-contrast changes.
+        // Its WinRT event registration is unavailable on some desktop sessions.
         Activated += (_, args) =>
         {
             if (args.WindowActivationState == WindowActivationState.Deactivated && IsOpen)
@@ -98,6 +114,9 @@ public sealed class TrayMenuWindow : Window, IDisposable
         {
             closed = true; Volatile.Write(ref isOpen, 0);
             RemoveWindowSubclass(hwnd, windowProc, 1);
+            chrome.Dispose();
+            uiSettings.TextScaleFactorChanged -= SystemAppearanceChanged;
+            uiSettings.ColorValuesChanged -= SystemAppearanceChanged;
         };
     }
 
@@ -155,6 +174,7 @@ public sealed class TrayMenuWindow : Window, IDisposable
             Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new Thickness(0)
         };
         AutomationProperties.SetName(button, text);
+        ToolTipService.SetToolTip(button, text);
         button.Click += Command_Click;
         buttons.Add(button); parent.Children.Add(button);
         return button;
@@ -201,8 +221,23 @@ public sealed class TrayMenuWindow : Window, IDisposable
     private void ApplyTheme()
     {
         bool dark = root.ActualTheme == ElementTheme.Dark;
-        root.Background = new SolidColorBrush(dark ? Windows.UI.Color.FromArgb(255, 32, 32, 32) : Windows.UI.Color.FromArgb(255, 249, 249, 249));
-        root.BorderBrush = new SolidColorBrush(dark ? Windows.UI.Color.FromArgb(255, 64, 64, 64) : Windows.UI.Color.FromArgb(255, 218, 218, 218));
+        bool highContrast = accessibility.HighContrast;
+        root.Background = new SolidColorBrush(highContrast ? uiSettings.GetColorValue(UIColorType.Background) : dark ? Windows.UI.Color.FromArgb(255, 32, 32, 32) : Windows.UI.Color.FromArgb(255, 249, 249, 249));
+        surface.Background = root.Background;
+        root.BorderBrush = new SolidColorBrush(highContrast ? uiSettings.GetColorValue(UIColorType.Foreground) : dark ? Windows.UI.Color.FromArgb(255, 64, 64, 64) : Windows.UI.Color.FromArgb(255, 218, 218, 218));
+    }
+
+    private void SystemAppearanceChanged(UISettings sender, object args) => QueueAppearanceUpdate();
+
+    private void QueueAppearanceUpdate()
+    {
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (closed) return;
+            ApplyTheme();
+            root.InvalidateMeasure();
+            if (IsOpen) Position();
+        });
     }
 
     private void Position()
@@ -218,10 +253,10 @@ public sealed class TrayMenuWindow : Window, IDisposable
                 SetWindowPos(hwnd, IntPtr.Zero, info.Work.Left + 8, info.Work.Top + 8, 0, 0, 0x0015);
             uint dpi = GetDpiForWindow(hwnd);
             double scale = dpi == 0 ? 1 : dpi / 96.0;
-            int gap = Math.Max(1, (int)Math.Round(EdgeGapDip * scale));
+            int gap = Math.Min((int)Math.Round(EdgeGapDip * scale), Math.Max(0, (Math.Min(info.Work.Right - info.Work.Left, info.Work.Bottom - info.Work.Top) - 1) / 2));
             int availableWidth = Math.Max(1, info.Work.Right - info.Work.Left - 2 * gap);
             int availableHeight = Math.Max(1, info.Work.Bottom - info.Work.Top - 2 * gap);
-            int width = Math.Min(availableWidth, (int)Math.Ceiling(WidthDip * scale));
+            int width = Math.Min(availableWidth, (int)Math.Ceiling(WidthDip * Math.Clamp(uiSettings.TextScaleFactor, 1, 1.5) * scale));
             root.Measure(new Size(width / scale, double.PositiveInfinity));
             int height = Math.Min(availableHeight, Math.Max(1, (int)Math.Ceiling(root.DesiredSize.Height * scale)));
             int x = Math.Clamp(anchor.X - width + gap, info.Work.Left + gap, info.Work.Right - width - gap);
@@ -229,6 +264,7 @@ public sealed class TrayMenuWindow : Window, IDisposable
             if (preferredY < info.Work.Top + gap) preferredY = anchor.Y + gap;
             int y = Math.Clamp(preferredY, info.Work.Top + gap, info.Work.Bottom - height - gap);
             AppWindow.MoveAndResize(new RectInt32(x, y, width, height));
+            chrome.UpdateRegion();
         }
         finally { positioning = false; }
     }
@@ -236,12 +272,20 @@ public sealed class TrayMenuWindow : Window, IDisposable
     private IntPtr WindowProc(IntPtr window, uint message, IntPtr wParam, IntPtr lParam, nuint id, nuint data)
     {
         if (message == 0x0100 && wParam.ToInt64() == 27) { HideMenu(); return IntPtr.Zero; }
-        if (message is 0x02E0 or 0x007E && !closed && !repositionQueued)
+        var result = DefSubclassProc(window, message, wParam, lParam);
+        if (message is 0x02E0 or 0x007E or 0x001A or 0x0015 or 0x031A && !closed && !repositionQueued)
         {
             repositionQueued = true;
-            DispatcherQueue.TryEnqueue(() => { repositionQueued = false; if (!closed && IsOpen) Position(); });
+            if (!DispatcherQueue.TryEnqueue(() =>
+            {
+                repositionQueued = false;
+                if (closed) return;
+                ApplyTheme();
+                root.InvalidateMeasure();
+                if (IsOpen) Position();
+            })) repositionQueued = false;
         }
-        return DefSubclassProc(window, message, wParam, lParam);
+        return result;
     }
 
     [StructLayout(LayoutKind.Sequential)] private struct PointNative { public int X, Y; }
@@ -253,8 +297,6 @@ public sealed class TrayMenuWindow : Window, IDisposable
     [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr hwnd);
-    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] private static extern IntPtr GetWindowLongPtr(IntPtr hwnd, int index);
-    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")] private static extern IntPtr SetWindowLongPtr(IntPtr hwnd, int index, IntPtr value);
     [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int width, int height, uint flags);
     [DllImport("comctl32.dll")] private static extern bool SetWindowSubclass(IntPtr hwnd, SubclassProc proc, nuint id, nuint data);
     [DllImport("comctl32.dll")] private static extern bool RemoveWindowSubclass(IntPtr hwnd, SubclassProc proc, nuint id);

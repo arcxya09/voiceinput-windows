@@ -162,7 +162,7 @@ function Wait-PublishedRelease([string]$Tag, [string]$ExpectedCommit, [string[]]
             if ($null -ne $tagCommit) {
                 if ($tagCommit -cne $ExpectedCommit) { throw 'The published tag points to a different commit.' }
                 Verify-RemoteRelease $release $Expected $ExpectedCommit $LocalDirectory
-                Write-Host "Verified published $Tag, commit $ExpectedCommit, and all four release assets."
+                Write-Host "Verified published $Tag, commit $ExpectedCommit, and all $($Expected.Count) release assets."
                 return
             }
         }
@@ -179,7 +179,7 @@ function Publish-VoiceInputRelease {
         return
     }
     $tag = "v$Version"
-    $expected = @("VoiceInput-Windows-x64-$Version.zip", "VoiceInput-Source-$Version.zip", 'build-output.log', 'SHA256SUMS.txt')
+    $expected = @("VoiceInput-Setup-$Version.exe", "VoiceInput-Portable-x64-$Version.zip", "VoiceInput-Source-$Version.zip", 'build-output.log', 'SHA256SUMS.txt')
     Assert-DownloadedAssets $ArtifactDirectory $expected $Commit
     $release = Read-Release $tag -AllowMissing
     if ($null -eq $release) {

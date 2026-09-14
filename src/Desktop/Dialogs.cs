@@ -32,28 +32,36 @@ internal static class Dialogs
         owner.OpenManager();
         if (owner.Content is not FrameworkElement { XamlRoot: { } xamlRoot } root)
             throw new InvalidOperationException("窗口尚未就绪，请稍后重试。");
-        double availableWidth = root.ActualWidth > 0 ? Math.Max(240, root.ActualWidth - 64) : preferredWidth;
-        double maximumWidth = Math.Min(preferredWidth, availableWidth);
-        double minimumWidth = Math.Min(maximumWidth, Math.Clamp(preferredWidth - 40, 320, 480));
         var dialog = new ContentDialog
         {
             Title = title,
             XamlRoot = xamlRoot,
             RequestedTheme = root.ActualTheme,
-            CloseButtonText = "关闭",
-            MaxWidth = maximumWidth
+            CloseButtonText = "关闭"
         };
-        dialog.Resources["ContentDialogMinWidth"] = minimumWidth;
-        dialog.Resources["ContentDialogMaxWidth"] = maximumWidth;
+        void Resize()
+        {
+            double availableWidth = root.ActualWidth > 0 ? Math.Max(120, root.ActualWidth - 48) : preferredWidth;
+            double maximumWidth = Math.Min(preferredWidth, availableWidth);
+            dialog.MaxWidth = maximumWidth;
+            dialog.Resources["ContentDialogMinWidth"] = Math.Min(maximumWidth, Math.Clamp(preferredWidth - 40, 320, 480));
+            dialog.Resources["ContentDialogMaxWidth"] = maximumWidth;
+        }
+        void SizeChanged(object sender, SizeChangedEventArgs args) => Resize();
+        void ThemeChanged(FrameworkElement sender, object args) => dialog.RequestedTheme = root.ActualTheme;
+        Resize();
+        dialog.Opened += (_, _) => { root.SizeChanged += SizeChanged; root.ActualThemeChanged += ThemeChanged; Resize(); };
+        dialog.Closed += (_, _) => { root.SizeChanged -= SizeChanged; root.ActualThemeChanged -= ThemeChanged; };
         return dialog;
     }
 
     private static double BodyHeight(MainWindow owner, double preferred = 520)
         => owner.Content is FrameworkElement { ActualHeight: > 0 } root
-            ? Math.Clamp(root.ActualHeight - 220, 180, preferred) : preferred;
+            ? Math.Clamp(root.ActualHeight - 220, 80, preferred) : preferred;
 
     private static ScrollViewer Scroll(MainWindow owner, UIElement content, double preferredHeight = 520)
-        => new()
+    {
+        var scroll = new ScrollViewer
         {
             Content = content,
             MaxHeight = BodyHeight(owner, preferredHeight),
@@ -62,6 +70,14 @@ internal static class Dialogs
             HorizontalScrollMode = ScrollMode.Disabled,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
         };
+        if (owner.Content is FrameworkElement root)
+        {
+            void Resize(object sender, SizeChangedEventArgs args) => scroll.MaxHeight = BodyHeight(owner, preferredHeight);
+            scroll.Loaded += (_, _) => { root.SizeChanged += Resize; scroll.MaxHeight = BodyHeight(owner, preferredHeight); };
+            scroll.Unloaded += (_, _) => root.SizeChanged -= Resize;
+        }
+        return scroll;
+    }
 
     private static TextBox Editor(string text = "", bool readOnly = false, double height = 140)
     {
@@ -71,6 +87,8 @@ internal static class Dialogs
             TextWrapping = TextWrapping.Wrap, MinHeight = height, MaxHeight = height
         };
         ScrollViewer.SetVerticalScrollBarVisibility(box, ScrollBarVisibility.Auto);
+        ScrollViewer.SetHorizontalScrollMode(box, ScrollMode.Disabled);
+        ScrollViewer.SetHorizontalScrollBarVisibility(box, ScrollBarVisibility.Disabled);
         return box;
     }
 
@@ -81,6 +99,7 @@ internal static class Dialogs
         bar.Severity = InfoBarSeverity.Error;
         bar.Message = AppController.SafeError(error);
         bar.IsOpen = true;
+        bar.DispatcherQueue.TryEnqueue(() => { bar.UpdateLayout(); bar.StartBringIntoView(); });
     }
     private static void Notice(InfoBar bar, string message)
     {
@@ -130,7 +149,7 @@ internal static class Dialogs
         => ModalAsync(owner, async () =>
         {
             var dialog = Create(owner, title, 720);
-            dialog.Content = Editor(text, true, BodyHeight(owner, 420));
+            dialog.Content = Scroll(owner, Editor(text, true, BodyHeight(owner, 420)), 420);
             await dialog.ShowAsync();
             return true;
         });

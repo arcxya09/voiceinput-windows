@@ -6,9 +6,11 @@ namespace RealtimeTranscription.Desktop;
 
 internal static class Program
 {
+    internal static bool IsStartupLaunch { get; private set; }
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr FindWindow(string? className, string title);
     [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr window);
     [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr window, int command);
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)] private static extern int SetCurrentProcessExplicitAppUserModelID(string appId);
 
     [STAThread]
     private static int Main(string[] args)
@@ -21,18 +23,26 @@ internal static class Program
             return 0;
         }
 
+        IsStartupLaunch = StartupService.IsStartup(args);
+        _ = SetCurrentProcessExplicitAppUserModelID("VoiceInput.Desktop");
+
         Mutex? instance = null;
         bool ownsMutex = false;
         try
         {
-            if (!DesktopSmoke.IsSmoke(args))
+            if (!DesktopSmoke.IsSmoke(args) && !StartupServiceSmoke.IsStartupSmoke(args))
             {
                 string user = WindowsIdentity.GetCurrent().User?.Value ?? Environment.UserName;
                 instance = new Mutex(true, "Local\\RealtimeTranscription." + user, out ownsMutex);
                 if (!ownsMutex)
                 {
-                    var window = FindWindow(null, "语音输入法");
-                    if (window != IntPtr.Zero) { ShowWindow(window, 9); SetForegroundWindow(window); }
+                    // Logon must not bring an already-running manager to the
+                    // foreground. An explicit second launch still opens it.
+                    if (!IsStartupLaunch)
+                    {
+                        var window = FindWindow(null, "语音输入法");
+                        if (window != IntPtr.Zero) { ShowWindow(window, 9); SetForegroundWindow(window); }
+                    }
                     return 0;
                 }
             }

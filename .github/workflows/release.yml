@@ -35,8 +35,13 @@ jobs:
           REFRESH_DEPENDENCY_LOCKS: ${{ inputs.refresh_dependency_locks }}
         run: ./build.ps1 -UpdateDependencyLocks:($env:REFRESH_DEPENDENCY_LOCKS -eq 'true') *>&1 | Tee-Object -FilePath build-output.log -Append
       - name: Exercise actual Windows executable without microphone or cloud
+        if: ${{ !cancelled() && hashFiles('artifacts/VoiceInput-Portable-x64-*.zip') != '' }}
         shell: pwsh
         run: ./scripts/WindowsSmoke.ps1 *>&1 | Tee-Object -FilePath build-output.log -Append
+      - name: Install, launch and uninstall the actual Windows installer
+        if: ${{ !cancelled() && hashFiles('artifacts/VoiceInput-Setup-*.exe') != '' }}
+        shell: pwsh
+        run: ./scripts/TestInstaller.ps1 *>&1 | Tee-Object -FilePath build-output.log -Append
       - name: Prepare release assets
         id: assets
         shell: pwsh
@@ -44,20 +49,29 @@ jobs:
           $version = ([xml](Get-Content Directory.Build.props -Raw)).Project.PropertyGroup.Version
           if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid release version' }
           "version=$version" >> $env:GITHUB_OUTPUT
-          $portable = "artifacts/VoiceInput-Windows-x64-$version.zip"
-          if (!(Test-Path $portable)) { throw 'Missing portable WinUI package' }
+          $portable = "artifacts/VoiceInput-Portable-x64-$version.zip"
+          $installer = "artifacts/VoiceInput-Setup-$version.exe"
+          if (!(Test-Path $portable) -or !(Test-Path $installer)) { throw 'Missing installer or portable WinUI package' }
           git archive --format=zip --prefix=VoiceInput/ --output="artifacts/VoiceInput-Source-$version.zip" HEAD
           if ($LASTEXITCODE -ne 0) { throw 'Source archive failed' }
           Copy-Item build-output.log artifacts/build-output.log
-          $hashes = Get-ChildItem artifacts -File | ForEach-Object {
-            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-            "$hash  $($_.Name)"
+          $payloads = @("VoiceInput-Setup-$version.exe", "VoiceInput-Portable-x64-$version.zip", "VoiceInput-Source-$version.zip", 'build-output.log')
+          $hashes = $payloads | ForEach-Object {
+            $file = Join-Path artifacts $_
+            if (!(Test-Path $file) -or (Get-Item $file).Length -eq 0) { throw "Missing payload: $_" }
+            $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $_"
           }
           $hashes | Set-Content artifacts/SHA256SUMS.txt -Encoding utf8
       - uses: actions/upload-artifact@v4
         with:
-          name: VoiceInput-Windows-x64-${{ steps.assets.outputs.version }}
-          path: artifacts/*.*
+          name: VoiceInput-Release-${{ steps.assets.outputs.version }}
+          path: |
+            artifacts/VoiceInput-Setup-${{ steps.assets.outputs.version }}.exe
+            artifacts/VoiceInput-Portable-x64-${{ steps.assets.outputs.version }}.zip
+            artifacts/VoiceInput-Source-${{ steps.assets.outputs.version }}.zip
+            artifacts/build-output.log
+            artifacts/SHA256SUMS.txt
           if-no-files-found: error
       - name: Preserve generated dependency locks
         if: always() && inputs.refresh_dependency_locks == true
@@ -74,10 +88,12 @@ jobs:
         with:
           name: windows-verification-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            windows-smoke.json
-            windows-smoke.log
-            windows-smoke.png
-            windows-overlay.png
+            windows-*.json
+            windows-*.log
+            windows-*.png
+            installer-*.json
+            installer-*.log
+            installer-*.png
             build-output.log
           if-no-files-found: ignore
   release:
@@ -91,7 +107,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: VoiceInput-Windows-x64-${{ needs.build.outputs.version }}
+          name: VoiceInput-Release-${{ needs.build.outputs.version }}
           path: artifacts
       - name: Publish and verify versioned release
         shell: pwsh
