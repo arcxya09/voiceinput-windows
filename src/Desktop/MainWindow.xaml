@@ -409,8 +409,8 @@
                             </Grid>
                         </TabViewItem>
                         <TabViewItem Header="AI 生成" IsClosable="False">
-                            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
-                                <StackPanel Margin="8,16,8,12" Spacing="16" MaxWidth="900" HorizontalAlignment="Stretch">
+                            <ScrollViewer MaxWidth="900" HorizontalAlignment="Stretch" VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
+                                <StackPanel Margin="8,16,8,12" Spacing="16" HorizontalAlignment="Stretch">
                                     <Border Style="{StaticResource Card}">
                                         <StackPanel Spacing="12">
                                             <TextBlock Text="生成专业词库" Style="{StaticResource SectionTitle}"/>
@@ -482,8 +482,8 @@
                         <RowDefinition Height="*"/>
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
-                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
-                        <StackPanel Margin="8,0,8,12" Spacing="16" MaxWidth="850" HorizontalAlignment="Stretch">
+                    <ScrollViewer MaxWidth="850" HorizontalAlignment="Stretch" VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
+                        <StackPanel Margin="8,0,8,12" Spacing="16" HorizontalAlignment="Stretch">
                             <Border Style="{StaticResource Card}">
                                 <StackPanel Spacing="12">
                                     <TextBlock Text="语音识别" Style="{StaticResource SectionTitle}"/>
@@ -622,8 +622,8 @@
                         <Button Grid.Column="1" Content="保存设置" Style="{StaticResource AccentButtonStyle}" Click="SettingsSave_Click"/>
                     </Grid>
                 </Grid>
-                <ScrollViewer x:Name="HelpPage" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
-                    <StackPanel Spacing="16" MaxWidth="850" Margin="8,0,8,12" HorizontalAlignment="Stretch">
+                <ScrollViewer x:Name="HelpPage" MaxWidth="850" HorizontalAlignment="Stretch" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
+                    <StackPanel Spacing="16" Margin="8,0,8,12" HorizontalAlignment="Stretch">
                         <Border Style="{StaticResource Card}">
                             <StackPanel Spacing="14">
                                 <TextBlock Text="使用方法" Style="{StaticResource SectionTitle}"/>

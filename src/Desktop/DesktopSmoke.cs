@@ -115,6 +115,12 @@ public static class DesktopSmoke
             {
                 window.ShowPage(i);
                 await LayoutAsync(window);
+                // Preserve the current native page before any geometry gate, so
+                // a clipped-control failure still leaves its actual image behind.
+                var capture = await CaptureAsync((FrameworkElement)window.Content);
+                pageImages.Add(capture);
+                captures.Add(new { name = pageNames[i], width = capture.Width, height = capture.Height });
+                await SaveContactSheetAsync(Path.ChangeExtension(report, ".png"), pageImages, columns: 2);
                 var page = Find<FrameworkElement>(window, pageNames[i]);
                 Require(page.Visibility == Visibility.Visible && page.ActualWidth > 0 && page.ActualHeight > 0, "A WinUI page did not render: " + pageNames[i]);
                 for (int other = 0; other < pageNames.Length; other++)
@@ -133,14 +139,19 @@ public static class DesktopSmoke
                     var buttonBounds = refresh.TransformToVisual(help).TransformBounds(
                         new Windows.Foundation.Rect(0, 0, refresh.ActualWidth, refresh.ActualHeight));
                     double visibleWidth = Math.Min(help.ActualWidth, help.ViewportWidth);
+                    string helpGeometry = $" ScrollViewer ActualWidth={help.ActualWidth:F2}, ViewportWidth={help.ViewportWidth:F2}, HorizontalOffset={help.HorizontalOffset:F2}, ScrollableWidth={help.ScrollableWidth:F2}.";
+                    if (help.Content is FrameworkElement helpContent)
+                    {
+                        var contentBounds = helpContent.TransformToVisual(help).TransformBounds(
+                            new Windows.Foundation.Rect(0, 0, helpContent.ActualWidth, helpContent.ActualHeight));
+                        helpGeometry += $" Content ActualWidth={helpContent.ActualWidth:F2}, DesiredWidth={helpContent.DesiredSize.Width:F2}, Left={contentBounds.Left:F2}, Right={contentBounds.Right:F2}.";
+                    }
+                    else helpGeometry += " Content is not a FrameworkElement.";
                     Require(help.ScrollableWidth <= 1,
-                        $"The help page overflows its horizontal viewport by {help.ScrollableWidth:F2} DIPs.");
+                        $"The help page overflows its horizontal viewport by {help.ScrollableWidth:F2} DIPs." + helpGeometry);
                     Require(refresh.ActualWidth > 0 && visibleWidth > 0 && buttonBounds.Left >= -.5 && buttonBounds.Right <= visibleWidth + .5,
-                        $"The usage refresh button is horizontally clipped (bounds {buttonBounds.Left:F2}–{buttonBounds.Right:F2}; viewport {visibleWidth:F2} DIPs).");
+                        $"The usage refresh button is horizontally clipped (bounds {buttonBounds.Left:F2}–{buttonBounds.Right:F2}; viewport {visibleWidth:F2} DIPs)." + helpGeometry);
                 }
-                var capture = await CaptureAsync((FrameworkElement)window.Content);
-                pageImages.Add(capture);
-                captures.Add(new { name = pageNames[i], width = capture.Width, height = capture.Height });
             }
             checks.Add("Header status keeps its right margin on all five pages; Help has no horizontal overflow and its refresh button stays inside the viewport");
             window.ShowPage(2);
