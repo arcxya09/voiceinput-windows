@@ -341,6 +341,11 @@ public static class DesktopSmoke
             overlay = new VoiceOverlay();
             IntPtr foreground = GetForegroundWindow();
             overlay.BeginTurn();
+            await LayoutAsync(overlay);
+            Require(Find<TextBlock>(overlay, "OverlayPreview").Text == "说话时会在这里显示文字",
+                "The first-show placeholder collapsed into an ellipsis.");
+            await CheckPreviewLifecycleAsync(overlay);
+            checks.Add("First-show and empty notices display readable text; status-only cancellation/completion retain recognized words; repeated turns and hidden-window updates refresh the native preview");
             overlay.SetMeter(.62f, true);
             const string ending = "最新结果👨‍👩‍👧‍👦";
             string longText = string.Concat(Enumerable.Repeat("连续识别𠀀👩🏽‍🔬e\u0301", 40)) + ending;
@@ -370,13 +375,14 @@ public static class DesktopSmoke
             if (overlayDesktopSurfacePassed)
                 checks.Add("Actual overlay HWND is visible on the desktop, preserves focus, passes pointers through, and is centered at 360 by 76 DIPs");
             if (popupNativeFramesPassed && trayDesktopSurfacePassed && overlayDesktopSurfacePassed)
-                checks.Add("Tray and overlay outer HWND frames have no caption, resize border or inset client area; light and dark composed-desktop captures include surrounding pixels");
+                checks.Add("Tray and overlay use DWM native frame policy without an application region or duplicate XAML outline; full-client layout and light/dark desktop surfaces remain correct");
             checks.Add("Long live previews stay on one line and retain complete Unicode graphemes at the transcript tail");
 
             var overlayImages = new List<Pixels> { await CaptureAsync((FrameworkElement)overlay.Content) };
             overlay.SetMeter(0, false);
             overlay.Update("正在整理", "全文整理完成后将输入原位置");
             await LayoutAsync(overlay);
+            Require(preview.Text == "全文整理完成后将输入原位置", "Long-to-short preview retained a stale measurement.");
             overlayImages.Add(await CaptureAsync((FrameworkElement)overlay.Content));
             overlay.Update("已完成", "识别结果已保留，可打开管理窗口复制。", dismiss: true);
             await LayoutAsync(overlay);
@@ -551,6 +557,69 @@ public static class DesktopSmoke
         await File.WriteAllBytesAsync(path, png);
     }
 
+    private static async Task CheckPreviewLifecycleAsync(VoiceOverlay overlay)
+    {
+        var preview = Find<TextBlock>(overlay, "OverlayPreview");
+        var panel = (TailPreviewPanel)VisualTreeHelper.GetParent(preview);
+        foreach (string sample in new[] { "你好", "正在测试实时文字预览", "12C(α,γ)16O", "新的结果" })
+        {
+            overlay.Update("正在聆听", sample);
+            await LayoutAsync(overlay);
+            Require(preview.Text == sample, "The native preview did not render the complete short text: " + sample);
+        }
+        string recognized = preview.Text;
+        overlay.Update("检测到其他按键或鼠标操作，本轮停止自动输入。", dismiss: true);
+        await LayoutAsync(overlay);
+        Require(preview.Text == recognized, "A status-only cancellation erased the recognized preview.");
+        overlay.Update("已完成", dismiss: true);
+        await LayoutAsync(overlay);
+        Require(preview.Text == recognized, "A status-only completion erased the recognized preview.");
+
+        double fontSize = preview.FontSize;
+        const string tail = "最新词";
+        string repeated = string.Concat(Enumerable.Repeat("中文测量👩🏽‍🔬e\u0301", 20)) + tail;
+        foreach (double multiplier in new[] { 1.0, 1.25, 1.5, 2.0 })
+        {
+            preview.FontSize = fontSize * multiplier;
+            panel.InvalidateTextMetrics();
+            overlay.Update("正在聆听", repeated);
+            foreach (double width in new[] { 0.0, 160.0, 328.0, 240.0, 328.0 })
+            {
+                panel.InvalidateMeasure();
+                panel.Measure(new Windows.Foundation.Size(width, 80));
+                panel.Arrange(new Windows.Foundation.Rect(0, 0, width, 80));
+                if (width > 0)
+                {
+                    string suffix = preview.Text.TrimStart('…');
+                    Require(suffix.EndsWith(tail, StringComparison.Ordinal) && repeated.EndsWith(suffix, StringComparison.Ordinal),
+                        $"Preview lost its real text at {width} DIPs and font multiplier {multiplier}.");
+                    Require(preview.DesiredSize.Width <= width + .5,
+                        $"Preview overflowed its measured width at font multiplier {multiplier}.");
+                }
+            }
+            overlay.Update("正在聆听", "你好");
+            panel.InvalidateMeasure();
+            panel.Measure(new Windows.Foundation.Size(328, 80));
+            panel.Arrange(new Windows.Foundation.Rect(0, 0, 328, 80));
+            Require(preview.Text == "你好", "Long-to-short text retained an old width or an ellipsis.");
+        }
+        preview.FontSize = fontSize;
+        panel.InvalidateTextMetrics();
+        overlay.Clear();
+        overlay.Update("正在聆听", "隐藏后重新显示");
+        await LayoutAsync(overlay);
+        Require(preview.Text == "隐藏后重新显示", "Showing a hidden overlay retained stale preview layout.");
+        overlay.BeginTurn();
+        await LayoutAsync(overlay);
+        Require(preview.Text == "说话时会在这里显示文字", "A new turn retained the preceding turn's words.");
+        overlay.Update("本轮已取消", text: "", dismiss: true);
+        await LayoutAsync(overlay);
+        Require(preview.Text == "本轮尚未识别到文字", "An empty canceled turn showed an ellipsis instead of readable feedback.");
+        overlay.BeginTurn();
+        await LayoutAsync(overlay);
+        Console.WriteLine("Preview regression: real rooted WinUI layout, 0/160/240/328 DIP constraints and font multipliers 1/1.25/1.5/2 passed. These are layout tests, not physical monitor-DPI changes.");
+    }
+
     private static Rect CheckOverlayBounds(IntPtr hwnd)
     {
         Require(GetWindowRect(hwnd, out var rectangle), "The native overlay bounds could not be read.");
@@ -577,24 +646,41 @@ public static class DesktopSmoke
 
     private static void CheckPopupNativeFrame(IntPtr hwnd, string name)
     {
+        bool overlay = name.StartsWith("overlay", StringComparison.Ordinal);
         long style = GetWindowLongPtr(hwnd, -16).ToInt64();
         long extendedStyle = GetWindowLongPtr(hwnd, -20).ToInt64();
-        Require((style & (0x00C00000L | 0x00040000L | 0x00080000L)) == 0 && (style & 0x80000000L) != 0 &&
+        const long nativeFrame = 0x00C00000L | 0x00040000L;
+        Require((style & nativeFrame) == nativeFrame && (style & 0x80000000L) != 0 &&
+            (style & (0x00080000L | 0x00030000L)) == 0 &&
             (extendedStyle & (0x1L | 0x100L | 0x200L | 0x20000L)) == 0 && (extendedStyle & 0x80) != 0,
-            $"The {name} native HWND still has an OS caption, resize border, or edge (style {style:X}; extended {extendedStyle:X}).");
+            $"The {name} HWND lacks the required native DWM frame hints or has unwanted window controls (style {style:X}; extended {extendedStyle:X}).");
         Require(GetWindowRect(hwnd, out var bounds), "The " + name + " outer frame could not be measured.");
         Require(GetClientRect(hwnd, out var client), "The " + name + " client frame could not be measured.");
         var origin = new Point();
         Require(ClientToScreen(hwnd, ref origin), "The " + name + " client origin could not be measured.");
         Require(origin.X == bounds.Left && origin.Y == bounds.Top && client.Right == bounds.Right - bounds.Left && client.Bottom == bounds.Bottom - bounds.Top,
-            $"The {name} content is inset by a non-client frame: window {bounds.Right - bounds.Left}×{bounds.Bottom - bounds.Top}, client {client.Right}×{client.Bottom}, offset {origin.X - bounds.Left},{origin.Y - bounds.Top}.");
+            $"The {name} content has an unwanted title/resize inset: window {bounds.Right - bounds.Left}×{bounds.Bottom - bounds.Top}, client {client.Right}×{client.Bottom}, offset {origin.X - bounds.Left},{origin.Y - bounds.Top}.");
         IntPtr region = CreateRectRgn(0, 0, 0, 0);
         try
         {
-            Require(region != IntPtr.Zero && GetWindowRgn(hwnd, region) > 1 && !PtInRegion(region, 0, 0) && PtInRegion(region, client.Right / 2, client.Bottom / 2),
-                "The " + name + " does not have the intended rounded native window region.");
+            Require(region != IntPtr.Zero && GetWindowRgn(hwnd, region) == 0,
+                "The " + name + " still applies a hard-edged GDI window region, which disables native rounding.");
         }
         finally { if (region != IntPtr.Zero) DeleteObject(region); }
+        Require(DwmGetWindowAttribute(hwnd, 1, out int nonClientEnabled, sizeof(int)) == 0 && nonClientEnabled != 0,
+            "The " + name + " does not enable DWM non-client rendering.");
+        if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000))
+        {
+            Require(DwmGetWindowAttribute(hwnd, 33, out int corners, sizeof(int)) == 0 && corners == (overlay ? 2 : 3),
+                "The " + name + " did not retain its native corner preference.");
+            Require(DwmGetWindowAttribute(hwnd, 20, out int dark, sizeof(int)) == 0 && dark == (name.EndsWith("Dark", StringComparison.Ordinal) ? 1 : 0),
+                "The " + name + " native frame did not follow its XAML theme.");
+        }
+        int x = bounds.Left + 2, y = bounds.Top + (bounds.Bottom - bounds.Top) / 2;
+        var point = new IntPtr(unchecked((int)((uint)(ushort)x | ((uint)(ushort)y << 16))));
+        Require(SendMessage(hwnd, 0x0084, IntPtr.Zero, point).ToInt64() == (overlay ? -1 : 1),
+            "The " + name + " native border exposes an unexpected resize or activation hit target.");
+        Console.WriteLine($"Native frame {name}: DPI={GetDpiForWindow(hwnd)}, region=none, DWM non-client={nonClientEnabled}. Corner rendering follows Windows desktop/VM policy.");
     }
 
     private static Pixels CaptureDesktopWindow(IntPtr hwnd)
@@ -724,7 +810,6 @@ public static class DesktopSmoke
     [DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleDC(IntPtr dc);
     [DllImport("gdi32.dll")] private static extern IntPtr CreateRectRgn(int left, int top, int right, int bottom);
     [DllImport("user32.dll")] private static extern int GetWindowRgn(IntPtr window, IntPtr region);
-    [DllImport("gdi32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool PtInRegion(IntPtr region, int x, int y);
     [DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleBitmap(IntPtr dc, int width, int height);
     [DllImport("gdi32.dll")] private static extern IntPtr SelectObject(IntPtr dc, IntPtr obj);
     [DllImport("gdi32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool DeleteObject(IntPtr obj);
@@ -732,4 +817,5 @@ public static class DesktopSmoke
     [DllImport("gdi32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool BitBlt(IntPtr destination, int x, int y, int width, int height, IntPtr source, int sourceX, int sourceY, uint operation);
     [DllImport("gdi32.dll")] private static extern int GetDIBits(IntPtr dc, IntPtr bitmap, uint start, uint lines, [Out] byte[] bits, ref BitmapInfoHeader info, uint usage);
     [DllImport("dwmapi.dll")] private static extern int DwmFlush();
+    [DllImport("dwmapi.dll")] private static extern int DwmGetWindowAttribute(IntPtr hwnd, uint attribute, out int value, int size);
 }

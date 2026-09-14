@@ -3,75 +3,50 @@ using System.Runtime.InteropServices;
 
 namespace RealtimeTranscription.Desktop;
 
-/// <summary>
-/// Gives an auxiliary WinUI HWND one frame, owned entirely by its XAML content.
-/// A rounded XAML Border alone does not clip the rectangular native window.
-/// </summary>
+/// <summary>Lets DWM compose the native border, shadow and rounded corners of an auxiliary WinUI window.</summary>
 internal sealed class PopupWindowChrome : IDisposable
 {
     private const int GwlStyle = -16, GwlExStyle = -20;
     private const long WsPopup = 0x80000000L;
-    private const long FrameStyles = 0x00C00000L | 0x00040000L | 0x00080000L | 0x00030000L;
+    private const long WsCaption = 0x00C00000L, WsThickFrame = 0x00040000L;
+    private const long WindowCommands = 0x00080000L | 0x00030000L;
     private const long ExtendedFrameStyles = 0x00000001L | 0x00000100L | 0x00000200L | 0x00020000L;
     private const long WsExToolWindow = 0x80, WsExAppWindow = 0x40000;
     private const long WsExNoActivate = 0x08000000, WsExTransparent = 0x20, WsExLayered = 0x80000;
     private const nuint SubclassId = 0x56494348;
     private readonly IntPtr hwnd;
-    private readonly double radiusDip;
     private readonly bool clickThrough;
     private readonly SubclassProc windowProc;
-    private int lastWidth, lastHeight, lastDiameter;
-    private bool disposed;
+    private bool disposed, dark;
+    private int borderColor = -1; // DWMWA_COLOR_DEFAULT
 
-    public PopupWindowChrome(IntPtr hwnd, double radiusDip, bool clickThrough)
+    public PopupWindowChrome(IntPtr hwnd, bool clickThrough)
     {
         this.hwnd = hwnd;
-        this.radiusDip = radiusDip;
         this.clickThrough = clickThrough;
         windowProc = WindowProc;
         if (!SetWindowSubclass(hwnd, windowProc, SubclassId, 0))
             throw new Win32Exception(Marshal.GetLastWin32Error(), "无法设置辅助窗口边框。");
 
-        // Presenter.SetBorderAndTitleBar(false, false) can leave an SDK-owned
-        // nonclient inset. Remove native frame styles, then force recalculation
-        // through our WM_NCCALCSIZE handler before the first visible frame.
         long style = GetWindowLongPtr(hwnd, GwlStyle).ToInt64();
         SetWindowLongPtr(hwnd, GwlStyle, new IntPtr(NormalizeStyle(style)));
         long exStyle = GetWindowLongPtr(hwnd, GwlExStyle).ToInt64();
         SetWindowLongPtr(hwnd, GwlExStyle, new IntPtr(NormalizeExtendedStyle(exStyle)));
-        if (clickThrough)
-        {
-            // WS_EX_TRANSPARENT alone only affects painting order. Windows
-            // documents cross-process mouse pass-through for layered windows.
-            // Alpha remains fully opaque; no colour key or translucent backing.
-            if (!SetLayeredWindowAttributes(hwnd, 0, 255, 2))
-                throw new Win32Exception(Marshal.GetLastWin32Error(), "无法设置识别浮窗的鼠标穿透。");
-        }
+        if (clickThrough && !SetLayeredWindowAttributes(hwnd, 0, 255, 2))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "无法设置识别浮窗的鼠标穿透。");
 
+        // Constant alpha keeps the rectangular WinUI surface fully opaque.
+        // GDI regions and per-pixel-alpha shapes would prevent native rounding.
         ApplyFramePolicy();
-        SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0, 0x0037); // FRAMECHANGED, NOACTIVATE, NOMOVE, NOSIZE, NOZORDER
-        UpdateRegion();
+        SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0, 0x0037);
     }
 
-    public void UpdateRegion()
+    public void UpdateAppearance(bool dark, bool highContrast, Windows.UI.Color foreground)
     {
-        if (disposed || !GetWindowRect(hwnd, out var rect)) return;
-        int width = rect.Right - rect.Left, height = rect.Bottom - rect.Top;
-        if (width <= 0 || height <= 0) return;
-        uint dpi = GetDpiForWindow(hwnd);
-        int diameter = Math.Clamp((int)Math.Round(radiusDip * 2 * (dpi == 0 ? 1 : dpi / 96.0)), 1, Math.Min(width, height));
-        if (width == lastWidth && height == lastHeight && diameter == lastDiameter) return;
-        IntPtr region = CreateRoundRectRgn(0, 0, width + 1, height + 1, diameter, diameter);
-        if (region == IntPtr.Zero) return;
-        // Windows owns a region only after SetWindowRgn succeeds. Cache before
-        // applying it because the API synchronously sends window-position events.
-        (int oldWidth, int oldHeight, int oldDiameter) = (lastWidth, lastHeight, lastDiameter);
-        (lastWidth, lastHeight, lastDiameter) = (width, height, diameter);
-        if (SetWindowRgn(hwnd, region, true) == 0)
-        {
-            (lastWidth, lastHeight, lastDiameter) = (oldWidth, oldHeight, oldDiameter);
-            DeleteObject(region);
-        }
+        if (disposed) return;
+        this.dark = dark;
+        borderColor = highContrast ? foreground.R | (foreground.G << 8) | (foreground.B << 16) : -1;
+        ApplyFramePolicy();
     }
 
     public void Dispose()
@@ -83,19 +58,23 @@ internal sealed class PopupWindowChrome : IDisposable
 
     private void ApplyFramePolicy()
     {
-        // Custom regions and DWM rounding cannot be combined. Explicitly use
-        // our same region on Windows 10, Windows 11 and remote/VM desktops.
-        // Unsupported Windows 11 attributes simply return E_INVALIDARG on 10.
-        SetDwmAttribute(2, 1);                  // DWMWA_NCRENDERING_POLICY: DISABLED
-        SetDwmAttribute(33, 1);                 // DWMWA_WINDOW_CORNER_PREFERENCE: DONOTROUND
-        SetDwmAttribute(34, unchecked((int)0xFFFFFFFE)); // DWMWA_BORDER_COLOR: NONE
-        SetDwmAttribute(3, 1);                  // No stale rectangular show/hide transition
+        if (disposed) return;
+        SetDwmAttribute(2, 2); // DWMNCRP_ENABLED
+        SetDwmAttribute(3, 0); // Native show/hide transitions.
+        SetDwmAttribute(20, dark ? 1 : 0);
+        SetDwmAttribute(33, clickThrough ? 2 : 3); // ROUND / ROUNDSMALL
+        SetDwmAttribute(34, borderColor);
+        var margins = new Margins { Left = 1, Right = 1, Top = 1, Bottom = 1 };
+        _ = DwmExtendFrameIntoClientArea(hwnd, ref margins);
+        // Windows 10 and remote/VM sessions may choose square corners.
+        // Honor that native policy instead of adding a hard-edged region.
     }
 
     private void SetDwmAttribute(uint attribute, int value)
         => _ = DwmSetWindowAttribute(hwnd, attribute, ref value, sizeof(int));
 
-    private static long NormalizeStyle(long style) => (style & ~FrameStyles) | WsPopup;
+    private static long NormalizeStyle(long style)
+        => (style & ~WindowCommands) | WsPopup | WsCaption | WsThickFrame;
 
     private long NormalizeExtendedStyle(long style)
     {
@@ -107,18 +86,17 @@ internal sealed class PopupWindowChrome : IDisposable
 
     private IntPtr WindowProc(IntPtr window, uint message, IntPtr wParam, IntPtr lParam, nuint id, nuint data)
     {
-        if (message == 0x0083) return IntPtr.Zero; // WM_NCCALCSIZE: entire window is the client area
-        if (message == 0x0085) return IntPtr.Zero; // WM_NCPAINT: XAML paints the sole visible border
+        if (message == 0x0083) return IntPtr.Zero; // WM_NCCALCSIZE: full content, no caption or resize inset.
+        if (message == 0x0084) return new IntPtr(clickThrough ? -1 : 1); // HTTRANSPARENT / HTCLIENT
+        if (message == 0x0021 && clickThrough) return new IntPtr(3); // MA_NOACTIVATE
+        // Leave non-client painting/activation to DWM for the native outline.
         var result = DefSubclassProc(window, message, wParam, lParam);
-        if (message == 0x007C && lParam != IntPtr.Zero) // WM_STYLECHANGING
+        if (message == 0x007C && lParam != IntPtr.Zero)
         {
-            // The WinUI presenter reapplies cached frame flags on Show/Activate.
-            // Normalize the proposed flags after downstream handlers, before
-            // Windows applies them. Editing STYLESTRUCT avoids recursive style
-            // changes and a transient visible frame or activation change.
             int index = unchecked((int)wParam.ToInt64());
             if (index is GwlStyle or GwlExStyle)
             {
+                // WinUI can restore cached frame flags on Show/Activate.
                 var styles = Marshal.PtrToStructure<StyleStruct>(lParam);
                 styles.NewStyle = unchecked((uint)(index == GwlStyle
                     ? NormalizeStyle(styles.NewStyle) : NormalizeExtendedStyle(styles.NewStyle)));
@@ -126,29 +104,20 @@ internal sealed class PopupWindowChrome : IDisposable
                 return IntPtr.Zero;
             }
         }
-        if (message == 0x0082) Dispose();         // WM_NCDESTROY
-        else if (message is 0x0005 or 0x02E0) UpdateRegion(); // WM_SIZE / WM_DPICHANGED
-        else if (message is 0x031A or 0x031E)    // Theme or desktop-composition change
-        {
-            ApplyFramePolicy();
-            UpdateRegion();
-        }
+        if (message == 0x0082) Dispose();
+        else if (message is 0x02E0 or 0x031A or 0x031E) ApplyFramePolicy();
         return result;
     }
 
-    [StructLayout(LayoutKind.Sequential)] private struct Rect { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)] private struct Margins { public int Left, Right, Top, Bottom; }
     [StructLayout(LayoutKind.Sequential)] private struct StyleStruct { public uint OldStyle, NewStyle; }
     [UnmanagedFunctionPointer(CallingConvention.Winapi)] private delegate IntPtr SubclassProc(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam, nuint id, nuint data);
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] private static extern IntPtr GetWindowLongPtr(IntPtr hwnd, int index);
     [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")] private static extern IntPtr SetWindowLongPtr(IntPtr hwnd, int index, IntPtr value);
     [DllImport("user32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint key, byte alpha, uint flags);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int width, int height, uint flags);
-    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetWindowRect(IntPtr hwnd, out Rect rect);
-    [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr hwnd);
-    [DllImport("user32.dll")] private static extern int SetWindowRgn(IntPtr hwnd, IntPtr region, [MarshalAs(UnmanagedType.Bool)] bool redraw);
-    [DllImport("gdi32.dll")] private static extern IntPtr CreateRoundRectRgn(int left, int top, int right, int bottom, int ellipseWidth, int ellipseHeight);
-    [DllImport("gdi32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool DeleteObject(IntPtr value);
     [DllImport("dwmapi.dll")] private static extern int DwmSetWindowAttribute(IntPtr hwnd, uint attribute, ref int value, int size);
+    [DllImport("dwmapi.dll")] private static extern int DwmExtendFrameIntoClientArea(IntPtr hwnd, ref Margins margins);
     [DllImport("comctl32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SetWindowSubclass(IntPtr hwnd, SubclassProc callback, nuint id, nuint data);
     [DllImport("comctl32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool RemoveWindowSubclass(IntPtr hwnd, SubclassProc callback, nuint id);
     [DllImport("comctl32.dll")] private static extern IntPtr DefSubclassProc(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam);

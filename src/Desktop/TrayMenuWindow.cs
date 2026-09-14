@@ -71,7 +71,7 @@ public sealed class TrayMenuWindow : Window, IDisposable
         root = new Border
         {
             Name = "TrayMenuRoot", Padding = new Thickness(8),
-            CornerRadius = new CornerRadius(10), BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(0), BorderThickness = new Thickness(0),
             Child = new ScrollViewer
             {
                 Content = stack, HorizontalScrollMode = ScrollMode.Disabled,
@@ -93,7 +93,8 @@ public sealed class TrayMenuWindow : Window, IDisposable
         presenter.SetBorderAndTitleBar(false, false);
         AppWindow.SetPresenter(presenter);
         AppWindow.IsShownInSwitchers = false;
-        chrome = new PopupWindowChrome(hwnd, 10, clickThrough: false);
+        chrome = new PopupWindowChrome(hwnd, clickThrough: false);
+        ApplyTheme();
         windowProc = WindowProc;
         SetWindowSubclass(hwnd, windowProc, 1, 0);
         root.Loaded += (_, _) => { if (IsOpen) Position(); };
@@ -224,7 +225,7 @@ public sealed class TrayMenuWindow : Window, IDisposable
         bool highContrast = accessibility.HighContrast;
         root.Background = new SolidColorBrush(highContrast ? uiSettings.GetColorValue(UIColorType.Background) : dark ? Windows.UI.Color.FromArgb(255, 32, 32, 32) : Windows.UI.Color.FromArgb(255, 249, 249, 249));
         surface.Background = root.Background;
-        root.BorderBrush = new SolidColorBrush(highContrast ? uiSettings.GetColorValue(UIColorType.Foreground) : dark ? Windows.UI.Color.FromArgb(255, 64, 64, 64) : Windows.UI.Color.FromArgb(255, 218, 218, 218));
+        chrome?.UpdateAppearance(dark, highContrast, uiSettings.GetColorValue(UIColorType.Foreground));
     }
 
     private void SystemAppearanceChanged(UISettings sender, object args) => QueueAppearanceUpdate();
@@ -264,7 +265,6 @@ public sealed class TrayMenuWindow : Window, IDisposable
             if (preferredY < info.Work.Top + gap) preferredY = anchor.Y + gap;
             int y = Math.Clamp(preferredY, info.Work.Top + gap, info.Work.Bottom - height - gap);
             AppWindow.MoveAndResize(new RectInt32(x, y, width, height));
-            chrome.UpdateRegion();
         }
         finally { positioning = false; }
     }
