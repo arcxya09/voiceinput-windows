@@ -18,6 +18,7 @@ internal sealed class PopupWindowChrome : IDisposable
     private const nuint SubclassId = 0x56494348;
     private readonly IntPtr hwnd;
     private readonly double radiusDip;
+    private readonly bool clickThrough;
     private readonly SubclassProc windowProc;
     private int lastWidth, lastHeight, lastDiameter;
     private bool disposed;
@@ -26,6 +27,7 @@ internal sealed class PopupWindowChrome : IDisposable
     {
         this.hwnd = hwnd;
         this.radiusDip = radiusDip;
+        this.clickThrough = clickThrough;
         windowProc = WindowProc;
         if (!SetWindowSubclass(hwnd, windowProc, SubclassId, 0))
             throw new Win32Exception(Marshal.GetLastWin32Error(), "无法设置辅助窗口边框。");
@@ -34,20 +36,17 @@ internal sealed class PopupWindowChrome : IDisposable
         // nonclient inset. Remove native frame styles, then force recalculation
         // through our WM_NCCALCSIZE handler before the first visible frame.
         long style = GetWindowLongPtr(hwnd, GwlStyle).ToInt64();
-        SetWindowLongPtr(hwnd, GwlStyle, new IntPtr((style & ~FrameStyles) | WsPopup));
+        SetWindowLongPtr(hwnd, GwlStyle, new IntPtr(NormalizeStyle(style)));
         long exStyle = GetWindowLongPtr(hwnd, GwlExStyle).ToInt64();
-        exStyle = (exStyle | WsExToolWindow) & ~(ExtendedFrameStyles | WsExAppWindow);
+        SetWindowLongPtr(hwnd, GwlExStyle, new IntPtr(NormalizeExtendedStyle(exStyle)));
         if (clickThrough)
         {
             // WS_EX_TRANSPARENT alone only affects painting order. Windows
             // documents cross-process mouse pass-through for layered windows.
             // Alpha remains fully opaque; no colour key or translucent backing.
-            exStyle |= WsExNoActivate | WsExTransparent | WsExLayered;
+            if (!SetLayeredWindowAttributes(hwnd, 0, 255, 2))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "无法设置识别浮窗的鼠标穿透。");
         }
-        else exStyle &= ~(WsExNoActivate | WsExTransparent | WsExLayered);
-        SetWindowLongPtr(hwnd, GwlExStyle, new IntPtr(exStyle));
-        if (clickThrough && !SetLayeredWindowAttributes(hwnd, 0, 255, 2))
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "无法设置识别浮窗的鼠标穿透。");
 
         ApplyFramePolicy();
         SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0, 0x0037); // FRAMECHANGED, NOACTIVATE, NOMOVE, NOSIZE, NOZORDER
@@ -96,11 +95,37 @@ internal sealed class PopupWindowChrome : IDisposable
     private void SetDwmAttribute(uint attribute, int value)
         => _ = DwmSetWindowAttribute(hwnd, attribute, ref value, sizeof(int));
 
+    private static long NormalizeStyle(long style) => (style & ~FrameStyles) | WsPopup;
+
+    private long NormalizeExtendedStyle(long style)
+    {
+        style = (style | WsExToolWindow) & ~(ExtendedFrameStyles | WsExAppWindow);
+        return clickThrough
+            ? style | WsExNoActivate | WsExTransparent | WsExLayered
+            : style & ~(WsExNoActivate | WsExTransparent | WsExLayered);
+    }
+
     private IntPtr WindowProc(IntPtr window, uint message, IntPtr wParam, IntPtr lParam, nuint id, nuint data)
     {
         if (message == 0x0083) return IntPtr.Zero; // WM_NCCALCSIZE: entire window is the client area
         if (message == 0x0085) return IntPtr.Zero; // WM_NCPAINT: XAML paints the sole visible border
         var result = DefSubclassProc(window, message, wParam, lParam);
+        if (message == 0x007C && lParam != IntPtr.Zero) // WM_STYLECHANGING
+        {
+            // The WinUI presenter reapplies cached frame flags on Show/Activate.
+            // Normalize the proposed flags after downstream handlers, before
+            // Windows applies them. Editing STYLESTRUCT avoids recursive style
+            // changes and a transient visible frame or activation change.
+            int index = unchecked((int)wParam.ToInt64());
+            if (index is GwlStyle or GwlExStyle)
+            {
+                var styles = Marshal.PtrToStructure<StyleStruct>(lParam);
+                styles.NewStyle = unchecked((uint)(index == GwlStyle
+                    ? NormalizeStyle(styles.NewStyle) : NormalizeExtendedStyle(styles.NewStyle)));
+                Marshal.StructureToPtr(styles, lParam, false);
+                return IntPtr.Zero;
+            }
+        }
         if (message == 0x0082) Dispose();         // WM_NCDESTROY
         else if (message is 0x0005 or 0x02E0) UpdateRegion(); // WM_SIZE / WM_DPICHANGED
         else if (message is 0x031A or 0x031E)    // Theme or desktop-composition change
@@ -112,6 +137,7 @@ internal sealed class PopupWindowChrome : IDisposable
     }
 
     [StructLayout(LayoutKind.Sequential)] private struct Rect { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)] private struct StyleStruct { public uint OldStyle, NewStyle; }
     [UnmanagedFunctionPointer(CallingConvention.Winapi)] private delegate IntPtr SubclassProc(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam, nuint id, nuint data);
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] private static extern IntPtr GetWindowLongPtr(IntPtr hwnd, int index);
     [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")] private static extern IntPtr SetWindowLongPtr(IntPtr hwnd, int index, IntPtr value);

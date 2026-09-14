@@ -40,6 +40,17 @@ public static class DesktopSmoke
         }
         string Describe(Exception exception, string context)
             => context + " [HRESULT 0x" + exception.HResult.ToString("X8", CultureInfo.InvariantCulture) + "] " + exception;
+        bool InspectFrameInvariant(Action assertion, string name)
+        {
+            try { assertion(); return true; }
+            catch (Exception exception)
+            {
+                string diagnostic = Describe(exception, name + " during " + stage);
+                errors.Add(diagnostic); Console.Error.WriteLine(diagnostic);
+                return false;
+            }
+        }
+        bool popupNativeFramesPassed = true, trayDesktopSurfacePassed = true, overlayDesktopSurfacePassed = true;
         MainWindow? window = null;
         VoiceOverlay? overlay = null;
         TrayMenuWindow? trayMenu = null;
@@ -290,8 +301,11 @@ public static class DesktopSmoke
                 await LayoutAsync(menu);
                 desktopImages.Add(CaptureDesktopWindow(menuHwnd));
                 await SaveContactSheetAsync(EvidencePath(report, "frames"), desktopImages, 2);
-                CheckPopupNativeFrame(menuHwnd, "tray " + theme);
-                CheckPopupSurfaceOnDesktop(menuHwnd, Find<Border>(menu, "TrayMenuRoot"), "tray " + theme);
+                // These independent, read-only invariants should all report in
+                // one run. A failing style must not prevent the other theme or
+                // overlay from being inspected. Errors still fail the run.
+                popupNativeFramesPassed &= InspectFrameInvariant(() => CheckPopupNativeFrame(menuHwnd, "tray " + theme), "Native frame");
+                trayDesktopSurfacePassed &= InspectFrameInvariant(() => CheckPopupSurfaceOnDesktop(menuHwnd, Find<Border>(menu, "TrayMenuRoot"), "tray " + theme), "Composed desktop surface");
             }
             Require(window.AppWindow.IsVisible && GetWindowRect(mainHwnd, out var managerWithMenu) && managerWithMenu.Equals(managerBefore),
                 "Opening the tray menu changed the main window's visibility or bounds.");
@@ -344,8 +358,8 @@ public static class DesktopSmoke
                 await LayoutAsync(overlay);
                 desktopImages.Add(CaptureDesktopWindow(hwnd));
                 await SaveContactSheetAsync(EvidencePath(report, "frames"), desktopImages, 2);
-                CheckPopupNativeFrame(hwnd, "overlay " + theme);
-                CheckOverlayVisibleOnDesktop(overlay, original);
+                popupNativeFramesPassed &= InspectFrameInvariant(() => CheckPopupNativeFrame(hwnd, "overlay " + theme), "Native frame");
+                overlayDesktopSurfacePassed &= InspectFrameInvariant(() => CheckOverlayVisibleOnDesktop(overlay, original), "Composed desktop surface");
             }
             var preview = Find<TextBlock>(overlay, "OverlayPreview");
             string suffix = preview.Text.TrimStart('…');
@@ -353,8 +367,10 @@ public static class DesktopSmoke
             Require(suffix.EndsWith(ending, StringComparison.Ordinal) && longText.EndsWith(suffix, StringComparison.Ordinal), "The compact preview is not showing the latest transcript suffix.");
             int boundary = longText.Length - suffix.Length;
             Require(StringInfo.ParseCombiningCharacters(longText).Contains(boundary), "The compact preview split a Unicode grapheme.");
-            checks.Add("Actual overlay HWND is visible on the desktop, preserves focus, passes pointers through, and is centered at 360 by 76 DIPs");
-            checks.Add("Tray and overlay outer HWND frames have no caption, resize border or inset client area; light and dark composed-desktop captures include surrounding pixels");
+            if (overlayDesktopSurfacePassed)
+                checks.Add("Actual overlay HWND is visible on the desktop, preserves focus, passes pointers through, and is centered at 360 by 76 DIPs");
+            if (popupNativeFramesPassed && trayDesktopSurfacePassed && overlayDesktopSurfacePassed)
+                checks.Add("Tray and overlay outer HWND frames have no caption, resize border or inset client area; light and dark composed-desktop captures include surrounding pixels");
             checks.Add("Long live previews stay on one line and retain complete Unicode graphemes at the transcript tail");
 
             var overlayImages = new List<Pixels> { await CaptureAsync((FrameworkElement)overlay.Content) };
