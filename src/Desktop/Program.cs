@@ -41,7 +41,7 @@ internal static class Program
             // SDK's COM wrappers, DispatcherQueue synchronization context, and
             // Application.Start sequence intact after our early worker dispatch.
             // Undocked reg-free WinRT is initialized by the SDK module initializer.
-            XamlGeneratedProgram.XamlGeneratedMain(args);
+            XamlGeneratedProgram.XamlGeneratedMain();
             return Environment.ExitCode;
         }
         finally

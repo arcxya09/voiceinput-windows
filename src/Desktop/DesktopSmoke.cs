@@ -32,7 +32,7 @@ public static class DesktopSmoke
         MainWindow? window = null;
         VoiceOverlay? overlay = null;
         AppController? controller = null;
-        UnhandledExceptionEventHandler unhandled = (_, e) => { errors.Add("WinUI dispatcher: " + e.Exception.GetType().Name + ": " + e.Exception.Message); e.Handled = true; };
+        Microsoft.UI.Xaml.UnhandledExceptionEventHandler unhandled = (_, e) => { errors.Add("WinUI dispatcher: " + e.Exception.GetType().Name + ": " + e.Exception.Message); e.Handled = true; };
         void BindingFailed(object sender, BindingFailedEventArgs e) => errors.Add("WinUI binding: " + e.Message);
         Application.Current.UnhandledException += unhandled;
         Application.Current.DebugSettings.BindingFailed += BindingFailed;
@@ -289,7 +289,7 @@ public static class DesktopSmoke
             var source = images[index];
             int x = gap + index % columns * (cellWidth + gap), y = gap + index / columns * (cellHeight + gap);
             for (int row = 0; row < source.Height; row++)
-                Buffer.BlockCopy(source.Data, row * source.Width * 4, pixels, ((y + row) * width + x) * 4, source.Width * 4);
+                System.Buffer.BlockCopy(source.Data, row * source.Width * 4, pixels, ((y + row) * width + x) * 4, source.Width * 4);
         }
         using var stream = new InMemoryRandomAccessStream();
         var encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.PngEncoderId, stream);
