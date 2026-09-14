@@ -236,7 +236,7 @@ internal static class InputDeliverySmoke
                 {
                     var result = await TextDelivery.SendAsync(capture.Target!, sample.Text, Safe, token);
                     Require(result.State == "PasteSent" && result.Accepted == 4,
-                        "The production input path stopped unexpectedly: " + result.State + " / " + result.Message);
+                        "The production input path stopped unexpectedly: " + result.State + " / " + result.Diagnostic + " / " + result.Message);
                     string expected = sample.Initial[..sample.Start] + sample.Text + sample.Initial[(sample.Start + sample.Length)..];
                     Reply readback = new("Pending");
                     // WinForms plain edit exposes CRLF; rich edit exposes LF.

@@ -6,7 +6,11 @@ namespace RealtimeTranscription.Desktop.Input;
 
 public record NativeTarget(IntPtr Window,IntPtr Focus,uint Thread,uint Process);
 public record InputTarget(NativeTarget Native,string WorkerId,string CaptureId,bool CheckSelection=true);
-public record DeliveryResult(string State,string Message,int Accepted=0);
+public record DeliveryResult(string State,string Message,int Accepted=0)
+{
+    // Stage codes only; never include clipboard or target document contents.
+    public string Diagnostic { get; init; } = "";
+}
 public record PhysicalSignal(string Kind,int Key=0,long At=0,NativeTarget? Target=null,long ActivityVersion=0);
 public record TargetCapture(InputTarget? Target,string Code,string Message);
 
@@ -176,23 +180,31 @@ public static class TextDelivery
         if(Modified())return new("Blocked","修饰键仍未释放，文字已保留，可手动复制。");
         if(!valid()||token.IsCancellationRequested)return new("Blocked","检测到其他操作，文字已保留，可手动复制。");
         if(Win32.Composing(target.Native.Focus))return new("Blocked","输入法仍有未确认的候选词，文字已保留，可手动复制。");
+        string diagnostic="PasteNotPrepared";
         bool Uninterrupted()=>valid()&&Win32.Current()==target.Native;
         var result=await ClipboardPaste.SendAsync(text,async(body,cancellation)=>
             {
                 uint previous=Win32.GetClipboardSequenceNumber();
                 var prepared=await Query(new("PreparePaste",CaptureId:target.CaptureId,Text:body,ClipboardSequence:previous),
                     cancellation,target.WorkerId,timeoutMs:3000);
+                diagnostic=prepared?.Reply.Code??"PasteWorkerUnavailable";
                 return prepared is {} response&&response.Reply.Code=="Ready"?response.Reply.ClipboardSequence:null;
             },
-            sequence=>Win32.GetClipboardSequenceNumber()==sequence,
+            sequence=>
+            {
+                bool unchanged=Win32.GetClipboardSequenceNumber()==sequence;
+                if(!unchanged)diagnostic="ClipboardChangedAfterPrepare";
+                return unchanged;
+            },
             ()=>Uninterrupted()&&!Modified()&&!Win32.Composing(target.Native.Focus),
             SendPasteShortcut,token,Uninterrupted);
-        return result.State switch
+        DeliveryResult delivery=result.State switch
         {
             "Sent"=>new("PasteSent","已发起整段粘贴，正文保留在剪贴板。",result.Accepted),
             "Unknown"=>new("Unknown","粘贴结果需要核对，请检查目标内容。不会自动重发。",result.Accepted),
             _=>new("Blocked","未发起粘贴：剪贴板暂不可用、内容不受支持，或输入位置及按键状态已变化。文字已保留，可手动复制。",result.Accepted)
         };
+        return delivery with{Diagnostic=diagnostic};
     }
     private static int SendPasteShortcut()
     {

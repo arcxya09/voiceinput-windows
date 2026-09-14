@@ -67,8 +67,8 @@ public static class UiaWorker
             if (request.Text is null || !ClipboardPaste.IsSupportedText(request.Text)) return new("ClipboardUnavailable");
             var validation = Validate(pasteTarget, true);
             if (validation.Code != "Ready") return validation;
-            uint? sequence = NativeClipboard.Prepare(request.Text, pasteTarget.Native, request.ClipboardSequence);
-            return sequence is null ? new("ClipboardUnavailable") : new("Ready", ClipboardSequence: sequence);
+            uint? sequence = NativeClipboard.Prepare(request.Text, pasteTarget.Native, request.ClipboardSequence, out string diagnostic);
+            return sequence is null ? new(diagnostic) : new("Ready", ClipboardSequence: sequence);
         }
         return new("Changed");
     }
