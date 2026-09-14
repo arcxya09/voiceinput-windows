@@ -43,5 +43,5 @@ public partial class MainWindow
     }
 
     private void ShowPreviewFrame(VoicePreviewFrame frame)
-        => overlay.Update(frame.Status, frame.Text, frame.Dismiss);
+        => overlay.Update(frame.Status, frame.Text, frame.Dismiss, frame.DeliveryState);
 }
