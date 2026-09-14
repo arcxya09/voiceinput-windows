@@ -27,6 +27,9 @@ internal static class Dialogs
 
     private static ContentDialog Create(MainWindow owner, string title, double preferredWidth = 520)
     {
+        // Create is invoked only after this owner's modal queue has been acquired.
+        // Tray actions may reach us while the main window is hidden or minimized.
+        owner.OpenManager();
         if (owner.Content is not FrameworkElement { XamlRoot: { } xamlRoot } root)
             throw new InvalidOperationException("窗口尚未就绪，请稍后重试。");
         double availableWidth = root.ActualWidth > 0 ? Math.Max(240, root.ActualWidth - 64) : preferredWidth;

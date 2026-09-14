@@ -1,14 +1,12 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using RealtimeTranscription.Core;
-using Forms = System.Windows.Forms;
 
 namespace RealtimeTranscription.Desktop;
 
 public partial class MainWindow
 {
     private TranscriptSnapshot? lastSnapshot;
-    private Forms.ToolStripMenuItem? dictationMenu;
     private bool updatingDictation;
 
     private void RefreshLiveState()
@@ -22,7 +20,7 @@ public partial class MainWindow
         updatingDictation = true;
         DictationOnlyBox.IsChecked = dictation;
         DictationOnlyBox.IsEnabled = !ManagementBusy;
-        if (dictationMenu != null) { dictationMenu.Checked = dictation; dictationMenu.Enabled = !ManagementBusy; }
+        trayMenu?.SetState(ptt?.Enabled == true, dictation, !ManagementBusy);
         updatingDictation = false;
         string warning = UiPresentation.SaveWarning(controller.MemoryAvailable, controller.MemoryStatus, controller.FailedSaveCount);
         SaveWarningText.Text = warning;

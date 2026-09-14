@@ -71,6 +71,11 @@ public partial class MainWindow
         var scroll = FindVisual<ScrollViewer>(box);
         return scroll == null || scroll.VerticalOffset >= scroll.ScrollableHeight - 3;
     }
+    // WinUI's native text host can represent CRLF paragraphs as CR. Compare
+    // logical line breaks so an unchanged snapshot does not reset selection.
+    // Copy/export continue to use the original controller transcript.
+    private static bool SameDisplayedText(string displayed, string source)
+        => displayed == source || displayed.Replace("\r\n", "\n").Replace('\r', '\n') == source.Replace("\r\n", "\n").Replace('\r', '\n');
     private void ScrollTranscriptToEnd(TextBox box) => DispatcherQueue.TryEnqueue(() =>
     {
         if (closed) return;

@@ -31,6 +31,7 @@ public static class DesktopSmoke
         var captures = new List<object>();
         MainWindow? window = null;
         VoiceOverlay? overlay = null;
+        TrayMenuWindow? trayMenu = null;
         AppController? controller = null;
         Microsoft.UI.Xaml.UnhandledExceptionEventHandler unhandled = (_, e) => { errors.Add("WinUI dispatcher: " + e.Exception.GetType().Name + ": " + e.Exception.Message); e.Handled = true; };
         void BindingFailed(object sender, BindingFailedEventArgs e) => errors.Add("WinUI binding: " + e.Message);
@@ -65,12 +66,37 @@ public static class DesktopSmoke
             await controller.SaveTermAsync(new() { Text = "JUNA", Scope = "default" });
             await controller.SaveSettingsAsync(controller.Settings with { Hotkey = "F9", DictationOnly = true }, controller.Keys);
             window.ShowPage(0);
-            await UntilAsync(() => Find<TextBox>(window, "OutputBox").Text == text, "The displayed transcript differs from the loaded history.");
+            var output = Find<TextBox>(window, "OutputBox");
+            await UntilAsync(() => CanonicalLines(output.Text) == CanonicalLines(text),
+                () => "The displayed transcript differs from the loaded history. Expected fixture: " + JsonSerializer.Serialize(text) +
+                    "; actual fixture: " + JsonSerializer.Serialize(output.Text));
             Require(Find<TextBlock>(window, "BodyCount").Text.Contains(JsonCodec.Count(text).ToString()), "The Unicode body count did not update.");
             await UntilAsync(() => Find<ListView>(window, "TermsGrid").Items.Count == 1, "The visible lexicon did not refresh.");
+            await UntilAsync(() => Find<TextBlock>(window, "StatusText").Text == "设置已保存。",
+                "The initial settings snapshot did not reach the live view.");
+
+            // WinUI may expose CR where the transcript uses CRLF. Replaying an
+            // identical production snapshot must not assign Text again and lose
+            // the user's selection. The status below is written after Render's
+            // body update, so observing it proves that the new snapshot rendered.
+            int selectionStart = output.Text.IndexOf("JUNA", StringComparison.Ordinal);
+            Require(selectionStart >= 0, "The selection fixture is missing from the displayed transcript.");
+            output.Focus(FocusState.Programmatic);
+            output.Select(selectionStart, 4);
+            Require(output.SelectedText == "JUNA", "The transcript selection fixture could not be established.");
+            await controller.LoadSessionAsync(session);
+            await UntilAsync(() => Find<TextBlock>(window, "StatusText").Text == "已载入历史供查看与编辑；历史文字不会自动输入。",
+                "The repeated history snapshot did not reach the live view.");
+            Require(output.SelectionStart == selectionStart && output.SelectionLength == 4 && output.SelectedText == "JUNA",
+                "Refreshing an unchanged transcript reset the user's text selection.");
+            Require(CanonicalLines(output.Text) == CanonicalLines(text),
+                "The repeated history snapshot changed the fixture text. Expected fixture: " + JsonSerializer.Serialize(text) +
+                    "; actual fixture: " + JsonSerializer.Serialize(output.Text));
             string version = typeof(MainWindow).Assembly.GetName().Version!.ToString(3);
-            Require(Find<TextBlock>(window, "VersionInfo").Text.Contains(version) && Find<TextBlock>(window, "HotkeyHint").Text.Contains("F9"), "The displayed version or configured hotkey is stale.");
+            await UntilAsync(() => Find<TextBlock>(window, "VersionInfo").Text.Contains(version) && Find<TextBlock>(window, "HotkeyHint").Text.Contains("F9"),
+                "The displayed version or configured hotkey is stale.");
             checks.Add("Production controller updates transcript, Unicode count, and native WinUI lexicon list");
+            checks.Add("Repeated history snapshots preserve exact text and paragraphs across native line endings without resetting the user's selection");
             checks.Add("Version and dictation hotkey labels follow current production settings");
 
             window.ShowPage(1);
@@ -110,10 +136,12 @@ public static class DesktopSmoke
             vocabulary.SelectedIndex = 0;
             checks.Add("All five WinUI navigation pages and every native vocabulary tab render actual content");
 
-            // Exercise the production dialog factory, owner XamlRoot and modal
-            // queue. Change only the editor, then invoke its actual Cancel button.
-            // The isolated repository must keep the original term unchanged.
+            // Exercise a tray-origin dialog while its owner is hidden, including
+            // the production owner restore, XamlRoot and modal queue. Change only
+            // the editor, then invoke Cancel; the repository must remain unchanged.
             var originalTerm = controller.Terms.Single();
+            window.Hide();
+            Require(!window.AppWindow.IsVisible, "The dialog smoke precondition requires a hidden main window.");
             Task<TermData?> editing = Dialogs.EditTermAsync(window, originalTerm);
             ContentDialog? termDialog = null;
             await UntilAsync(() =>
@@ -124,8 +152,8 @@ public static class DesktopSmoke
                     .FirstOrDefault(dialog => dialog != null);
                 return termDialog != null && termDialog.ActualWidth > 0 && termDialog.ActualHeight > 0;
             }, "The native term editor ContentDialog did not open.");
-            Require(termDialog!.XamlRoot == ((FrameworkElement)window.Content).XamlRoot && Dialogs.IsOpen,
-                "The term editor is not attached to the owner's modal queue and XamlRoot.");
+            Require(window.AppWindow.IsVisible && termDialog!.XamlRoot == ((FrameworkElement)window.Content).XamlRoot && Dialogs.IsOpen,
+                "The term editor did not restore its hidden owner or attach to the owner's modal queue and XamlRoot.");
             var wordEditor = Visuals<TextBox>(termDialog).FirstOrDefault(box => box.Header?.ToString() == "词条（1—64 字）")
                 ?? throw new InvalidOperationException("The native term editor is missing its word input.");
             Require(wordEditor.Text == originalTerm.Text, "The term editor did not load its original word.");
@@ -142,9 +170,51 @@ public static class DesktopSmoke
             ((IInvokeProvider)cancelPeer.GetPattern(PatternInterface.Invoke)).Invoke();
             Require(await editing.WaitAsync(TimeSpan.FromSeconds(6)) == null, "Cancel unexpectedly accepted the term editor changes.");
             Require(!Dialogs.IsOpen && controller.Terms.Single() == originalTerm, "Cancel changed the term or failed to release the modal queue.");
-            checks.Add("Production ContentDialog opens on the owner XamlRoot, renders native fields, and cancels edits without changing the lexicon");
+            checks.Add("Production ContentDialog restores its hidden owner, renders native fields on the owner XamlRoot, and cancels edits without changing the lexicon");
+
+            // The native menu is tested independently of the Shell icon. Its
+            // injected callback records commands instead of touching clipboard,
+            // hooks, settings, or shutdown. Test both visible and hidden owners.
+            var commands = new List<TrayMenuCommand>();
+            var menu = new TrayMenuWindow(command => { commands.Add(command); return Task.CompletedTask; });
+            trayMenu = menu;
+            menu.SetState(enabled: false, dictation: false, canChangeMode: true);
+            IntPtr mainHwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
+            Require(GetWindowRect(mainHwnd, out var managerBefore), "The main window bounds could not be read before opening the tray menu.");
+            menu.ShowAtCursor();
+            await LayoutAsync(menu);
+            Require(menu.IsOpen && menu.AppWindow.IsVisible && commands.Count == 0, "Opening the native tray menu invoked a command or failed to show it.");
+            IntPtr menuHwnd = WinRT.Interop.WindowNative.GetWindowHandle(menu);
+            CheckTrayBounds(menuHwnd);
+            Require(window.AppWindow.IsVisible && GetWindowRect(mainHwnd, out var managerWithMenu) && managerWithMenu.Equals(managerBefore),
+                "Opening the tray menu changed the main window's visibility or bounds.");
+            var menuCapture = await CaptureAsync((FrameworkElement)menu.Content);
+            pageImages.Add(menuCapture);
+            captures.Add(new { name = "NativeTrayMenu", width = menuCapture.Width, height = menuCapture.Height });
+            SendMessage(menuHwnd, 0x0100, new IntPtr(27), IntPtr.Zero); // WM_KEYDOWN / Escape, confined to this window.
+            await UntilAsync(() => !menu.IsOpen && !menu.AppWindow.IsVisible, "Escape did not dismiss the native tray menu.");
+            Require(commands.Count == 0, "Escape unexpectedly invoked a tray command.");
+
+            window.AppWindow.Hide();
+            menu.ShowAtCursor();
+            await LayoutAsync(menu);
+            Require(!window.AppWindow.IsVisible, "Opening the tray menu unexpectedly restored the hidden main window.");
+            var copyButton = Find<Button>(menu, "TrayCopy");
+            var copyPeer = FrameworkElementAutomationPeer.CreatePeerForElement(copyButton) ?? new ButtonAutomationPeer(copyButton);
+            Require(copyPeer.GetPattern(PatternInterface.Invoke) is IInvokeProvider, "The native tray menu Copy button is not invokable.");
+            ((IInvokeProvider)copyPeer.GetPattern(PatternInterface.Invoke)).Invoke();
+            await UntilAsync(() => commands.Count == 1 && !menu.IsOpen && !menu.AppWindow.IsVisible,
+                "The native tray menu did not dismiss after dispatching its command.");
+            Require(commands.Single() == TrayMenuCommand.Copy && !window.AppWindow.IsVisible &&
+                GetWindowRect(mainHwnd, out var managerAfter) && managerAfter.Equals(managerBefore),
+                "The tray menu dispatched another command or changed the hidden main window.");
+            menu.Dispose(); trayMenu = null;
+            window.AppWindow.Show();
+            window.Activate();
+            await LayoutAsync(window);
+            checks.Add("Native tray menu stays within the monitor, Escape dispatches nothing, and Copy dispatches once without restoring or moving the main window");
             await SaveContactSheetAsync(Path.ChangeExtension(report, ".png"), pageImages, columns: 2);
-            checks.Add("Five actual WinUI pages and the term ContentDialog captured with RenderTargetBitmap into windows-smoke.png");
+            checks.Add("Five actual WinUI pages, the term ContentDialog and native tray menu captured with RenderTargetBitmap into windows-smoke.png");
 
             overlay = new VoiceOverlay();
             IntPtr foreground = GetForegroundWindow();
@@ -192,6 +262,7 @@ public static class DesktopSmoke
         catch (Exception e) { errors.Add(e.GetType().Name + ": " + e.Message); }
         finally
         {
+            trayMenu?.Dispose();
             overlay?.Close();
             window?.AppWindow.Hide();
             if (controller != null)
@@ -216,12 +287,16 @@ public static class DesktopSmoke
         if (!condition) throw new InvalidOperationException(message);
     }
 
-    private static async Task UntilAsync(Func<bool> condition, string failure)
+    private static string CanonicalLines(string text) => text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+
+    private static Task UntilAsync(Func<bool> condition, string failure) => UntilAsync(condition, () => failure);
+
+    private static async Task UntilAsync(Func<bool> condition, Func<string> failure)
     {
         long end = Environment.TickCount64 + 6000;
         while (!condition())
         {
-            if (Environment.TickCount64 >= end) throw new InvalidOperationException(failure);
+            if (Environment.TickCount64 >= end) throw new InvalidOperationException(failure());
             await Task.Delay(75);
         }
     }
@@ -318,6 +393,20 @@ public static class DesktopSmoke
         return rectangle;
     }
 
+    private static void CheckTrayBounds(IntPtr hwnd)
+    {
+        Require(GetWindowRect(hwnd, out var rectangle), "The native tray menu bounds could not be read.");
+        var monitor = MonitorFromWindow(hwnd, 2);
+        var info = new MonitorInfo { Size = Marshal.SizeOf<MonitorInfo>() };
+        Require(GetMonitorInfo(monitor, ref info), "The tray menu monitor work area could not be read.");
+        double scale = Math.Max(96, GetDpiForWindow(hwnd)) / 96.0;
+        int width = rectangle.Right - rectangle.Left, height = rectangle.Bottom - rectangle.Top;
+        Require(width > 0 && height > 0 && width / scale <= 360 && height / scale <= 450,
+            "The native tray menu exceeds its compact size budget.");
+        Require(rectangle.Left >= info.Work.Left && rectangle.Top >= info.Work.Top && rectangle.Right <= info.Work.Right && rectangle.Bottom <= info.Work.Bottom,
+            "The native tray menu extends outside its monitor work area.");
+    }
+
     private static void CheckOverlayVisibleOnDesktop(VoiceOverlay overlay, Rect rectangle)
     {
         // RenderTargetBitmap proves that the XAML tree rendered. Also inspect
@@ -355,6 +444,7 @@ public static class DesktopSmoke
     [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr window, uint flags);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr window);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")] private static extern IntPtr GetDC(IntPtr window);
     [DllImport("user32.dll")] private static extern int ReleaseDC(IntPtr window, IntPtr dc);
     [DllImport("gdi32.dll")] private static extern uint GetPixel(IntPtr dc, int x, int y);
