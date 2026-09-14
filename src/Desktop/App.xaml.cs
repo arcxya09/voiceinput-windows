@@ -1,28 +1,51 @@
-using System.Runtime.InteropServices;
-using System.Security.Principal;
-using System.Windows;
-using RealtimeTranscription.Desktop.Input;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 
 namespace RealtimeTranscription.Desktop;
-public partial class App : System.Windows.Application
+
+public partial class App : Microsoft.UI.Xaml.Application
 {
-    private Mutex? instance;
-    [DllImport("user32.dll",CharSet=CharSet.Unicode)] private static extern IntPtr FindWindow(string? cls,string title);
-    [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hwnd);
-    [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hwnd,int command);
-    protected override async void OnStartup(StartupEventArgs e)
+    public MainWindow? MainWindow { get; private set; }
+    private bool showingError;
+
+    public App()
     {
-        base.OnStartup(e);
-        if (UiaWorker.IsWorker(e.Args)) { await Task.Run(UiaWorker.Run); Shutdown(); return; }
-        if (DesktopSmoke.IsSmoke(e.Args)) { Shutdown(await DesktopSmoke.RunAsync(e.Args)); return; }
-        string user=WindowsIdentity.GetCurrent().User?.Value??Environment.UserName;
-        instance=new Mutex(true,"Local\\RealtimeTranscription."+user,out bool created);
-        if(!created){var handle=FindWindow(null,"语音输入法");if(handle!=IntPtr.Zero){ShowWindow(handle,9);SetForegroundWindow(handle);}Shutdown();return;}
-        DispatcherUnhandledException+=(_,args)=>{args.Handled=true;MessageBox.Show("操作遇到错误。已显示的正文可以继续复制或导出。","语音输入法",MessageBoxButton.OK,MessageBoxImage.Warning);};
-        string folder=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"RealtimeTranscription");
-        var controller=new AppController(folder);var window=new MainWindow(controller);MainWindow=window;window.Show();
-        try{await controller.InitializeAsync();window.Ready();}
-        catch{MessageBox.Show("配置载入未完成，请检查设置。本地数据已保留。","启动",MessageBoxButton.OK,MessageBoxImage.Warning);window.Ready();}
+        InitializeComponent();
+        UnhandledException += async (_, args) =>
+        {
+            args.Handled = true;
+            await ShowErrorAsync("操作遇到错误。已显示的正文可以继续复制或导出。", "语音输入法");
+        };
     }
-    protected override void OnExit(ExitEventArgs e){try{instance?.ReleaseMutex();}catch(ApplicationException){}instance?.Dispose();base.OnExit(e);}
+
+    protected override async void OnLaunched(LaunchActivatedEventArgs args)
+    {
+        var commandLine = Environment.GetCommandLineArgs().Skip(1).ToArray();
+        if (DesktopSmoke.IsSmoke(commandLine))
+        {
+            Environment.ExitCode = await DesktopSmoke.RunAsync(commandLine);
+            Exit();
+            return;
+        }
+
+        string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RealtimeTranscription");
+        var controller = new AppController(folder);
+        MainWindow = new MainWindow(controller);
+        MainWindow.Activate();
+        try { await controller.InitializeAsync(); }
+        catch { await ShowErrorAsync("配置载入未完成，请检查设置。本地数据已保留。", "启动"); }
+        MainWindow.Ready();
+    }
+
+    private async Task ShowErrorAsync(string message, string title)
+    {
+        if (showingError || MainWindow?.Content is not FrameworkElement root || root.XamlRoot == null) return;
+        showingError = true;
+        try
+        {
+            await Dialogs.MessageAsync(MainWindow, title, message);
+        }
+        catch { /* A closing window cannot host another dialog. */ }
+        finally { showingError = false; }
+    }
 }

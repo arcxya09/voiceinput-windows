@@ -1,11 +1,72 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <OutputType>WinExe</OutputType><TargetFramework>net10.0-windows</TargetFramework><EnableWindowsTargeting>true</EnableWindowsTargeting><UseWPF>true</UseWPF><UseWindowsForms>true</UseWindowsForms>
-    <AssemblyName>RealtimeTranscription</AssemblyName><RootNamespace>RealtimeTranscription.Desktop</RootNamespace><ApplicationManifest>app.manifest</ApplicationManifest>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <UseWinUI>true</UseWinUI>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <WindowsAppSdkUndockedRegFreeWinRTInitialize>true</WindowsAppSdkUndockedRegFreeWinRTInitialize>
+    <WindowsAppSdkBootstrapInitialize>false</WindowsAppSdkBootstrapInitialize>
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+    <StartupObject>RealtimeTranscription.Desktop.Program</StartupObject>
+    <AssemblyName>RealtimeTranscription</AssemblyName>
+    <RootNamespace>RealtimeTranscription.Desktop</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets/AppIcon.ico</ApplicationIcon>
-    <RuntimeIdentifier>win-x64</RuntimeIdentifier><SelfContained>true</SelfContained><PublishSingleFile>true</PublishSingleFile><IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract><EnableCompressionInSingleFile>true</EnableCompressionInSingleFile><PublishTrimmed>false</PublishTrimmed><DebugType>none</DebugType><DebugSymbols>false</DebugSymbols>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PlatformTarget>x64</PlatformTarget>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>false</PublishSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
   </PropertyGroup>
-  <ItemGroup><ProjectReference Include="../Core/Core.csproj"/><ProjectReference Include="../Infrastructure/Infrastructure.csproj"/><PackageReference Include="NAudio.Wasapi" Version="2.2.1"/></ItemGroup>
-  <ItemGroup><Using Remove="System.Windows.Forms"/><Using Remove="System.Drawing"/></ItemGroup>
-  <ItemGroup><Resource Include="Assets/AppIcon.ico"/><Resource Include="Assets/Logo.png"/></ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Core/Core.csproj" />
+    <ProjectReference Include="../Infrastructure/Infrastructure.csproj" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.4.0" />
+    <PackageReference Include="NAudio.Wasapi" Version="2.2.1" />
+    <!-- Reference the desktop runtime for the Win32 tray adapter and isolated
+         UIAutomationClient worker without importing WindowsDesktop build targets.
+         UseWindowsForms would import Microsoft.WinFX.targets and override the
+         WinUI markup compiler even when UseWPF is absent. All XAML uses WinUI. -->
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App" />
+  </ItemGroup>
+  <ItemGroup>
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+    <!-- WinUI already includes Assets/**/*.*; update its metadata without
+         adding a second PRI resource with the same file identity. -->
+    <Content Update="Assets/AppIcon.ico" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Update="Assets/Logo.png" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+  <!-- Unpackaged publish must carry the application's generated PRI as well as
+       native runtime files. Use the generator's exact current-build output; do
+       not select a framework PRI or an old index by recursively guessing names. -->
+  <Target Name="PublishVoiceInputResourceIndex" AfterTargets="ComputeFilesToPublish">
+    <Message Importance="High" Text="WinUI PRI: ProjectPriFullPath=$(ProjectPriFullPath); ProjectPriFileName=$(ProjectPriFileName); TargetDir=$(TargetDir); IntermediateOutputPath=$(IntermediateOutputPath)" />
+    <ItemGroup>
+      <_VoiceGeneratedPri Include="$(ProjectPriFullPath)" Condition="'$(ProjectPriFullPath)' != '' and Exists('$(ProjectPriFullPath)')" />
+      <_VoiceResourceDiagnostics Include="$(MSBuildProjectDirectory)/bin/**/*.pri;$(MSBuildProjectDirectory)/obj/**/*.pri;$(MSBuildProjectDirectory)/bin/**/*.xbf;$(MSBuildProjectDirectory)/obj/**/*.xbf" />
+    </ItemGroup>
+    <Message Importance="High" Condition="'@(_VoiceGeneratedPri)' == ''" Text="WinUI generated resources: @(_VoiceResourceDiagnostics, '; ')" />
+    <Error Condition="'@(_VoiceGeneratedPri)' == ''" Text="The current WinUI build did not expose an existing ProjectPriFullPath. Application resources cannot be published." />
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(_VoiceGeneratedPri)" />
+      <ResolvedFileToPublish Include="@(_VoiceGeneratedPri)">
+        <RelativePath>$(AssemblyName).pri</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+      <!-- Some WinUI configurations keep root XBF payloads alongside the PRI. -->
+      <_VoiceRootXbf Include="$(TargetDir)*.xbf" />
+      <ResolvedFileToPublish Remove="@(_VoiceRootXbf)" />
+      <ResolvedFileToPublish Include="@(_VoiceRootXbf)">
+        <RelativePath>%(Filename)%(Extension)</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
 </Project>

@@ -58,7 +58,7 @@
       "infrastructure": {
         "type": "Project",
         "dependencies": {
-          "Core": "[1.0.0, )",
+          "Core": "[2.0.0, )",
           "Microsoft.Data.Sqlite": "[10.0.12, )",
           "System.Security.Cryptography.ProtectedData": "[10.0.12, )"
         }

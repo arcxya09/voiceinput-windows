@@ -1,13 +1,12 @@
-using System.Windows;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 using RealtimeTranscription.Core;
-using Forms = System.Windows.Forms;
 
 namespace RealtimeTranscription.Desktop;
 
 public partial class MainWindow
 {
     private TranscriptSnapshot? lastSnapshot;
-    private Forms.ToolStripMenuItem? dictationMenu;
     private bool updatingDictation;
 
     private void RefreshLiveState()
@@ -21,14 +20,15 @@ public partial class MainWindow
         updatingDictation = true;
         DictationOnlyBox.IsChecked = dictation;
         DictationOnlyBox.IsEnabled = !ManagementBusy;
-        if (dictationMenu != null) { dictationMenu.Checked = dictation; dictationMenu.Enabled = !ManagementBusy; }
+        trayMenu?.SetState(ptt?.Enabled == true, dictation, !ManagementBusy);
         updatingDictation = false;
         string warning = UiPresentation.SaveWarning(controller.MemoryAvailable, controller.MemoryStatus, controller.FailedSaveCount);
         SaveWarningText.Text = warning;
         SaveWarningPanel.Visibility = warning.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
         RetrySaveButton.IsEnabled = !ManagementBusy;
         HistoryTab.IsEnabled = VocabularyTab.IsEnabled = controller.MemoryAvailable;
-        HistoryTab.ToolTip = VocabularyTab.ToolTip = controller.MemoryAvailable ? null : controller.MemoryStatus;
+        ToolTipService.SetToolTip(HistoryTab,controller.MemoryAvailable ? null : controller.MemoryStatus);
+        ToolTipService.SetToolTip(VocabularyTab,controller.MemoryAvailable ? null : controller.MemoryStatus);
         var version = typeof(MainWindow).Assembly.GetName().Version;
         VersionInfo.Text = $"版本 {version?.ToString(3) ?? "未知"} · Windows x64 · Key 和本地文本通过当前 Windows 用户加密保存。";
         UsageHelp.Text = $"1. 在设置中填写百炼 Key；需要全文润色时填写 DeepSeek Key。\n2. { (dictation ? "仅听写模式：可在任意窗口" : "在其他应用的文本框中") }按住 {key}，麦克风就绪后说话。松开即停止录音。\n3. { (dictation ? "结果保留在本程序，使用“复制正文”或托盘“复制最近结果”。" : "尾句和全文整理完成后输入原位置，不自动按回车。目标改变或输入受限时，结果保留供复制。") }\n4. 在“对照与编辑”中保存手动修订，到词库确认有用的纠错候选。\n5. Esc 取消本轮。自动输入模式下其他按键或鼠标操作也会取消投递；上一轮仍在整理时请稍后再按。";

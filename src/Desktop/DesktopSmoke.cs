@@ -1,65 +1,60 @@
-using System.Diagnostics;
+using System.Globalization;
 using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Text.Json;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Interop;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation.Peers;
+using Microsoft.UI.Xaml.Automation.Provider;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
 using RealtimeTranscription.Core;
 using RealtimeTranscription.Infrastructure;
+using Windows.Graphics;
+using Windows.Graphics.Imaging;
+using Windows.Storage.Streams;
 
 namespace RealtimeTranscription.Desktop;
 
-/// <summary>Offline verification of the actual Windows executable and WPF resources.</summary>
+/// <summary>Offline verification of the published WinUI 3 executable and its actual visual tree.</summary>
 public static class DesktopSmoke
 {
     public static bool IsSmoke(string[] args) => args.Length > 0 && args[0] == "--smoke-test";
+
     public static async Task<int> RunAsync(string[] args)
     {
         if (args.Length != 2 || !Path.IsPathFullyQualified(args[1])) return 2;
         string report = args[1];
         string folder = Path.Combine(Path.GetTempPath(), "VoiceInputSmoke-" + Guid.NewGuid().ToString("N"));
-        var checks = new List<string>(); var errors = new List<string>();
-        MainWindow? window = null; VoiceOverlay? overlay = null; AppController? controller = null;
-        var binding = new BindingErrors(errors);
-        DispatcherUnhandledExceptionEventHandler unhandled = (_, e) => { errors.Add("Dispatcher: " + e.Exception.GetType().Name); e.Handled = true; };
-        System.Windows.Application.Current.DispatcherUnhandledException += unhandled;
-        PresentationTraceSources.DataBindingSource.Listeners.Add(binding);
+        var checks = new List<string>();
+        var errors = new List<string>();
+        var captures = new List<object>();
+        MainWindow? window = null;
+        VoiceOverlay? overlay = null;
+        TrayMenuWindow? trayMenu = null;
+        AppController? controller = null;
+        Microsoft.UI.Xaml.UnhandledExceptionEventHandler unhandled = (_, e) => { errors.Add("WinUI dispatcher: " + e.Exception.GetType().Name + ": " + e.Exception.Message); e.Handled = true; };
+        void BindingFailed(object sender, BindingFailedEventArgs e) => errors.Add("WinUI binding: " + e.Message);
+        Application.Current.UnhandledException += unhandled;
+        Application.Current.DebugSettings.BindingFailed += BindingFailed;
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(report)!);
             Directory.CreateDirectory(folder);
-            // Real Windows DPAPI and SQLite; outbound HTTP is rejected if any UI path
-            // unexpectedly tries to call a provider. Ready() is deliberately not called:
-            // it owns global input hooks, device watchers, and the capture workflow.
+            // Ready() intentionally remains uncalled: it owns global hooks, device
+            // watchers and real capture. These checks use an isolated database and
+            // a handler that rejects any accidental outbound provider request.
             controller = new AppController(folder, provider: new NoNetwork());
             await controller.InitializeAsync();
             await controller.SaveSettingsAsync(controller.Settings, new("SMOKE_LOCAL_ONLY", "SMOKE_LOCAL_ONLY"));
             var credentials = new SettingsStore(folder, new WindowsProtector()).LoadCredentials();
-            if (credentials != new Credentials("SMOKE_LOCAL_ONLY", "SMOKE_LOCAL_ONLY")) throw new InvalidOperationException("Windows DPAPI credential round-trip failed.");
+            Require(credentials == new Credentials("SMOKE_LOCAL_ONLY", "SMOKE_LOCAL_ONLY"), "Windows DPAPI credential round-trip failed.");
             checks.Add("Windows DPAPI credentials and SQLite initialized in an isolated temporary directory");
+
             window = new MainWindow(controller);
-            window.Show();
-            await window.Dispatcher.InvokeAsync(window.UpdateLayout, DispatcherPriority.ContextIdle);
-            var tabs = Find<TabControl>(window, "Tabs");
-            for (int i = 0; i < tabs.Items.Count; i++)
-            {
-                tabs.SelectedIndex = i;
-                await window.Dispatcher.InvokeAsync(window.UpdateLayout, DispatcherPriority.ContextIdle);
-                if (tabs.SelectedContent is not FrameworkElement content || content.ActualWidth <= 0 || content.ActualHeight <= 0)
-                    throw new InvalidOperationException("A management tab did not render: " + i);
-            }
-            var vocabulary = Find<TabControl>(window, "VocabularyTabs");
-            tabs.SelectedIndex = 2;
-            for (int i = 0; i < vocabulary.Items.Count; i++)
-            {
-                vocabulary.SelectedIndex = i;
-                await window.Dispatcher.InvokeAsync(window.UpdateLayout, DispatcherPriority.ContextIdle);
-            }
-            checks.Add("Every management and vocabulary tab instantiated its actual WPF content");
+            window.Activate();
+            window.AppWindow.Resize(new SizeInt32(1040, 760));
+            await LayoutAsync(window);
 
             const string text = "离线界面验收：JUNA 测量 12C(α,γ)16O。\r\n\r\n第二段核对完整正文。";
             var session = new SessionData { Title = "离线界面验收", WholePolishState = "Fallback", DeliveryState = "NotRequested" };
@@ -70,76 +65,419 @@ public static class DesktopSmoke
             await controller.LoadSessionAsync(session);
             await controller.SaveTermAsync(new() { Text = "JUNA", Scope = "default" });
             await controller.SaveSettingsAsync(controller.Settings with { Hotkey = "F9", DictationOnly = true }, controller.Keys);
-            tabs.SelectedIndex = 0;
-            // Allow the real DispatcherTimer to consume the controller's pending snapshot.
-            await Task.Delay(350);
-            window.UpdateLayout();
-            if (Find<TextBox>(window, "OutputBox").Text != text) throw new InvalidOperationException("The displayed transcript differs from the loaded history.");
-            if (!Find<TextBlock>(window, "BodyCount").Text.Contains(JsonCodec.Count(text).ToString())) throw new InvalidOperationException("The body count did not update.");
-            if (Find<DataGrid>(window, "TermsGrid").Items.Count != 1) throw new InvalidOperationException("The visible lexicon did not refresh.");
+            window.ShowPage(0);
+            var output = Find<TextBox>(window, "OutputBox");
+            await UntilAsync(() => CanonicalLines(output.Text) == CanonicalLines(text),
+                () => "The displayed transcript differs from the loaded history. Expected fixture: " + JsonSerializer.Serialize(text) +
+                    "; actual fixture: " + JsonSerializer.Serialize(output.Text));
+            Require(Find<TextBlock>(window, "BodyCount").Text.Contains(JsonCodec.Count(text).ToString()), "The Unicode body count did not update.");
+            await UntilAsync(() => Find<ListView>(window, "TermsGrid").Items.Count == 1, "The visible lexicon did not refresh.");
+            await UntilAsync(() => Find<TextBlock>(window, "StatusText").Text == "设置已保存。",
+                "The initial settings snapshot did not reach the live view.");
+
+            // WinUI may expose CR where the transcript uses CRLF. Replaying an
+            // identical production snapshot must not assign Text again and lose
+            // the user's selection. The status below is written after Render's
+            // body update, so observing it proves that the new snapshot rendered.
+            int selectionStart = output.Text.IndexOf("JUNA", StringComparison.Ordinal);
+            Require(selectionStart >= 0, "The selection fixture is missing from the displayed transcript.");
+            output.Focus(FocusState.Programmatic);
+            output.Select(selectionStart, 4);
+            Require(output.SelectedText == "JUNA", "The transcript selection fixture could not be established.");
+            await controller.LoadSessionAsync(session);
+            await UntilAsync(() => Find<TextBlock>(window, "StatusText").Text == "已载入历史供查看与编辑；历史文字不会自动输入。",
+                "The repeated history snapshot did not reach the live view.");
+            Require(output.SelectionStart == selectionStart && output.SelectionLength == 4 && output.SelectedText == "JUNA",
+                "Refreshing an unchanged transcript reset the user's text selection.");
+            Require(CanonicalLines(output.Text) == CanonicalLines(text),
+                "The repeated history snapshot changed the fixture text. Expected fixture: " + JsonSerializer.Serialize(text) +
+                    "; actual fixture: " + JsonSerializer.Serialize(output.Text));
             string version = typeof(MainWindow).Assembly.GetName().Version!.ToString(3);
-            if (!Find<TextBlock>(window, "VersionInfo").Text.Contains(version) || !Find<TextBlock>(window, "HotkeyHint").Text.Contains("F9"))
-                throw new InvalidOperationException("The displayed version or configured hotkey is stale.");
-            checks.Add("Production controller updates transcript, Unicode count, and lexicon controls");
+            await UntilAsync(() => Find<TextBlock>(window, "VersionInfo").Text.Contains(version) && Find<TextBlock>(window, "HotkeyHint").Text.Contains("F9"),
+                "The displayed version or configured hotkey is stale.");
+            checks.Add("Production controller updates transcript, Unicode count, and native WinUI lexicon list");
+            checks.Add("Repeated history snapshots preserve exact text and paragraphs across native line endings without resetting the user's selection");
             checks.Add("Version and dictation hotkey labels follow current production settings");
+
+            window.ShowPage(1);
+            await LayoutAsync(window);
+            var searchButton = Find<Button>(window, "HistorySearchButton");
+            var searchPeer = FrameworkElementAutomationPeer.CreatePeerForElement(searchButton) ?? new ButtonAutomationPeer(searchButton);
+            Require(searchPeer.GetPattern(PatternInterface.Invoke) is IInvokeProvider, "The history search button is not invokable.");
+            ((IInvokeProvider)searchPeer.GetPattern(PatternInterface.Invoke)).Invoke();
+            await UntilAsync(() => Find<ListView>(window, "HistoryGrid").Items.Count == 1, "The real history query did not display its saved session.");
+            checks.Add("Native history search invokes its production handler and displays the saved session");
+
+            var pageImages = new List<Pixels>();
+            string[] pageNames = ["LivePage", "HistoryPage", "VocabularyPage", "SettingsPage", "HelpPage"];
+            Require(Find<NavigationView>(window, "Navigation") != null, "Native navigation is missing.");
+            for (int i = 0; i < pageNames.Length; i++)
+            {
+                window.ShowPage(i);
+                await LayoutAsync(window);
+                // Preserve the current native page before any geometry gate, so
+                // a clipped-control failure still leaves its actual image behind.
+                var capture = await CaptureAsync((FrameworkElement)window.Content);
+                pageImages.Add(capture);
+                captures.Add(new { name = pageNames[i], width = capture.Width, height = capture.Height });
+                await SaveContactSheetAsync(Path.ChangeExtension(report, ".png"), pageImages, columns: 2);
+                var page = Find<FrameworkElement>(window, pageNames[i]);
+                Require(page.Visibility == Visibility.Visible && page.ActualWidth > 0 && page.ActualHeight > 0, "A WinUI page did not render: " + pageNames[i]);
+                for (int other = 0; other < pageNames.Length; other++)
+                    if (other != i) Require(Find<FrameworkElement>(window, pageNames[other]).Visibility == Visibility.Collapsed, "An inactive page remains visible: " + pageNames[other]);
+                var mainRoot = (FrameworkElement)window.Content;
+                var stateLabel = Find<TextBlock>(window, "StateLabel");
+                var stateBounds = stateLabel.TransformToVisual(mainRoot).TransformBounds(
+                    new Windows.Foundation.Rect(0, 0, stateLabel.ActualWidth, stateLabel.ActualHeight));
+                double stateRightGap = mainRoot.ActualWidth - stateBounds.Right;
+                Require(stateLabel.ActualWidth > 0 && stateRightGap >= 11.5,
+                    $"The header status lacks its 12 DIP right margin on {pageNames[i]} (actual {stateRightGap:F2} DIPs).");
+                if (pageNames[i] == "HelpPage")
+                {
+                    var help = Find<ScrollViewer>(window, "HelpPage");
+                    var refresh = Find<Button>(window, "UsageRefreshButton");
+                    var buttonBounds = refresh.TransformToVisual(help).TransformBounds(
+                        new Windows.Foundation.Rect(0, 0, refresh.ActualWidth, refresh.ActualHeight));
+                    double visibleWidth = Math.Min(help.ActualWidth, help.ViewportWidth);
+                    string helpGeometry = $" ScrollViewer ActualWidth={help.ActualWidth:F2}, ViewportWidth={help.ViewportWidth:F2}, HorizontalOffset={help.HorizontalOffset:F2}, ScrollableWidth={help.ScrollableWidth:F2}.";
+                    if (help.Content is FrameworkElement helpContent)
+                    {
+                        var contentBounds = helpContent.TransformToVisual(help).TransformBounds(
+                            new Windows.Foundation.Rect(0, 0, helpContent.ActualWidth, helpContent.ActualHeight));
+                        helpGeometry += $" Content ActualWidth={helpContent.ActualWidth:F2}, DesiredWidth={helpContent.DesiredSize.Width:F2}, Left={contentBounds.Left:F2}, Right={contentBounds.Right:F2}.";
+                    }
+                    else helpGeometry += " Content is not a FrameworkElement.";
+                    Require(help.ScrollableWidth <= 1,
+                        $"The help page overflows its horizontal viewport by {help.ScrollableWidth:F2} DIPs." + helpGeometry);
+                    Require(refresh.ActualWidth > 0 && visibleWidth > 0 && buttonBounds.Left >= -.5 && buttonBounds.Right <= visibleWidth + .5,
+                        $"The usage refresh button is horizontally clipped (bounds {buttonBounds.Left:F2}–{buttonBounds.Right:F2}; viewport {visibleWidth:F2} DIPs)." + helpGeometry);
+                }
+            }
+            checks.Add("Header status keeps its right margin on all five pages; Help has no horizontal overflow and its refresh button stays inside the viewport");
+            window.ShowPage(2);
+            var vocabulary = Find<TabView>(window, "VocabularyTabs");
+            Require(vocabulary.TabItems.Count >= 3, "The vocabulary workspace is missing a tab.");
+            for (int i = 0; i < vocabulary.TabItems.Count; i++)
+            {
+                vocabulary.SelectedIndex = i;
+                await LayoutAsync(window);
+                Require(vocabulary.SelectedItem is TabViewItem tab && tab.Content is FrameworkElement content && content.ActualWidth > 0 && content.ActualHeight > 0,
+                    "A native vocabulary tab did not render: " + i);
+            }
+            vocabulary.SelectedIndex = 0;
+            checks.Add("All five WinUI navigation pages and every native vocabulary tab render actual content");
+
+            // Exercise a tray-origin dialog while its owner is hidden, including
+            // the production owner restore, XamlRoot and modal queue. Change only
+            // the editor, then invoke Cancel; the repository must remain unchanged.
+            var originalTerm = controller.Terms.Single();
+            window.Hide();
+            Require(!window.AppWindow.IsVisible, "The dialog smoke precondition requires a hidden main window.");
+            Task<TermData?> editing = Dialogs.EditTermAsync(window, originalTerm);
+            ContentDialog? termDialog = null;
+            await UntilAsync(() =>
+            {
+                termDialog = VisualTreeHelper.GetOpenPopupsForXamlRoot(((FrameworkElement)window.Content).XamlRoot)
+                    .Where(popup => popup.Child != null)
+                    .Select(popup => Visuals<ContentDialog>(popup.Child).FirstOrDefault())
+                    .FirstOrDefault(dialog => dialog != null);
+                return termDialog != null && termDialog.ActualWidth > 0 && termDialog.ActualHeight > 0;
+            }, "The native term editor ContentDialog did not open.");
+            Require(window.AppWindow.IsVisible && termDialog!.XamlRoot == ((FrameworkElement)window.Content).XamlRoot && Dialogs.IsOpen,
+                "The term editor did not restore its hidden owner or attach to the owner's modal queue and XamlRoot.");
+            var wordEditor = Visuals<TextBox>(termDialog).FirstOrDefault(box => box.Header?.ToString() == "词条（1—64 字）")
+                ?? throw new InvalidOperationException("The native term editor is missing its word input.");
+            Require(wordEditor.Text == originalTerm.Text, "The term editor did not load its original word.");
+            wordEditor.Text = "临时修改，不保存";
+            termDialog.UpdateLayout();
+            await Task.Delay(150);
+            var dialogCapture = await CaptureAsync(termDialog);
+            pageImages.Add(dialogCapture);
+            captures.Add(new { name = "TermEditorContentDialog", width = dialogCapture.Width, height = dialogCapture.Height });
+            var cancelButton = Visuals<Button>(termDialog).FirstOrDefault(button => button.Content?.ToString() == "取消")
+                ?? throw new InvalidOperationException("The native term editor has no visible Cancel button.");
+            var cancelPeer = FrameworkElementAutomationPeer.CreatePeerForElement(cancelButton) ?? new ButtonAutomationPeer(cancelButton);
+            Require(cancelPeer.GetPattern(PatternInterface.Invoke) is IInvokeProvider, "The term editor Cancel button is not invokable.");
+            ((IInvokeProvider)cancelPeer.GetPattern(PatternInterface.Invoke)).Invoke();
+            Require(await editing.WaitAsync(TimeSpan.FromSeconds(6)) == null, "Cancel unexpectedly accepted the term editor changes.");
+            Require(!Dialogs.IsOpen && controller.Terms.Single() == originalTerm, "Cancel changed the term or failed to release the modal queue.");
+            checks.Add("Production ContentDialog restores its hidden owner, renders native fields on the owner XamlRoot, and cancels edits without changing the lexicon");
+
+            // The native menu is tested independently of the Shell icon. Its
+            // injected callback records commands instead of touching clipboard,
+            // hooks, settings, or shutdown. Test both visible and hidden owners.
+            var commands = new List<TrayMenuCommand>();
+            var menu = new TrayMenuWindow(command => { commands.Add(command); return Task.CompletedTask; });
+            trayMenu = menu;
+            menu.SetState(enabled: false, dictation: false, canChangeMode: true);
+            IntPtr mainHwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
+            Require(GetWindowRect(mainHwnd, out var managerBefore), "The main window bounds could not be read before opening the tray menu.");
+            menu.ShowAtCursor();
+            await LayoutAsync(menu);
+            Require(menu.IsOpen && menu.AppWindow.IsVisible && commands.Count == 0, "Opening the native tray menu invoked a command or failed to show it.");
+            IntPtr menuHwnd = WinRT.Interop.WindowNative.GetWindowHandle(menu);
+            CheckTrayBounds(menuHwnd);
+            Require(window.AppWindow.IsVisible && GetWindowRect(mainHwnd, out var managerWithMenu) && managerWithMenu.Equals(managerBefore),
+                "Opening the tray menu changed the main window's visibility or bounds.");
+            var menuCapture = await CaptureAsync((FrameworkElement)menu.Content);
+            pageImages.Add(menuCapture);
+            captures.Add(new { name = "NativeTrayMenu", width = menuCapture.Width, height = menuCapture.Height });
+            SendMessage(menuHwnd, 0x0100, new IntPtr(27), IntPtr.Zero); // WM_KEYDOWN / Escape, confined to this window.
+            await UntilAsync(() => !menu.IsOpen && !menu.AppWindow.IsVisible, "Escape did not dismiss the native tray menu.");
+            Require(commands.Count == 0, "Escape unexpectedly invoked a tray command.");
+
+            window.AppWindow.Hide();
+            menu.ShowAtCursor();
+            await LayoutAsync(menu);
+            Require(!window.AppWindow.IsVisible, "Opening the tray menu unexpectedly restored the hidden main window.");
+            var copyButton = Find<Button>(menu, "TrayCopy");
+            var copyPeer = FrameworkElementAutomationPeer.CreatePeerForElement(copyButton) ?? new ButtonAutomationPeer(copyButton);
+            Require(copyPeer.GetPattern(PatternInterface.Invoke) is IInvokeProvider, "The native tray menu Copy button is not invokable.");
+            ((IInvokeProvider)copyPeer.GetPattern(PatternInterface.Invoke)).Invoke();
+            await UntilAsync(() => commands.Count == 1 && !menu.IsOpen && !menu.AppWindow.IsVisible,
+                "The native tray menu did not dismiss after dispatching its command.");
+            Require(commands.Single() == TrayMenuCommand.Copy && !window.AppWindow.IsVisible &&
+                GetWindowRect(mainHwnd, out var managerAfter) && managerAfter.Equals(managerBefore),
+                "The tray menu dispatched another command or changed the hidden main window.");
+            menu.Dispose(); trayMenu = null;
+            window.AppWindow.Show();
+            window.Activate();
+            await LayoutAsync(window);
+            checks.Add("Native tray menu stays within the monitor, Escape dispatches nothing, and Copy dispatches once without restoring or moving the main window");
+            await SaveContactSheetAsync(Path.ChangeExtension(report, ".png"), pageImages, columns: 2);
+            checks.Add("Five actual WinUI pages, the term ContentDialog and native tray menu captured with RenderTargetBitmap into windows-smoke.png");
 
             overlay = new VoiceOverlay();
             IntPtr foreground = GetForegroundWindow();
-            overlay.Update("离线悬浮提示验收", "模拟识别结果；不启动录音。", dismiss: false);
-            overlay.UpdateLayout();
-            var handle = new WindowInteropHelper(overlay).Handle;
-            long style = GetWindowLongPtr(handle, -20).ToInt64();
-            if (handle == IntPtr.Zero || (style & 0x08000000) == 0 || overlay.ShowActivated || overlay.Focusable)
-                throw new InvalidOperationException("The voice overlay is missing its non-activation safeguards.");
-            if (foreground != IntPtr.Zero && GetForegroundWindow() != foreground) throw new InvalidOperationException("The voice overlay changed foreground focus.");
-            checks.Add("Actual overlay HWND has WS_EX_NOACTIVATE and preserves the current foreground window");
-            overlay.Clear();
+            overlay.BeginTurn();
+            overlay.SetMeter(.62f, true);
+            const string ending = "最新结果👨‍👩‍👧‍👦";
+            string longText = string.Concat(Enumerable.Repeat("连续识别𠀀👩🏽‍🔬e\u0301", 40)) + ending;
+            overlay.Update("正在聆听", longText);
+            await LayoutAsync(overlay);
+            IntPtr hwnd = WinRT.Interop.WindowNative.GetWindowHandle(overlay);
+            long style = GetWindowLongPtr(hwnd, -20).ToInt64();
+            Require(hwnd != IntPtr.Zero && (style & 0x08000000) != 0 && (style & 0x20) != 0, "The voice overlay is missing its non-activation or pointer pass-through safeguards.");
+            Require(foreground == IntPtr.Zero || GetForegroundWindow() == foreground, "The voice overlay changed foreground focus.");
+            var original = CheckOverlayBounds(hwnd);
+            CheckOverlayVisibleOnDesktop(overlay, original);
+            var preview = Find<TextBlock>(overlay, "OverlayPreview");
+            string suffix = preview.Text.TrimStart('…');
+            Require(preview.TextWrapping == TextWrapping.NoWrap && preview.ActualHeight <= 26, "The live preview grew beyond one line.");
+            Require(suffix.EndsWith(ending, StringComparison.Ordinal) && longText.EndsWith(suffix, StringComparison.Ordinal), "The compact preview is not showing the latest transcript suffix.");
+            int boundary = longText.Length - suffix.Length;
+            Require(StringInfo.ParseCombiningCharacters(longText).Contains(boundary), "The compact preview split a Unicode grapheme.");
+            checks.Add("Actual overlay HWND is visible on the desktop, preserves focus, passes pointers through, and is centered at 360 by 76 DIPs");
+            checks.Add("Long live previews stay on one line and retain complete Unicode graphemes at the transcript tail");
 
-            window.Width = window.MinWidth;
-            window.Height = window.MinHeight;
-            await window.Dispatcher.InvokeAsync(window.UpdateLayout, DispatcherPriority.ContextIdle);
-            if (window.ActualWidth <= 0 || window.ActualHeight <= 0) throw new InvalidOperationException("Minimum-size layout failed.");
-            var bitmap = new RenderTargetBitmap((int)Math.Ceiling(window.ActualWidth), (int)Math.Ceiling(window.ActualHeight), 96, 96, PixelFormats.Pbgra32);
-            bitmap.Render(window);
-            var png = new PngBitmapEncoder(); png.Frames.Add(BitmapFrame.Create(bitmap));
-            using (var stream = File.Create(Path.ChangeExtension(report, ".png"))) png.Save(stream);
-            checks.Add("Minimum-size WPF window rendered to a PNG for review");
+            var overlayImages = new List<Pixels> { await CaptureAsync((FrameworkElement)overlay.Content) };
+            overlay.SetMeter(0, false);
+            overlay.Update("正在整理", "全文整理完成后将输入原位置");
+            await LayoutAsync(overlay);
+            overlayImages.Add(await CaptureAsync((FrameworkElement)overlay.Content));
+            overlay.Update("已完成", "识别结果已保留，可打开管理窗口复制。", dismiss: true);
+            await LayoutAsync(overlay);
+            overlayImages.Add(await CaptureAsync((FrameworkElement)overlay.Content));
+            overlay.SetPersistentWarning("1 项保存失败，请打开管理窗口重试保存或复制正文。");
+            await LayoutAsync(overlay);
+            var warned = CheckOverlayBounds(hwnd);
+            Require(warned.Right - warned.Left == original.Right - original.Left && warned.Bottom - warned.Top == original.Bottom - original.Top,
+                "A persistent save warning changed the compact overlay dimensions.");
+            Require(Find<TextBlock>(overlay, "OverlayWarning").Visibility == Visibility.Visible, "The persistent save warning is hidden.");
+            Require(foreground == IntPtr.Zero || GetForegroundWindow() == foreground, "An overlay state transition changed foreground focus.");
+            overlayImages.Add(await CaptureAsync((FrameworkElement)overlay.Content));
+            await SaveContactSheetAsync(Path.Combine(Path.GetDirectoryName(report)!, "windows-overlay.png"), overlayImages, columns: 1);
+            checks.Add("Listening, processing, complete and save-warning overlays captured without expanding the window or taking focus");
+            overlay.Clear();
         }
         catch (Exception e) { errors.Add(e.GetType().Name + ": " + e.Message); }
         finally
         {
-            overlay?.Close(); window?.Hide();
-            if (controller != null) { try { await controller.DisposeAsync(); } catch (Exception e) { errors.Add("Shutdown: " + e.GetType().Name); } }
-            PresentationTraceSources.DataBindingSource.Listeners.Remove(binding);
-            System.Windows.Application.Current.DispatcherUnhandledException -= unhandled;
+            trayMenu?.Dispose();
+            overlay?.Close();
+            window?.AppWindow.Hide();
+            if (controller != null)
+                try { await controller.DisposeAsync(); } catch (Exception e) { errors.Add("Shutdown: " + e.GetType().Name); }
+            Application.Current.DebugSettings.BindingFailed -= BindingFailed;
+            Application.Current.UnhandledException -= unhandled;
             try { Directory.Delete(folder, recursive: true); } catch { /* OS file cleanup can lag process shutdown. */ }
         }
         bool passed = errors.Count == 0;
         try
         {
-            await File.WriteAllTextAsync(report, JsonSerializer.Serialize(new { passed, checks, errors,
-                version = typeof(App).Assembly.GetName().Version?.ToString(), microphone = "not started", cloud = "blocked", globalInputHooks = "not installed" }, new JsonSerializerOptions { WriteIndented = true }));
+            await File.WriteAllTextAsync(report, JsonSerializer.Serialize(new { passed, checks, errors, captures,
+                version = typeof(App).Assembly.GetName().Version?.ToString(), framework = "Microsoft.UI.Xaml (WinUI 3)",
+                microphone = "not started", cloud = "blocked", globalInputHooks = "not installed" }, new JsonSerializerOptions { WriteIndented = true }));
         }
         catch { return 3; }
         return passed ? 0 : 1;
     }
 
-    private static T Find<T>(MainWindow window, string name) where T : FrameworkElement
-        => window.FindName(name) as T ?? throw new InvalidOperationException("Missing WPF control: " + name);
+    private static void Require(bool condition, string message)
+    {
+        if (!condition) throw new InvalidOperationException(message);
+    }
+
+    private static string CanonicalLines(string text) => text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+
+    private static Task UntilAsync(Func<bool> condition, string failure) => UntilAsync(condition, () => failure);
+
+    private static async Task UntilAsync(Func<bool> condition, Func<string> failure)
+    {
+        long end = Environment.TickCount64 + 6000;
+        while (!condition())
+        {
+            if (Environment.TickCount64 >= end) throw new InvalidOperationException(failure());
+            await Task.Delay(75);
+        }
+    }
+
+    private static async Task LayoutAsync(Window window)
+    {
+        var root = (FrameworkElement)window.Content;
+        await UntilAsync(() => root.XamlRoot != null && root.ActualWidth > 0 && root.ActualHeight > 0, "The WinUI window content did not attach to a visible XamlRoot.");
+        root.UpdateLayout();
+        await Task.Delay(150);
+        root.UpdateLayout();
+    }
+
+    private static T Find<T>(Window window, string name) where T : FrameworkElement
+    {
+        var root = (FrameworkElement)window.Content;
+        return root.FindName(name) as T ?? FindVisual<T>(root, name) ?? throw new InvalidOperationException("Missing native WinUI control: " + name);
+    }
+
+    private static T? FindVisual<T>(DependencyObject root, string name) where T : FrameworkElement
+    {
+        if (root is T found && found.Name == name) return found;
+        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+            if (FindVisual<T>(VisualTreeHelper.GetChild(root, i), name) is { } child) return child;
+        return null;
+    }
+
+    private static IEnumerable<T> Visuals<T>(DependencyObject root) where T : DependencyObject
+    {
+        if (root is T found) yield return found;
+        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+            foreach (var child in Visuals<T>(VisualTreeHelper.GetChild(root, i))) yield return child;
+    }
+
+    private sealed record Pixels(int Width, int Height, byte[] Data);
+
+    private static async Task<Pixels> CaptureAsync(FrameworkElement root)
+    {
+        root.UpdateLayout();
+        var bitmap = new RenderTargetBitmap();
+        await bitmap.RenderAsync(root, (int)Math.Ceiling(root.ActualWidth), (int)Math.Ceiling(root.ActualHeight));
+        var buffer = await bitmap.GetPixelsAsync();
+        byte[] bytes = new byte[buffer.Length];
+        using (var reader = DataReader.FromBuffer(buffer)) reader.ReadBytes(bytes);
+        Require(bitmap.PixelWidth > 0 && bitmap.PixelHeight > 0 && bytes.Length == bitmap.PixelWidth * bitmap.PixelHeight * 4,
+            "WinUI RenderTargetBitmap returned no image pixels.");
+        // An empty or single-color capture does not count as visual verification.
+        int first = BitConverter.ToInt32(bytes, 0);
+        bool varied = false;
+        for (int i = 4; i < bytes.Length && !varied; i += 4) varied = BitConverter.ToInt32(bytes, i) != first;
+        Require(varied, "The actual WinUI capture contains no visible content.");
+        return new(bitmap.PixelWidth, bitmap.PixelHeight, bytes);
+    }
+
+    private static async Task SaveContactSheetAsync(string path, IReadOnlyList<Pixels> images, int columns)
+    {
+        const int gap = 16;
+        int cellWidth = images.Max(x => x.Width), cellHeight = images.Max(x => x.Height);
+        int width = columns * cellWidth + gap * (columns + 1);
+        int height = ((images.Count + columns - 1) / columns) * (cellHeight + gap) + gap;
+        byte[] pixels = new byte[checked(width * height * 4)];
+        for (int i = 0; i < pixels.Length; i += 4) { pixels[i] = 230; pixels[i + 1] = 230; pixels[i + 2] = 230; pixels[i + 3] = 255; }
+        for (int index = 0; index < images.Count; index++)
+        {
+            var source = images[index];
+            int x = gap + index % columns * (cellWidth + gap), y = gap + index / columns * (cellHeight + gap);
+            for (int row = 0; row < source.Height; row++)
+                System.Buffer.BlockCopy(source.Data, row * source.Width * 4, pixels, ((y + row) * width + x) * 4, source.Width * 4);
+        }
+        using var stream = new InMemoryRandomAccessStream();
+        var encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.PngEncoderId, stream);
+        encoder.SetPixelData(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied, (uint)width, (uint)height, 96, 96, pixels);
+        await encoder.FlushAsync();
+        using var reader = new DataReader(stream.GetInputStreamAt(0));
+        await reader.LoadAsync(checked((uint)stream.Size));
+        byte[] png = new byte[checked((int)stream.Size)];
+        reader.ReadBytes(png);
+        await File.WriteAllBytesAsync(path, png);
+    }
+
+    private static Rect CheckOverlayBounds(IntPtr hwnd)
+    {
+        Require(GetWindowRect(hwnd, out var rectangle), "The native overlay bounds could not be read.");
+        var monitor = MonitorFromWindow(hwnd, 2);
+        var info = new MonitorInfo { Size = Marshal.SizeOf<MonitorInfo>() };
+        Require(GetMonitorInfo(monitor, ref info), "The overlay monitor work area could not be read.");
+        double scale = Math.Max(96, GetDpiForWindow(hwnd)) / 96.0;
+        int width = rectangle.Right - rectangle.Left, height = rectangle.Bottom - rectangle.Top;
+        Require(Math.Abs(width / scale - 360) <= 2 && Math.Abs(height / scale - 76) <= 2, "The overlay does not fit its 360 by 76 DIP footprint.");
+        Require(Math.Abs((rectangle.Left + rectangle.Right) - (info.Work.Left + info.Work.Right)) <= 2,
+            "The overlay is not horizontally centered on its monitor work area.");
+        Require(rectangle.Top >= info.Work.Top && Math.Abs((info.Work.Bottom - rectangle.Bottom) / scale - 24) <= 2,
+            "The overlay is not safely placed above the taskbar.");
+        return rectangle;
+    }
+
+    private static void CheckTrayBounds(IntPtr hwnd)
+    {
+        Require(GetWindowRect(hwnd, out var rectangle), "The native tray menu bounds could not be read.");
+        var monitor = MonitorFromWindow(hwnd, 2);
+        var info = new MonitorInfo { Size = Marshal.SizeOf<MonitorInfo>() };
+        Require(GetMonitorInfo(monitor, ref info), "The tray menu monitor work area could not be read.");
+        double scale = Math.Max(96, GetDpiForWindow(hwnd)) / 96.0;
+        int width = rectangle.Right - rectangle.Left, height = rectangle.Bottom - rectangle.Top;
+        Require(width > 0 && height > 0 && width / scale <= 360 && height / scale <= 450,
+            "The native tray menu exceeds its compact size budget.");
+        Require(rectangle.Left >= info.Work.Left && rectangle.Top >= info.Work.Top && rectangle.Right <= info.Work.Right && rectangle.Bottom <= info.Work.Bottom,
+            "The native tray menu extends outside its monitor work area.");
+    }
+
+    private static void CheckOverlayVisibleOnDesktop(VoiceOverlay overlay, Rect rectangle)
+    {
+        // RenderTargetBitmap proves that the XAML tree rendered. Also inspect
+        // the composed desktop: a broken native layered-window setup can leave
+        // a perfectly valid XAML bitmap while the user sees an empty rectangle.
+        var expected = ((SolidColorBrush)((Border)overlay.Content).Background).Color;
+        IntPtr dc = GetDC(IntPtr.Zero);
+        Require(dc != IntPtr.Zero, "The composed desktop could not be inspected.");
+        try
+        {
+            DwmFlush();
+            int width = rectangle.Right - rectangle.Left, height = rectangle.Bottom - rectangle.Top;
+            foreach (var point in new[] { (width / 2, height / 10), (width / 2, height * 9 / 10), (width * 97 / 100, height / 2) })
+            {
+                uint color = GetPixel(dc, rectangle.Left + point.Item1, rectangle.Top + point.Item2);
+                Require(color != uint.MaxValue && Math.Abs((int)(color & 255) - expected.R) <= 8 &&
+                    Math.Abs((int)((color >> 8) & 255) - expected.G) <= 8 && Math.Abs((int)((color >> 16) & 255) - expected.B) <= 8,
+                    "The actual desktop does not show the overlay's rendered surface.");
+            }
+        }
+        finally { ReleaseDC(IntPtr.Zero, dc); }
+    }
+
     private sealed class NoNetwork : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
             => throw new InvalidOperationException("Network access is prohibited during the offline desktop smoke test.");
     }
-    private sealed class BindingErrors(List<string> errors) : TraceListener
-    {
-        public override void Write(string? message) { }
-        public override void WriteLine(string? message) { }
-        public override void TraceEvent(TraceEventCache? eventCache, string source, TraceEventType eventType, int id, string? message)
-        { if (eventType is TraceEventType.Error or TraceEventType.Critical) errors.Add("WPF binding: " + message); }
-        public override void TraceEvent(TraceEventCache? eventCache, string source, TraceEventType eventType, int id, string? format, params object?[]? args)
-        { if (eventType is TraceEventType.Error or TraceEventType.Critical) errors.Add("WPF binding: " + format); }
-    }
+
+    [StructLayout(LayoutKind.Sequential)] private struct Rect { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)] private struct MonitorInfo { public int Size; public Rect Monitor, Work; public uint Flags; }
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] private static extern IntPtr GetWindowLongPtr(IntPtr window, int index);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetWindowRect(IntPtr window, out Rect rectangle);
+    [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr window, uint flags);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
+    [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr window);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll")] private static extern IntPtr GetDC(IntPtr window);
+    [DllImport("user32.dll")] private static extern int ReleaseDC(IntPtr window, IntPtr dc);
+    [DllImport("gdi32.dll")] private static extern uint GetPixel(IntPtr dc, int x, int y);
+    [DllImport("dwmapi.dll")] private static extern int DwmFlush();
 }

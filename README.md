@@ -2,7 +2,7 @@
 
 按住快捷键说话，松开后将整理好的文字输入当前文本框。
 
-VoiceInput 是一款 Windows 托盘语音输入工具，使用阿里云百炼进行语音识别，使用 DeepSeek 对整轮文字进行轻量润色，支持专业词库、本地历史记录和纠错学习。程序以免安装 EXE 运行，与现有拼音输入法配合使用，不注册到 Windows 的语言切换列表。
+VoiceInput 是一款 Windows 托盘语音输入工具，使用阿里云百炼进行语音识别，使用 DeepSeek 对整轮文字进行轻量润色，支持专业词库、本地历史记录和纠错学习。程序使用原生 WinUI 3 界面，以自包含便携包运行，与现有拼音输入法配合使用，不注册到 Windows 的语言切换列表。
 
 [下载与版本说明](https://github.com/arcxya09/voiceinput-windows/releases) · [构建状态](https://github.com/arcxya09/voiceinput-windows/actions/workflows/release.yml) · [问题反馈](https://github.com/arcxya09/voiceinput-windows/issues)
 
@@ -10,7 +10,7 @@ VoiceInput 是一款 Windows 托盘语音输入工具，使用阿里云百炼进
 
 - **按住说话**：默认使用右侧 Ctrl，也可选择 F8 或 F9。松开后收齐尾句，再将结果输入原位置，不自动按回车发送。
 - **仅听写**：可在主窗口或托盘开启，完成后手动复制正文，适用于无法自动输入的编辑器。
-- **识别浮窗**：展示最新识别文字、音量、计时和处理阶段，跟随当前目标显示器；保存失败会持续提示。
+- **原生 WinUI 3 界面**：侧边导航组织听写、历史、词库、设置与帮助；原生对话框和文件选择器。识别浮窗固定约 360 × 76 DIP，在目标屏幕底部居中，显示音量、计时和一行最新文字，保存失败持续提醒。
 - **整轮润色**：一次长按对应一次全文润色，保留数值、单位、否定关系和专业术语。提示词可编辑、试用及恢复默认；处理失败或校验未通过时保留整理前文字，已确认的本地纠错仍保留。
 - **长语音输入**：默认录音时限为 10 分钟，最多可设为 30 分钟。服务端识别片段在客户端合并，期间不分片润色。
 - **专业词库**：支持项目和全局词库、手动权重、动态词频、标准写法保护，以及 TXT、CSV、JSON 导入导出；可查看本轮实际提交的热词。
@@ -25,16 +25,16 @@ VoiceInput 是一款 Windows 托盘语音输入工具，使用阿里云百炼进
 
 | 项目 | 要求 |
 | --- | --- |
-| 系统 | Windows 11 x64 |
+| 系统 | Windows 10 1809（17763）及以上 / Windows 11 x64 |
 | 音频 | 可用的麦克风，并允许桌面应用访问麦克风 |
 | 网络 | 能够访问阿里云百炼和 DeepSeek 官方服务 |
 | 凭据 | 自行配置百炼和 DeepSeek API Key，账户需有相应服务权限和可用额度 |
-| 运行时 | Release 中的自包含 EXE 无需另装 .NET |
+| 运行时 | Release 便携包包含 .NET 和 Windows App SDK，无需另装运行时 |
 
 ### 下载与配置
 
-1. 打开 [Releases](https://github.com/arcxya09/voiceinput-windows/releases)，下载所选版本的 `VoiceInput-Windows-x64-<版本号>.exe`。
-2. 运行 EXE，在“设置”中填写百炼 API Key、地域、业务空间 ID 和 DeepSeek API Key。地域、业务空间与 Key 应对应；使用官方兼容地址时，勾选对应选项。
+1. 打开 [Releases](https://github.com/arcxya09/voiceinput-windows/releases)，下载所选版本的 `VoiceInput-Windows-x64-<版本号>.zip`。
+2. 将 ZIP 完整解压到一个文件夹，运行其中的 `RealtimeTranscription.exe`，在“设置”中填写百炼 API Key、地域、业务空间 ID 和 DeepSeek API Key。地域、业务空间与 Key 应对应；使用官方兼容地址时，勾选对应选项。
 3. 选择麦克风并保存设置。可先运行“本地麦克风测试（3 秒）”，再分别测试云端连接。云端测试会实际调用 API，可能计费。
 4. 在目标应用的可编辑文本框内放好光标，按住所选说话键（默认右侧 Ctrl）；浮窗会显示收音和识别状态。
 5. 松开快捷键，等待识别收尾和全文润色完成。结果会写入原输入位置。
@@ -46,11 +46,11 @@ VoiceInput 是一款 Windows 托盘语音输入工具，使用阿里云百炼进
 | 操作 | 入口与说明 |
 | --- | --- |
 | 修改润色提示词 | “设置 → 润色提示词”，编辑后点击“保存提示词”；恢复默认后也需保存 |
-| 生成领域词库 | “设置 → AI 生成专业词库”，例如填写“HR 领域专业术语”、目标 100 个，检查结果后导入 |
+| 生成领域词库 | “词库 → AI 生成”，例如填写“HR 领域专业术语”、目标 100 个，检查结果后导入 |
 | 学习纠错 | “对照与编辑 → 原始片段修订”保存改字，再到“词库 → 纠错学习”确认候选 |
-| 提取历史词条 | 在“历史记忆”或“设置”点击“提取全部历史词条”，候选确认后启用 |
-| 查看词库作用 | “词库 → 查看下轮热词”查看排名和实际权重；“最近输入 → 查看本轮词库”查看提交快照、保护词与纠正次数 |
-| 找回未自动输入的结果 | 双击托盘图标，在“最近输入”复制文字并手动粘贴 |
+| 提取历史词条 | 在“历史记录”或“设置”点击“提取全部历史词条”，候选确认后启用 |
+| 查看词库作用 | “词库 → 查看下轮热词”查看排名和实际权重；“听写 → 查看本轮词库”查看提交快照、保护词与纠正次数 |
+| 找回未自动输入的结果 | 双击托盘图标，在“听写”复制文字并手动粘贴 |
 | 只听写、不自动输入 | 在主窗口或托盘开启“仅听写”，按住说话键录音，完成后复制正文 |
 
 纠错学习仅处理本程序内的手动编辑；历史提词仅扫描本程序保存的记录，不读取其他应用或 ChatGPT 的聊天记录。修改历史正文不会改写已经输入到外部文档中的文字。
@@ -127,10 +127,10 @@ cd voiceinput-windows
 
 [build.ps1](build.ps1) 会按依赖锁文件还原包，编译并运行回归测试，然后发布 Windows x64 自包含程序。输出位置：
 
-- `artifacts/VoiceInput-Windows-x64-<版本号>.exe`：可分发的单文件 EXE。
+- `artifacts/VoiceInput-Windows-x64-<版本号>.zip`：包含 EXE 与全部运行依赖的便携包，须完整解压。
 - `artifacts/publish/win-x64/`：完整发布目录。
 
-脚本结束时输出 EXE 的 SHA-256。仅运行测试可使用：
+脚本结束时输出便携 ZIP 的 SHA-256。仅运行测试可使用：
 
 ```powershell
 dotnet restore tests/Tests.csproj --locked-mode -m:1
@@ -144,7 +144,7 @@ dotnet tests/bin/Release/net10.0/Tests.dll
 | --- | --- |
 | `src/Core/` | 状态机、润色校验、词库规则、纠错比较和音频重采样 |
 | `src/Infrastructure/` | 云端接口、DPAPI 和 SQLite 存储 |
-| `src/Desktop/` | WPF 界面、WASAPI 采集、托盘和流程协调 |
+| `src/Desktop/` | 原生 WinUI 3 界面、WASAPI 采集、托盘和流程协调 |
 | `src/Desktop/Input/` | 全局快捷键、输入目标验证和文字投递 |
 | `tests/` | 核心、协议、存储和协调器回归测试 |
 | `docs/` | 技术设计、更新说明和验证记录 |
@@ -153,13 +153,14 @@ dotnet tests/bin/Release/net10.0/Tests.dll
 
 ### 自动构建与发布
 
-Pull Request 会执行回归测试、Windows 构建、发布脚本离线测试和实际 EXE 的桌面冒烟检查。推送到 `main` 或在 main 手动运行 [发布工作流](.github/workflows/release.yml)，通过这些检查后发布 EXE、源码包、构建日志和 `SHA256SUMS.txt`。发布步骤核对服务器最终状态、tag 提交和下载附件的哈希。
+Pull Request 会执行回归测试、Windows 构建、发布脚本离线测试和实际 EXE 的桌面冒烟检查。推送到 `main` 或在 main 手动运行 [发布工作流](.github/workflows/release.yml)，通过这些检查后发布便携 ZIP、源码包、构建日志和 `SHA256SUMS.txt`。发布步骤核对服务器最终状态、tag 提交和下载附件的哈希。
 
 发布新版本时，更新 `Directory.Build.props` 中的 `Version`，并添加 `docs/releases/<版本号>.md`。工作流成功后创建对应的 `v<版本号>` Release；已发布版本的附件保持不变。仅修改文档无需提升应用版本。
 
 ## 文档
 
 - [技术设计](docs/技术设计_v3.0.md)
+- [2.0.0 原生 WinUI 3 界面重构](docs/releases/2.0.0.md)
 - [1.5.0 全程序审查修复](docs/releases/1.5.0.md) · [逐项修复计划与验收](docs/修复计划_1.5.0.md)
 - [1.4.0 动态词频与确认纠错](docs/releases/1.4.0.md)
 - [1.3.1 版本说明](docs/releases/1.3.1.md) · [输入焦点修复细节](docs/焦点修复_1.3.1.md)

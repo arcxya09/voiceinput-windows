@@ -1,103 +1,655 @@
-<Window x:Class="RealtimeTranscription.Desktop.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="语音输入法" Icon="Assets/AppIcon.ico" Width="1180" Height="790" MinWidth="900" MinHeight="620" WindowStartupLocation="CenterScreen">
- <Grid Margin="22,18,22,14"><Grid.RowDefinitions><RowDefinition Height="68"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-  <DockPanel><Border DockPanel.Dock="Right" Background="#E0EFEA" CornerRadius="14" Padding="15,6" VerticalAlignment="Top"><TextBlock x:Name="StateLabel" Text="准备中" Foreground="#226E67"/></Border><Image Source="Assets/Logo.png" Width="48" Height="48" DockPanel.Dock="Left" Margin="0,0,12,10"/><StackPanel><TextBlock Text="语音输入法" FontSize="27" FontWeight="SemiBold"/><TextBlock x:Name="HotkeyHint" Text="按住说话 · 松开输入" Foreground="{StaticResource Muted}" Margin="0,5,0,0"/></StackPanel></DockPanel>
-  <TabControl x:Name="Tabs" Grid.Row="1" Background="Transparent" BorderBrush="#DCE4EC">
-   <TabItem Header="最近输入"><Grid Margin="18"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-    <WrapPanel><TextBlock Text="项目" VerticalAlignment="Center" Margin="0,0,10,8"/><ComboBox x:Name="ProjectBox" Width="200" DisplayMemberPath="Name" SelectedValuePath="Id" Margin="0,0,12,8" SelectionChanged="Project_Changed"/><Button Content="新建项目" Click="NewProject_Click"/><Button Content="启用按住说话" x:Name="StartButton" Background="#226E67" Foreground="White" Click="Start_Click"/><Button Content="暂停快捷键" x:Name="PauseButton" Click="Pause_Click"/><Button Content="取消本轮" x:Name="StopButton" Click="Stop_Click"/><CheckBox x:Name="DictationOnlyBox" Content="仅听写，完成后手动复制" Checked="DictationMode_Changed" Unchecked="DictationMode_Changed"/></WrapPanel>
-    <DockPanel Grid.Row="1" Margin="0,5,0,7"><StackPanel Orientation="Horizontal" DockPanel.Dock="Right"><Button Content="对照与编辑" Click="Review_Click"/><Button Content="复制正文" Click="Copy_Click"/><Button Content="停止并复制" Click="StopCopy_Click"/><Button Content="导出 TXT" Click="ExportTxt_Click"/><Button Content="导出 Markdown" Click="ExportMd_Click"/></StackPanel><TextBlock x:Name="BodyCount" Text="正文 · 0 字" VerticalAlignment="Center" FontWeight="SemiBold"/></DockPanel>
-    <Border Grid.Row="2" Background="White" BorderBrush="#DCE4EC" BorderThickness="1" CornerRadius="8"><TextBox x:Name="OutputBox" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" FontSize="20" BorderThickness="0" Padding="18" Background="Transparent"/></Border>
-    <Border Grid.Row="3" Background="#EAF0F5" CornerRadius="7" Padding="14,10" Margin="0,12,0,0"><StackPanel><DockPanel><ProgressBar x:Name="MicLevel" DockPanel.Dock="Right" Width="110" Height="5" Minimum="0" Maximum="1" Foreground="#226E67" Background="#D0DCE3"/><TextBlock x:Name="RecordStageText" Text="本轮识别预览" FontSize="12" Foreground="{StaticResource Muted}"/></DockPanel><TextBox x:Name="PreviewBox" Text="" IsReadOnly="True" TextWrapping="Wrap" FontSize="17" BorderThickness="0" Background="Transparent" Padding="0,7,0,0" MinHeight="44" MaxHeight="90" VerticalScrollBarVisibility="Auto"/></StackPanel></Border>
-    <StackPanel Grid.Row="4"><Border x:Name="SaveWarningPanel" Visibility="Collapsed" Background="#FFF0DE" BorderBrush="#C68D46" BorderThickness="1" CornerRadius="6" Padding="10" Margin="0,10,0,0"><DockPanel><Button x:Name="RetrySaveButton" Content="重试保存" DockPanel.Dock="Right" Click="RetrySave_Click" Margin="12,0,0,0"/><TextBlock x:Name="SaveWarningText" TextWrapping="Wrap" Foreground="#7A4718" VerticalAlignment="Center"/></DockPanel></Border><CheckBox x:Name="SessionLearningBox" Content="允许当前会话用于词条整理" IsEnabled="False" Checked="SessionLearning_Changed" Unchecked="SessionLearning_Changed"/><WrapPanel><TextBlock x:Name="LexiconLiveStatus" Foreground="{StaticResource Muted}" VerticalAlignment="Center"/><Button Content="查看本轮词库" Click="LexiconReport_Click"/></WrapPanel><TextBlock x:Name="SaveLabel" Text="正在准备…" Foreground="{StaticResource Muted}" FontSize="12" Margin="0,2,0,0"/></StackPanel>
-   </Grid></TabItem>
-   <TabItem x:Name="HistoryTab" Header="历史记忆"><Grid Margin="18"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-    <WrapPanel><TextBox x:Name="HistoryQuery" Width="290" ToolTip="搜索原文、正文和会话标题" Margin="0,0,10,8"/><CheckBox x:Name="AllProjects" Content="全部项目"/><ComboBox x:Name="HistoryDays" SelectedIndex="0" Width="120" Margin="0,0,10,8"><ComboBoxItem Content="全部时间"/><ComboBoxItem Content="最近 7 天"/><ComboBoxItem Content="最近 30 天"/></ComboBox><Button Content="搜索 / 刷新" Click="HistorySearch_Click"/><Button Content="取消搜索" Click="HistoryCancel_Click"/></WrapPanel>
-    <DataGrid x:Name="HistoryGrid" Grid.Row="1" SelectionMode="Single" MouseDoubleClick="HistoryOpen_Click"><DataGrid.Columns><DataGridTextColumn Header="会话" Binding="{Binding Session.Title}" Width="210"/><DataGridTextColumn Header="内容摘录" Binding="{Binding Snippet}" Width="*"/><DataGridTextColumn Header="片段" Binding="{Binding SegmentCount}" Width="65"/><DataGridTextColumn Header="创建时间" Binding="{Binding Session.CreatedAt, StringFormat=yyyy-MM-dd HH:mm}" Width="155"/></DataGrid.Columns></DataGrid>
-    <WrapPanel Grid.Row="2" Margin="0,12,0,0"><Button Content="载入并查看" Click="HistoryOpen_Click"/><Button Content="导出记忆记录 JSON" Click="HistoryExport_Click"/><Button Content="清除选中会话" Click="HistoryDelete_Click"/><Button x:Name="HistoryExtractAllButton" Content="提取全部历史词条" Click="ExtractAllHistory_Click"/><Button x:Name="HistoryCancelButton" Content="取消提取" Click="CancelHistory_Click" IsEnabled="False"/><TextBlock x:Name="HistoryStatus" Text="点击搜索，查看已保存的会话。" VerticalAlignment="Center" Foreground="{StaticResource Muted}"/></WrapPanel>
-   </Grid></TabItem>
-   <TabItem x:Name="VocabularyTab" Header="词库"><TabControl x:Name="VocabularyTabs" Background="Transparent" BorderThickness="0"><TabItem Header="词条管理"><Grid Margin="18"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-    <WrapPanel><TextBox x:Name="TermQuery" Width="220" Margin="0,0,10,8" TextChanged="TermFilter_Changed" ToolTip="筛选词条"/><ComboBox x:Name="TermFilter" Width="110" SelectedIndex="0" SelectionChanged="TermFilter_Changed" Margin="0,0,10,8"><ComboBoxItem Content="全部词条"/><ComboBoxItem Content="已启用"/><ComboBoxItem Content="待确认"/><ComboBoxItem Content="已禁用"/></ComboBox><Button Content="添加" Click="TermAdd_Click"/><Button Content="编辑" Click="TermEdit_Click"/><Button Content="批量确认" Click="TermConfirm_Click"/><Button Content="禁用" Click="TermDisable_Click"/><Button Content="删除" Click="TermDelete_Click"/><Button Content="来源" Click="TermEvidence_Click"/><Button Content="查看下轮热词" Click="NextHotwords_Click"/></WrapPanel>
-    <WrapPanel Grid.Row="1"><Button Content="导入 TXT / CSV / JSON" Click="TermImport_Click"/><Button Content="导出词库" Click="TermExport_Click"/><Button x:Name="ExtractButton" Content="整理当前会话词条" Click="Extract_Click"/><Button Content="取消整理" Click="ExtractCancel_Click"/><TextBlock Text="候选词确认后参与识别，录音中的热词变更在下次任务生效。" Foreground="{StaticResource Muted}" FontSize="12" VerticalAlignment="Center"/></WrapPanel>
-    <DataGrid x:Name="TermsGrid" Grid.Row="2" MouseDoubleClick="TermEdit_Click"><DataGrid.Columns><DataGridTextColumn Header="词条" Binding="{Binding Text}" Width="*"/><DataGridTextColumn Header="类别" Binding="{Binding Category}" Width="110"/><DataGridTextColumn Header="状态" Binding="{Binding StateLabel}" Width="90"/><DataGridTextColumn Header="范围" Binding="{Binding ScopeLabel}" Width="80"/><DataGridTextColumn Header="手动权重" Binding="{Binding Weight}" Width="70"/><DataGridTextColumn Header="使用会话" Binding="{Binding UsageCount}" Width="70"/><DataGridTextColumn Header="人工纠正" Binding="{Binding CorrectionCount}" Width="70"/><DataGridTextColumn Header="建议权重" Binding="{Binding SuggestedWeight}" Width="70"/><DataGridCheckBoxColumn Header="保护写法" Binding="{Binding Protect}" Width="85"/><DataGridCheckBoxColumn Header="置顶" Binding="{Binding Pinned}" Width="60"/></DataGrid.Columns></DataGrid>
-    <TextBlock Grid.Row="3" x:Name="TermsCount" Foreground="{StaticResource Muted}" Margin="0,10,0,0"/>
-   </Grid></TabItem>
-    <TabItem><TabItem.Header><TextBlock x:Name="CorrectionTabLabel" Text="纠错学习"/></TabItem.Header>
-     <Grid Margin="18"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-      <TextBlock x:Name="CorrectionHint" Text="保存手动修订后自动发现候选，确认后用于后续识别。" TextWrapping="Wrap" Foreground="{StaticResource Muted}" Margin="0,0,0,12"/>
-      <WrapPanel Grid.Row="1"><TextBox x:Name="CorrectionQuery" Width="220" ToolTip="筛选旧写法或新写法" TextChanged="CorrectionFilter_Changed" Margin="0,0,10,8"/><ComboBox x:Name="CorrectionFilter" Width="110" SelectedIndex="0" SelectionChanged="CorrectionFilter_Changed" Margin="0,0,10,8"><ComboBoxItem Content="待确认"/><ComboBoxItem Content="已学习"/><ComboBoxItem Content="已忽略"/><ComboBoxItem Content="全部"/></ComboBox><Button Content="刷新" Click="CorrectionRefresh_Click"/></WrapPanel>
-      <DataGrid x:Name="CorrectionsGrid" Grid.Row="2" SelectionMode="Single" MouseDoubleClick="CorrectionLearn_Click"><DataGrid.Columns><DataGridTextColumn Header="旧写法" Binding="{Binding Original}" Width="*"/><DataGridTextColumn Header="标准写法 / 建议" Binding="{Binding DisplayText}" Width="*"/><DataGridTextColumn Header="纠正次数" Binding="{Binding Count}" Width="90"/><DataGridTextColumn Header="提示" Binding="{Binding FrequencyLabel}" Width="110"/><DataGridTextColumn Header="状态" Binding="{Binding StateLabel}" Width="95"/><DataGridTextColumn Header="自动纠正" Binding="{Binding ReplacementLabel}" Width="110"/><DataGridTextColumn Header="原因" Binding="{Binding ReplacementReason}" Width="220"><DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="ToolTip" Value="{Binding ReplacementReason}"/></Style></DataGridTextColumn.ElementStyle></DataGridTextColumn></DataGrid.Columns></DataGrid>
-      <StackPanel Grid.Row="3" Margin="0,12,0,0"><WrapPanel x:Name="CorrectionActions"><Button Content="确认学习…" Background="#226E67" Foreground="White" Click="CorrectionLearn_Click"/><Button Content="查看来源" Click="CorrectionEvidence_Click"/><Button Content="忽略" Click="CorrectionIgnore_Click"/><Button Content="恢复候选" Click="CorrectionRestore_Click"/><Button Content="撤销学习" Click="CorrectionRevoke_Click"/><Button Content="启用自动纠正…" Click="CorrectionEnableReplacement_Click"/><Button Content="关闭自动纠正" Click="CorrectionDisableReplacement_Click"/></WrapPanel><TextBlock x:Name="CorrectionStatus" Text="尚无纠错记录。在“对照与编辑”中保存修订后自动发现。" TextWrapping="Wrap" Foreground="{StaticResource Muted}" FontSize="12"/></StackPanel>
-     </Grid>
-    </TabItem></TabControl></TabItem>
-   <TabItem Header="设置"><ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel Margin="24" MaxWidth="850" HorizontalAlignment="Left">
-    <TextBlock Text="阿里云百炼" FontSize="19" FontWeight="SemiBold" Margin="0,0,0,12"/>
-    <TextBlock Text="API Key"/><PasswordBox x:Name="BailianKeyBox" Width="620" HorizontalAlignment="Left" Margin="0,6,0,12"/>
-    <WrapPanel><ComboBox x:Name="RegionBox" Width="150" SelectedIndex="0" Margin="0,0,12,8"><ComboBoxItem Content="北京"/><ComboBoxItem Content="新加坡"/></ComboBox><TextBox x:Name="WorkspaceBox" Width="280" ToolTip="业务空间 Workspace ID" Margin="0,0,12,8"/><CheckBox x:Name="LegacyBox" Content="使用兼容地址（无需 Workspace ID）"/></WrapPanel>
-    <TextBlock Text="qwen-audio-3.0-asr-flash-streaming" FontSize="12" Foreground="{StaticResource Muted}" Margin="0,0,0,10"/><Button Content="保存设置并测试百炼" HorizontalAlignment="Left" Click="TestBailian_Click"/>
-    <Separator Margin="0,14,0,14"/><TextBlock Text="DeepSeek 轻量润色" FontSize="19" FontWeight="SemiBold" Margin="0,0,0,12"/>
-    <TextBlock Text="API Key"/><PasswordBox x:Name="DeepSeekKeyBox" Width="620" HorizontalAlignment="Left" Margin="0,6,0,10"/><WrapPanel><CheckBox x:Name="PolishBox" Content="启用轻量润色"/><CheckBox x:Name="PreviousBox" Visibility="Collapsed" Content="旧版分片上下文设置"/></WrapPanel>
-    <TextBlock Text="deepseek-flash · 松开后全文统一润色 · 非思考模式 · 仅输出结果" FontSize="12" Foreground="{StaticResource Muted}" Margin="0,0,0,10"/><Button Content="保存设置并测试 DeepSeek" HorizontalAlignment="Left" Click="TestDeepSeek_Click"/><TextBlock Text="连接测试会发起少量 API 调用。" FontSize="12" Foreground="{StaticResource Muted}"/>
-    <Expander Header="润色提示词（可编辑）" IsExpanded="False" Margin="0,12,0,12">
-     <StackPanel x:Name="PromptEditorPanel" Margin="0,12,0,0">
-      <TextBlock Text="在默认提示词上修改，保存后用于之后的润色。程序仍会保护原意、数字和词条；超出轻量整理范围时保留原文。" TextWrapping="Wrap" Foreground="{StaticResource Muted}" Margin="0,0,0,8"/>
-      <TextBox x:Name="PolishPromptBox" Height="240" Width="780" HorizontalAlignment="Left" TextWrapping="Wrap" AcceptsReturn="True" VerticalContentAlignment="Top" VerticalScrollBarVisibility="Auto" MaxLength="8000"/>
-      <WrapPanel Margin="0,10,0,0"><Button Content="保存提示词" Click="PromptSave_Click"/><Button Content="恢复默认" Click="PromptReset_Click"/></WrapPanel>
-      <TextBlock Text="试用文本" Margin="0,8,0,6"/>
-      <TextBox x:Name="PolishSampleBox" Width="780" Height="72" HorizontalAlignment="Left" Text="嗯，这个方案我们先试一下。" TextWrapping="Wrap" AcceptsReturn="True" VerticalContentAlignment="Top" VerticalScrollBarVisibility="Auto" MaxLength="600"/>
-      <Button x:Name="PromptTestButton" Content="试用当前提示词" HorizontalAlignment="Left" Click="PromptTest_Click" Margin="0,10,0,8"/>
-      <TextBox x:Name="PromptResultBox" Width="780" MinHeight="42" MaxHeight="150" HorizontalAlignment="Left" IsReadOnly="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/>
-      <TextBlock x:Name="PromptTestStatus" Text="试用会调用上方 DeepSeek Key，产生少量用量；无需先保存提示词。" TextWrapping="Wrap" Foreground="{StaticResource Muted}" FontSize="12" Margin="0,6,0,0"/>
-     </StackPanel>
-    </Expander>
-    <Separator Margin="0,14,0,14"/><TextBlock Text="麦克风与操作" FontSize="19" FontWeight="SemiBold" Margin="0,0,0,12"/>
-    <WrapPanel><ComboBox x:Name="DeviceBox" Width="510" DisplayMemberPath="Name" SelectedValuePath="Id" Margin="0,0,10,8"/><Button Content="刷新设备" Click="Devices_Click"/></WrapPanel>
-    <WrapPanel><Button x:Name="TestMicrophoneButton" Content="本地麦克风测试（3 秒）" Click="TestMicrophone_Click"/><Button Content="查看录音诊断" Click="Diagnostics_Click"/></WrapPanel>
-    <TextBlock Text="麦克风测试不上传音频，不调用付费 API。诊断不包含 Key、录音或识别正文。" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" Margin="0,0,0,8"/>
-    <WrapPanel><TextBlock Text="断句停顿（ms）" VerticalAlignment="Center" Margin="0,0,10,8"/><TextBox x:Name="SilenceBox" Width="95" Margin="0,0,22,8"/><TextBlock Text="按住说话键" VerticalAlignment="Center" Margin="0,0,10,8"/><ComboBox x:Name="HotkeyBox" Width="185" SelectedIndex="0" Margin="0,0,10,8"><ComboBoxItem Content="RightCtrl"/><ComboBoxItem Content="F8"/><ComboBoxItem Content="F9"/></ComboBox></WrapPanel>
-    <WrapPanel><TextBlock Text="长按确认（ms）" VerticalAlignment="Center" Margin="0,0,10,8"/><TextBox x:Name="HoldBox" Width="95" Margin="0,0,22,8"/><TextBlock Text="最长按住（秒）" VerticalAlignment="Center" Margin="0,0,10,8"/><TextBox x:Name="MaxHoldBox" Width="95" Margin="0,0,12,8"/></WrapPanel>
-    <TextBlock Text="连续录音默认 600 秒（10 分钟），可设 30—1800 秒。停顿默认 2500 ms，可设 200—6000 ms。停顿只影响识别确认，不会触发分片润色。" TextWrapping="Wrap" Foreground="{StaticResource Muted}" FontSize="12" Margin="0,0,0,10"/>
-    <WrapPanel><CheckBox x:Name="ParagraphBox" Content="长停顿 2 秒时另起自然段"/><CheckBox x:Name="TrayBox" Content="关闭管理窗口时收至托盘"/></WrapPanel>
-    <Separator Margin="0,14,0,14"/><TextBlock Text="记忆与词库" FontSize="19" FontWeight="SemiBold" Margin="0,0,0,12"/>
-    <WrapPanel><CheckBox x:Name="MemoryBox" Content="保存本地文本记忆"/><CheckBox x:Name="LearningBox" Content="允许词条整理（新会话默认）"/><CheckBox x:Name="UseTermsBox" Content="启用词库（识别热词、保护与确认纠错）"/></WrapPanel>
-    <CheckBox x:Name="DynamicTermsBox" Content="根据使用与人工纠错调整热词优先级（需允许本地学习）"/><CheckBox x:Name="CorrectionLearningBox" Content="从手动修订中发现纠错候选（本地比较，确认后学习）"/>
-    <TextBlock Text="词条整理总开关同时决定新会话的默认许可。已有会话请先载入，再到“最近输入”单独设置许可。每日词库 AI 预算按 UTC 日期重置。" TextWrapping="Wrap" FontSize="12" Foreground="{StaticResource Muted}" Margin="0,0,0,8"/>
-    <WrapPanel><TextBlock Text="保留天数（留空为长期）" VerticalAlignment="Center" Margin="0,0,10,8"/><TextBox x:Name="RetentionBox" Width="110" Margin="0,0,20,8"/><TextBlock Text="每日词库 AI Token 预算（UTC）" VerticalAlignment="Center" Margin="0,0,10,8"/><TextBox x:Name="BudgetBox" Width="120" Margin="0,0,10,8"/></WrapPanel>
-    <WrapPanel><CheckBox x:Name="AutoExtractBox" Content="停止后自动整理词条"/><CheckBox x:Name="AsrContextBox" Content="向 ASR 提供已选领域词上下文"/></WrapPanel>
-    <TextBlock Text="词条整理会将选中的已保存文本发送给 DeepSeek，产生单独用量；只生成待确认候选。默认不保存录音音频。" Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,6,0,16"/>
-    <Separator Margin="0,8,0,14"/>
-    <TextBlock Text="从全部历史提取词条" FontSize="19" FontWeight="SemiBold" Margin="0,0,0,10"/>
-    <TextBlock Text="遍历本软件所有项目中已保存、允许整理的历史输入，向 DeepSeek 分批发送原文或手动修订文本。新增词条保存到来源项目，等待确认。已整理版本自动跳过；取消或预算耗尽后可继续。" TextWrapping="Wrap" Foreground="{StaticResource Muted}" Margin="0,0,0,10"/>
-    <WrapPanel><Button x:Name="AllHistoryButton" Content="提取全部历史词条" Click="ExtractAllHistory_Click"/><Button x:Name="CancelHistoryButton" Content="取消历史提取" Click="CancelHistory_Click" IsEnabled="False"/></WrapPanel>
-    <ProgressBar x:Name="HistoryExtractionProgressBar" Height="5" Width="780" HorizontalAlignment="Left" Maximum="1" Foreground="#226E67" Margin="0,0,0,8"/>
-    <TextBlock x:Name="HistoryExtractionStatus" Text="覆盖全部已保存记录，不受历史列表最多显示 500 条的限制。" TextWrapping="Wrap" Margin="0,0,0,16"/>
-    <Separator Margin="0,8,0,14"/>
-    <TextBlock Text="AI 生成专业词库" FontSize="19" FontWeight="SemiBold" Margin="0,0,0,10"/>
-    <TextBlock Text="描述领域或要求，例如“生成 100 个 HR 领域的专业词条”。数量以下方目标词数为准。" TextWrapping="Wrap" Foreground="{StaticResource Muted}" Margin="0,0,0,8"/>
-    <StackPanel x:Name="GenerationRequestPanel">
-     <TextBox x:Name="GenerationRequirementBox" Width="780" Height="90" HorizontalAlignment="Left" AcceptsReturn="True" TextWrapping="Wrap" VerticalContentAlignment="Top" VerticalScrollBarVisibility="Auto" MaxLength="1000"/>
-     <WrapPanel Margin="0,12,0,0"><TextBlock Text="目标词数" VerticalAlignment="Center" Margin="0,0,8,8"/><TextBox x:Name="GenerationCountBox" Text="100" Width="80" Margin="0,0,20,8" MaxLength="3"/><TextBlock Text="导入范围" VerticalAlignment="Center" Margin="0,0,8,8"/><ComboBox x:Name="GenerationScopeBox" Width="160" SelectedIndex="0" SelectionChanged="GenerationScope_Changed"><ComboBoxItem Content="当前项目"/><ComboBoxItem Content="全局词库"/></ComboBox></WrapPanel>
-     <CheckBox x:Name="GenerationMaxThinkingBox" Content="开启 Max 思考深度（生成专业词库）"/>
-     <TextBlock Text="Max 模式会增加等待时间和 Token 用量，每批预留最多 32,768 个输出 Token（含思考）；预算不足时停止并保留已有结果。" TextWrapping="Wrap" Foreground="{StaticResource Muted}" FontSize="12" Margin="0,0,0,8"/>
-    </StackPanel>
-    <WrapPanel><Button x:Name="GenerateTermsButton" Content="生成词库" Click="GenerateTerms_Click" Background="#226E67" Foreground="White"/><Button x:Name="CancelGenerationButton" Content="取消生成" Click="CancelGeneration_Click" IsEnabled="False"/></WrapPanel>
-    <TextBlock Text="复用上方 DeepSeek Key，每次 1—500 个，生成结果不会自动启用。生成和会话词条整理共用每日预算。" TextWrapping="Wrap" Foreground="{StaticResource Muted}" FontSize="12" Margin="0,0,0,8"/>
-    <ProgressBar x:Name="GenerationProgressBar" Height="5" Width="780" HorizontalAlignment="Left" Maximum="100" Minimum="0" Foreground="#226E67" Margin="0,0,0,8"/>
-    <TextBlock x:Name="GenerationStatus" Text="生成后可修改词条、勾选并导入。" TextWrapping="Wrap" Margin="0,0,0,8"/>
-    <DataGrid x:Name="GeneratedTermsGrid" Width="780" Height="280" HorizontalAlignment="Left" IsReadOnly="False" SelectionMode="Extended" CanUserAddRows="False" EnableRowVirtualization="True">
-     <DataGrid.Columns>
-      <DataGridCheckBoxColumn Header="选中" Width="60" Binding="{Binding Selected,Mode=TwoWay,UpdateSourceTrigger=PropertyChanged}"/>
-      <DataGridTextColumn Header="词条（可修改）" Width="*" Binding="{Binding Text,Mode=TwoWay,UpdateSourceTrigger=PropertyChanged}"/>
-      <DataGridTextColumn Header="类别" Width="145" Binding="{Binding Category,Mode=TwoWay,UpdateSourceTrigger=PropertyChanged}"/>
-      <DataGridTextColumn Header="状态" Width="160" IsReadOnly="True" Binding="{Binding Status}"/>
-     </DataGrid.Columns>
-    </DataGrid>
-    <WrapPanel Margin="0,10,0,0"><Button x:Name="GeneratedSelectAllButton" Content="全选可导入" Click="GeneratedSelectAll_Click"/><Button x:Name="GeneratedSelectNoneButton" Content="取消全选" Click="GeneratedSelectNone_Click"/><CheckBox x:Name="GeneratedEnableBox" Content="导入后启用" IsChecked="True"/></WrapPanel>
-    <TextBlock x:Name="GeneratedSelectionStatus" Text="尚未生成词条。" Foreground="{StaticResource Muted}" Margin="0,0,0,8"/>
-    <Button x:Name="ImportGeneratedButton" Content="导入选中词条" Click="ImportGenerated_Click" HorizontalAlignment="Left" IsEnabled="False"/>
-    <Separator Margin="0,10,0,14"/>
-    <WrapPanel><Button Content="保存设置" Background="#226E67" Foreground="White" Click="SettingsSave_Click"/><Button Content="重试保存未保存内容" Click="RetrySave_Click"/><Button Content="删除当前项目" Click="DeleteProject_Click"/></WrapPanel>
-   </StackPanel></ScrollViewer></TabItem>
-   <TabItem Header="用量与说明"><ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel Margin="24"><TextBlock Text="本地用量记录" FontSize="20" FontWeight="SemiBold"/><Button Content="刷新" Click="Usage_Click" HorizontalAlignment="Left" Margin="0,14,0,12"/><TextBox x:Name="UsageBox" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" Height="230" VerticalScrollBarVisibility="Auto"/><TextBlock Text="使用方法" FontSize="20" FontWeight="SemiBold" Margin="0,25,0,10"/><TextBlock x:Name="UsageHelp" TextWrapping="Wrap" LineHeight="26"/><TextBlock x:Name="VersionInfo" Foreground="{StaticResource Muted}" Margin="0,22,0,0"/></StackPanel></ScrollViewer></TabItem>
-  </TabControl>
-  <TextBlock x:Name="StatusText" Grid.Row="2" Text="正在初始化…" TextWrapping="Wrap" Foreground="{StaticResource Muted}" Margin="3,12,3,0" FontSize="12"/>
- </Grid>
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:local="using:RealtimeTranscription.Desktop" x:Class="RealtimeTranscription.Desktop.MainWindow" Title="VoiceInput">
+    <Grid x:Name="MainRoot" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+        <Grid.Resources>
+            <local:DateTimeLabelConverter x:Key="DateTimeLabel"/>
+            <Style x:Key="Card" TargetType="Border">
+                <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorDefaultBrush}"/>
+                <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}"/>
+                <Setter Property="BorderThickness" Value="1"/>
+                <Setter Property="CornerRadius" Value="8"/>
+                <Setter Property="Padding" Value="20"/>
+            </Style>
+            <Style x:Key="SectionTitle" TargetType="TextBlock">
+                <Setter Property="FontSize" Value="19"/>
+                <Setter Property="FontWeight" Value="SemiBold"/>
+                <Setter Property="TextWrapping" Value="Wrap"/>
+            </Style>
+            <Style x:Key="SecondaryText" TargetType="TextBlock">
+                <Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}"/>
+                <Setter Property="TextWrapping" Value="Wrap"/>
+                <Setter Property="FontSize" Value="13"/>
+            </Style>
+            <Style x:Key="StretchListItem" TargetType="ListViewItem">
+                <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                <Setter Property="Padding" Value="12,10"/>
+            </Style>
+        </Grid.Resources>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <NavigationView x:Name="Navigation" PaneDisplayMode="Auto" OpenPaneLength="208" CompactModeThresholdWidth="700" ExpandedModeThresholdWidth="1040" IsBackButtonVisible="Collapsed" IsSettingsVisible="False" SelectionChanged="Navigation_SelectionChanged">
+            <NavigationView.PaneHeader>
+                <StackPanel Orientation="Horizontal" Spacing="10" Margin="14,12,8,22">
+                    <Image Source="ms-appx:///Assets/Logo.png" Width="30" Height="30"/>
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock Text="VoiceInput" FontSize="18" FontWeight="SemiBold"/>
+                        <TextBlock Text="语音输入 · 2.0" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                    </StackPanel>
+                </StackPanel>
+            </NavigationView.PaneHeader>
+            <NavigationView.MenuItems>
+                <NavigationViewItem Content="听写" Icon="Microphone" Tag="0"/>
+                <NavigationViewItem x:Name="HistoryTab" Content="历史" Icon="Clock" Tag="1"/>
+                <NavigationViewItem x:Name="VocabularyTab" Content="词库" Icon="Library" Tag="2"/>
+            </NavigationView.MenuItems>
+            <NavigationView.FooterMenuItems>
+                <NavigationViewItem Content="设置" Icon="Setting" Tag="3"/>
+                <NavigationViewItem Content="用量与帮助" Icon="Help" Tag="4"/>
+            </NavigationView.FooterMenuItems>
+            <NavigationView.Header>
+                <Grid Margin="0,4,24,4" ColumnSpacing="16">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Spacing="4">
+                        <TextBlock x:Name="PageTitle" Text="听写" FontSize="28" FontWeight="SemiBold"/>
+                        <TextBlock x:Name="HotkeyHint" Text="按住说话 · 松开输入" FontSize="13" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                    </StackPanel>
+                    <Border Grid.Column="1" CornerRadius="14" Padding="12,6" VerticalAlignment="Center" Background="{ThemeResource AccentFillColorDefaultBrush}">
+                        <TextBlock x:Name="StateLabel" Text="准备中" FontSize="12" Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}"/>
+                    </Border>
+                </Grid>
+            </NavigationView.Header>
+            <Grid Margin="24,12,24,16">
+                <!-- Pages stay instantiated to preserve live operations and unsaved settings. -->
+                <Grid x:Name="LivePage" MaxWidth="1000" HorizontalAlignment="Stretch" RowSpacing="14">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <StackPanel Spacing="12">
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <ComboBox x:Name="ProjectBox" MinWidth="130" MaxWidth="270" HorizontalAlignment="Left" DisplayMemberPath="Name" SelectedValuePath="Id" SelectionChanged="Project_Changed" AutomationProperties.Name="当前项目" ToolTipService.ToolTip="当前项目"/>
+                            <Button Grid.Column="1" Content="新建项目" Click="NewProject_Click"/>
+                            <Button x:Name="StartButton" Grid.Column="2" Content="启用按住说话" Style="{StaticResource AccentButtonStyle}" Click="Start_Click"/>
+                            <Button x:Name="PauseButton" Grid.Column="3" Content="暂停快捷键" Click="Pause_Click"/>
+                        </Grid>
+                        <CheckBox x:Name="DictationOnlyBox" Content="仅听写，完成后手动复制" Checked="DictationMode_Changed" Unchecked="DictationMode_Changed"/>
+                    </StackPanel>
+                    <Border Grid.Row="1" Style="{StaticResource Card}" Padding="0" MinHeight="120">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <Grid Padding="16,10,10,10" ColumnSpacing="8" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="0,0,0,1">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock x:Name="BodyCount" Text="正文 · 0 字" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                <Button Grid.Column="1" Content="对照与编辑" Click="Review_Click"/>
+                                <Button Grid.Column="2" Content="复制正文" Click="Copy_Click"/>
+                                <Button Grid.Column="3" AutomationProperties.Name="更多正文操作" ToolTipService.ToolTip="更多正文操作">
+                                    <FontIcon Glyph="" FontSize="16"/>
+                                    <Button.Flyout>
+                                        <MenuFlyout>
+                                            <MenuFlyoutItem Text="停止并复制" Icon="Copy" Click="StopCopy_Click"/>
+                                            <MenuFlyoutSeparator/>
+                                            <MenuFlyoutItem Text="导出 TXT" Icon="Save" Click="ExportTxt_Click"/>
+                                            <MenuFlyoutItem Text="导出 Markdown" Icon="Save" Click="ExportMd_Click"/>
+                                        </MenuFlyout>
+                                    </Button.Flyout>
+                                </Button>
+                            </Grid>
+                            <TextBox x:Name="OutputBox" Grid.Row="1" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.HorizontalScrollBarVisibility="Disabled" FontSize="20" BorderThickness="0" Padding="20,16" Background="Transparent" PlaceholderText="识别后的正文会显示在这里。" AutomationProperties.Name="听写正文" ScrollViewer.HorizontalScrollMode="Disabled"/>
+                        </Grid>
+                    </Border>
+                    <Border Grid.Row="2" Style="{StaticResource Card}" Padding="16,12">
+                        <Grid RowSpacing="7">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <Grid ColumnSpacing="16">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="96"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock x:Name="RecordStageText" Text="本轮识别预览" Style="{StaticResource SecondaryText}" VerticalAlignment="Center"/>
+                                <ProgressBar x:Name="MicLevel" Grid.Column="1" Height="4" Minimum="0" Maximum="1" VerticalAlignment="Center" AutomationProperties.Name="麦克风音量"/>
+                                <Button x:Name="StopButton" Grid.Column="2" Content="取消本轮" Click="Stop_Click"/>
+                            </Grid>
+                            <TextBox x:Name="PreviewBox" Grid.Row="1" Text="" IsReadOnly="True" TextWrapping="Wrap" FontSize="15" BorderThickness="0" Background="Transparent" Padding="0" MinHeight="24" MaxHeight="54" ScrollViewer.VerticalScrollBarVisibility="Auto" PlaceholderText="开始说话后，在这里查看实时文字。" AutomationProperties.Name="实时识别预览" ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
+                        </Grid>
+                    </Border>
+                    <StackPanel Grid.Row="3" Spacing="6">
+                        <Border x:Name="SaveWarningPanel" Visibility="Collapsed" Background="{ThemeResource InfoBarWarningSeverityBackgroundBrush}" CornerRadius="8" Padding="12">
+                            <Grid ColumnSpacing="12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock x:Name="SaveWarningText" TextWrapping="Wrap" VerticalAlignment="Center"/>
+                                <Button x:Name="RetrySaveButton" Grid.Column="1" Content="重试保存" Click="RetrySave_Click"/>
+                            </Grid>
+                        </Border>
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <CheckBox x:Name="SessionLearningBox" Content="允许当前会话用于词条整理" IsEnabled="False" Checked="SessionLearning_Changed" Unchecked="SessionLearning_Changed"/>
+                            <Button Grid.Column="1" Content="查看本轮词库" Click="LexiconReport_Click"/>
+                        </Grid>
+                        <TextBlock x:Name="LexiconLiveStatus" Style="{StaticResource SecondaryText}"/>
+                        <TextBlock x:Name="SaveLabel" Text="正在准备…" Style="{StaticResource SecondaryText}" FontSize="12"/>
+                    </StackPanel>
+                </Grid>
+                <Grid x:Name="HistoryPage" Visibility="Collapsed" RowSpacing="14" MaxWidth="1100" HorizontalAlignment="Stretch">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <Grid ColumnSpacing="10">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="120"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBox x:Name="HistoryQuery" PlaceholderText="搜索会话与正文" AutomationProperties.Name="搜索历史"/>
+                        <CheckBox x:Name="AllProjects" Grid.Column="1" Content="全部项目"/>
+                        <ComboBox x:Name="HistoryDays" Grid.Column="2" SelectedIndex="0" HorizontalAlignment="Stretch" AutomationProperties.Name="历史时间范围">
+                            <ComboBoxItem Content="全部时间"/>
+                            <ComboBoxItem Content="最近 7 天"/>
+                            <ComboBoxItem Content="最近 30 天"/>
+                        </ComboBox>
+                        <Button x:Name="HistorySearchButton" Grid.Column="3" Content="搜索" Click="HistorySearch_Click" Style="{StaticResource AccentButtonStyle}"/>
+                        <Button Grid.Column="4" Content="取消" Click="HistoryCancel_Click"/>
+                    </Grid>
+                    <Border Grid.Row="1" Style="{StaticResource Card}" Padding="4">
+                        <ListView x:Name="HistoryGrid" SelectionMode="Single" DoubleTapped="HistoryOpen_Click" ItemContainerStyle="{StaticResource StretchListItem}" AutomationProperties.Name="历史会话">
+                            <ListView.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid RowSpacing="6" ColumnSpacing="16">
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                        </Grid.RowDefinitions>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="{Binding Session.Title}" FontSize="15" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                                        <TextBlock Grid.Column="1" Text="{Binding Session.CreatedAt, Converter={StaticResource DateTimeLabel}}" Style="{StaticResource SecondaryText}"/>
+                                        <TextBlock Grid.Row="1" Text="{Binding Snippet}" Style="{StaticResource SecondaryText}" MaxLines="2" TextTrimming="CharacterEllipsis"/>
+                                        <TextBlock Grid.Row="1" Grid.Column="1" Style="{StaticResource SecondaryText}" HorizontalAlignment="Right">
+                                            <Run Text="{Binding SegmentCount}"/>
+                                            <Run Text=" 个片段"/>
+                                        </TextBlock>
+                                    </Grid>
+                                </DataTemplate>
+                            </ListView.ItemTemplate>
+                        </ListView>
+                    </Border>
+                    <StackPanel Grid.Row="2" Spacing="10">
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <Button Content="载入并查看" Click="HistoryOpen_Click"/>
+                            <Button Grid.Column="1" Content="更多操作">
+                                <Button.Flyout>
+                                    <MenuFlyout>
+                                        <MenuFlyoutItem Text="导出记忆记录 JSON" Click="HistoryExport_Click"/>
+                                        <MenuFlyoutItem Text="清除选中会话" Icon="Delete" Click="HistoryDelete_Click"/>
+                                    </MenuFlyout>
+                                </Button.Flyout>
+                            </Button>
+                            <Button x:Name="HistoryExtractAllButton" Grid.Column="3" Content="提取全部历史词条" Click="ExtractAllHistory_Click"/>
+                            <Button x:Name="HistoryCancelButton" Grid.Column="4" Content="取消提取" Click="CancelHistory_Click" IsEnabled="False"/>
+                        </Grid>
+                        <TextBlock x:Name="HistoryStatus" Text="点击搜索，查看已保存的会话。" Style="{StaticResource SecondaryText}"/>
+                    </StackPanel>
+                </Grid>
+                <Grid x:Name="VocabularyPage" Visibility="Collapsed">
+                    <TabView x:Name="VocabularyTabs" IsAddTabButtonVisible="False" CanDragTabs="False" CanReorderTabs="False" TabWidthMode="SizeToContent">
+                        <TabViewItem Header="词条管理" IsClosable="False">
+                            <Grid Margin="0,16,0,0" RowSpacing="12">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="120"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox x:Name="TermQuery" PlaceholderText="筛选词条" TextChanged="TermFilter_Changed" AutomationProperties.Name="筛选词条"/>
+                                    <ComboBox x:Name="TermFilter" Grid.Column="1" SelectedIndex="0" SelectionChanged="TermFilter_Changed" HorizontalAlignment="Stretch" AutomationProperties.Name="词条状态">
+                                        <ComboBoxItem Content="全部词条"/>
+                                        <ComboBoxItem Content="已启用"/>
+                                        <ComboBoxItem Content="待确认"/>
+                                        <ComboBoxItem Content="已禁用"/>
+                                    </ComboBox>
+                                    <Button Grid.Column="2" Content="添加" Style="{StaticResource AccentButtonStyle}" Click="TermAdd_Click"/>
+                                    <Button Grid.Column="3" Content="编辑" Click="TermEdit_Click"/>
+                                    <Button Grid.Column="4" Content="更多操作">
+                                        <Button.Flyout>
+                                            <MenuFlyout>
+                                                <MenuFlyoutItem Text="确认选中词条" Icon="Accept" Click="TermConfirm_Click"/>
+                                                <MenuFlyoutItem Text="禁用选中词条" Click="TermDisable_Click"/>
+                                                <MenuFlyoutItem Text="删除选中词条" Icon="Delete" Click="TermDelete_Click"/>
+                                                <MenuFlyoutSeparator/>
+                                                <MenuFlyoutItem Text="查看词条来源" Click="TermEvidence_Click"/>
+                                                <MenuFlyoutItem Text="查看下轮热词" Click="NextHotwords_Click"/>
+                                                <MenuFlyoutSeparator/>
+                                                <MenuFlyoutItem Text="导入 TXT / CSV / JSON" Icon="Import" Click="TermImport_Click"/>
+                                                <MenuFlyoutItem Text="导出词库" Icon="Save" Click="TermExport_Click"/>
+                                            </MenuFlyout>
+                                        </Button.Flyout>
+                                    </Button>
+                                </Grid>
+                                <Grid Grid.Row="1" ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Button x:Name="ExtractButton" Content="整理当前会话词条" Click="Extract_Click"/>
+                                    <Button Grid.Column="1" Content="取消整理" Click="ExtractCancel_Click"/>
+                                    <TextBlock Grid.Column="2" Text="候选词确认后参与识别，录音中的变更在下一轮生效。" Style="{StaticResource SecondaryText}" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                                </Grid>
+                                <Border Grid.Row="2" Style="{StaticResource Card}" Padding="4">
+                                    <ListView x:Name="TermsGrid" SelectionMode="Multiple" IsMultiSelectCheckBoxEnabled="True" DoubleTapped="TermEdit_Click" ItemContainerStyle="{StaticResource StretchListItem}" AutomationProperties.Name="词库词条">
+                                        <ListView.ItemTemplate>
+                                            <DataTemplate>
+                                                <Grid RowSpacing="5" ColumnSpacing="12">
+                                                    <Grid.RowDefinitions>
+                                                        <RowDefinition Height="Auto"/>
+                                                        <RowDefinition Height="Auto"/>
+                                                        <RowDefinition Height="Auto"/>
+                                                    </Grid.RowDefinitions>
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*"/>
+                                                        <ColumnDefinition Width="Auto"/>
+                                                        <ColumnDefinition Width="Auto"/>
+                                                    </Grid.ColumnDefinitions>
+                                                    <StackPanel Orientation="Horizontal" Spacing="10">
+                                                        <TextBlock Text="{Binding Text}" FontSize="16" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                                                        <TextBlock Text="{Binding Category}" Style="{StaticResource SecondaryText}" VerticalAlignment="Center"/>
+                                                    </StackPanel>
+                                                    <TextBlock Grid.Column="1" Text="{Binding ScopeLabel}" Style="{StaticResource SecondaryText}" VerticalAlignment="Center"/>
+                                                    <TextBlock Grid.Column="2" Text="{Binding StateLabel}" FontSize="12" VerticalAlignment="Center" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"/>
+                                                    <TextBlock Grid.Row="1" Grid.ColumnSpan="3" Style="{StaticResource SecondaryText}">
+                                                        <Run Text="手动权重 "/>
+                                                        <Run Text="{Binding Weight}"/>
+                                                        <Run Text="    使用会话 "/>
+                                                        <Run Text="{Binding UsageCount}"/>
+                                                        <Run Text="    人工纠正 "/>
+                                                        <Run Text="{Binding CorrectionCount}"/>
+                                                        <Run Text="    建议权重 "/>
+                                                        <Run Text="{Binding SuggestedWeight}"/>
+                                                    </TextBlock>
+                                                    <StackPanel Grid.Row="2" Grid.ColumnSpan="3" Orientation="Horizontal" Spacing="16">
+                                                        <CheckBox Content="保护写法" IsChecked="{Binding Protect, Mode=OneWay}" IsHitTestVisible="False" IsTabStop="False" MinHeight="24" FontSize="12"/>
+                                                        <CheckBox Content="置顶" IsChecked="{Binding Pinned, Mode=OneWay}" IsHitTestVisible="False" IsTabStop="False" MinHeight="24" FontSize="12"/>
+                                                    </StackPanel>
+                                                </Grid>
+                                            </DataTemplate>
+                                        </ListView.ItemTemplate>
+                                    </ListView>
+                                </Border>
+                                <TextBlock x:Name="TermsCount" Grid.Row="3" Style="{StaticResource SecondaryText}"/>
+                            </Grid>
+                        </TabViewItem>
+                        <TabViewItem IsClosable="False">
+                            <TabViewItem.Header>
+                                <TextBlock x:Name="CorrectionTabLabel" Text="纠错学习"/>
+                            </TabViewItem.Header>
+                            <Grid Margin="0,16,0,0" RowSpacing="12">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+                                <TextBlock x:Name="CorrectionHint" Text="保存手动修订后自动发现候选，确认后用于后续识别。" Style="{StaticResource SecondaryText}"/>
+                                <Grid Grid.Row="1" ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="120"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox x:Name="CorrectionQuery" PlaceholderText="筛选旧写法或新写法" TextChanged="CorrectionFilter_Changed" AutomationProperties.Name="筛选纠错记录"/>
+                                    <ComboBox x:Name="CorrectionFilter" Grid.Column="1" SelectedIndex="0" SelectionChanged="CorrectionFilter_Changed" HorizontalAlignment="Stretch" AutomationProperties.Name="纠错状态">
+                                        <ComboBoxItem Content="待确认"/>
+                                        <ComboBoxItem Content="已学习"/>
+                                        <ComboBoxItem Content="已忽略"/>
+                                        <ComboBoxItem Content="全部"/>
+                                    </ComboBox>
+                                    <Button Grid.Column="2" Content="刷新" Click="CorrectionRefresh_Click"/>
+                                </Grid>
+                                <Border Grid.Row="2" Style="{StaticResource Card}" Padding="4">
+                                    <ListView x:Name="CorrectionsGrid" SelectionMode="Single" DoubleTapped="CorrectionLearn_Click" ItemContainerStyle="{StaticResource StretchListItem}" AutomationProperties.Name="纠错候选">
+                                        <ListView.ItemTemplate>
+                                            <DataTemplate>
+                                                <StackPanel Spacing="7">
+                                                    <Grid ColumnSpacing="10">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="*"/>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                            <ColumnDefinition Width="*"/>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                        </Grid.ColumnDefinitions>
+                                                        <TextBlock Text="{Binding Original}" FontSize="16" TextWrapping="Wrap"/>
+                                                        <FontIcon Grid.Column="1" Glyph="" FontSize="12" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                                                        <TextBlock Grid.Column="2" Text="{Binding DisplayText}" FontSize="16" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                                                        <TextBlock Grid.Column="3" Text="{Binding StateLabel}" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" FontSize="12" VerticalAlignment="Center"/>
+                                                    </Grid>
+                                                    <TextBlock Style="{StaticResource SecondaryText}">
+                                                        <Run Text="纠正 "/>
+                                                        <Run Text="{Binding Count}"/>
+                                                        <Run Text=" 次    "/>
+                                                        <Run Text="{Binding FrequencyLabel}"/>
+                                                        <Run Text="    "/>
+                                                        <Run Text="{Binding ReplacementLabel}"/>
+                                                    </TextBlock>
+                                                    <TextBlock Text="{Binding ReplacementReason}" Style="{StaticResource SecondaryText}"/>
+                                                </StackPanel>
+                                            </DataTemplate>
+                                        </ListView.ItemTemplate>
+                                    </ListView>
+                                </Border>
+                                <StackPanel Grid.Row="3" Spacing="10">
+                                    <ContentControl x:Name="CorrectionActions" HorizontalContentAlignment="Stretch">
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <Button Content="确认学习…" Style="{StaticResource AccentButtonStyle}" Click="CorrectionLearn_Click"/>
+                                            <Button Content="查看来源" Click="CorrectionEvidence_Click"/>
+                                            <Button Content="启用自动纠正…" Click="CorrectionEnableReplacement_Click"/>
+                                            <Button Content="更多操作">
+                                                <Button.Flyout>
+                                                    <MenuFlyout>
+                                                        <MenuFlyoutItem Text="忽略候选" Click="CorrectionIgnore_Click"/>
+                                                        <MenuFlyoutItem Text="恢复候选" Click="CorrectionRestore_Click"/>
+                                                        <MenuFlyoutItem Text="撤销学习" Click="CorrectionRevoke_Click"/>
+                                                        <MenuFlyoutItem Text="关闭自动纠正" Click="CorrectionDisableReplacement_Click"/>
+                                                    </MenuFlyout>
+                                                </Button.Flyout>
+                                            </Button>
+                                        </StackPanel>
+                                    </ContentControl>
+                                    <TextBlock x:Name="CorrectionStatus" Text="尚无纠错记录。在“对照与编辑”中保存修订后自动发现。" Style="{StaticResource SecondaryText}"/>
+                                </StackPanel>
+                            </Grid>
+                        </TabViewItem>
+                        <TabViewItem Header="AI 生成" IsClosable="False">
+                            <ScrollViewer MaxWidth="900" HorizontalAlignment="Stretch" VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
+                                <StackPanel Margin="8,16,8,12" Spacing="16" HorizontalAlignment="Stretch">
+                                    <Border Style="{StaticResource Card}">
+                                        <StackPanel Spacing="12">
+                                            <TextBlock Text="生成专业词库" Style="{StaticResource SectionTitle}"/>
+                                            <TextBlock Text="描述你的领域和要求，生成后逐项检查，再导入到当前项目或全局词库。" Style="{StaticResource SecondaryText}"/>
+                                            <ContentControl x:Name="GenerationRequestPanel" HorizontalContentAlignment="Stretch">
+                                                <StackPanel Spacing="12">
+                                                    <TextBox x:Name="GenerationRequirementBox" Header="领域与要求" Height="108" AcceptsReturn="True" TextWrapping="Wrap" ScrollViewer.VerticalScrollBarVisibility="Auto" MaxLength="1000" PlaceholderText="例如：生成 100 个核天体物理领域的专业词条，包含核反应与实验装置名称。" ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
+                                                    <Grid ColumnSpacing="16">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="120"/>
+                                                            <ColumnDefinition Width="*"/>
+                                                        </Grid.ColumnDefinitions>
+                                                        <TextBox x:Name="GenerationCountBox" Header="目标词数" Text="100" MaxLength="3"/>
+                                                        <ComboBox x:Name="GenerationScopeBox" Grid.Column="1" Header="导入范围" SelectedIndex="0" SelectionChanged="GenerationScope_Changed" HorizontalAlignment="Stretch">
+                                                            <ComboBoxItem Content="当前项目"/>
+                                                            <ComboBoxItem Content="全局词库"/>
+                                                        </ComboBox>
+                                                    </Grid>
+                                                    <CheckBox x:Name="GenerationMaxThinkingBox" Content="开启 Max 思考深度"/>
+                                                    <TextBlock Text="Max 模式会增加等待时间和 Token 用量，每批最多预留 32,768 个输出 Token（含思考）。预算不足时停止并保留已有结果。" Style="{StaticResource SecondaryText}"/>
+                                                </StackPanel>
+                                            </ContentControl>
+                                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                                <Button x:Name="GenerateTermsButton" Content="生成词库" Click="GenerateTerms_Click" Style="{StaticResource AccentButtonStyle}"/>
+                                                <Button x:Name="CancelGenerationButton" Content="取消生成" Click="CancelGeneration_Click" IsEnabled="False"/>
+                                            </StackPanel>
+                                            <TextBlock Text="使用设置中的 DeepSeek Key，每次 1—500 个词条。生成和历史整理共用每日预算，结果不会自动启用。" Style="{StaticResource SecondaryText}"/>
+                                            <ProgressBar x:Name="GenerationProgressBar" Maximum="100" Minimum="0" AutomationProperties.Name="词库生成进度"/>
+                                            <TextBlock x:Name="GenerationStatus" Text="生成后可修改词条、勾选并导入。" Style="{StaticResource SecondaryText}"/>
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Style="{StaticResource Card}" Padding="16">
+                                        <StackPanel Spacing="12">
+                                            <TextBlock Text="检查与导入" Style="{StaticResource SectionTitle}"/>
+                                            <ListView x:Name="GeneratedTermsGrid" Height="290" SelectionMode="None" ItemContainerStyle="{StaticResource StretchListItem}" AutomationProperties.Name="生成词条预览">
+                                                <ListView.ItemTemplate>
+                                                    <DataTemplate>
+                                                        <Grid ColumnSpacing="10">
+                                                            <Grid.ColumnDefinitions>
+                                                                <ColumnDefinition Width="32"/>
+                                                                <ColumnDefinition Width="3*"/>
+                                                                <ColumnDefinition Width="2*"/>
+                                                                <ColumnDefinition Width="130"/>
+                                                            </Grid.ColumnDefinitions>
+                                                            <CheckBox IsChecked="{Binding Selected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" AutomationProperties.Name="选中此词条"/>
+                                                            <TextBox Grid.Column="1" Text="{Binding Text, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" PlaceholderText="词条" AutomationProperties.Name="词条写法"/>
+                                                            <TextBox Grid.Column="2" Text="{Binding Category, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" PlaceholderText="类别" AutomationProperties.Name="词条类别"/>
+                                                            <TextBlock Grid.Column="3" Text="{Binding Status}" Style="{StaticResource SecondaryText}" VerticalAlignment="Center"/>
+                                                        </Grid>
+                                                    </DataTemplate>
+                                                </ListView.ItemTemplate>
+                                            </ListView>
+                                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                                <Button x:Name="GeneratedSelectAllButton" Content="全选可导入" Click="GeneratedSelectAll_Click"/>
+                                                <Button x:Name="GeneratedSelectNoneButton" Content="取消全选" Click="GeneratedSelectNone_Click"/>
+                                                <CheckBox x:Name="GeneratedEnableBox" Content="导入后启用" IsChecked="True" Margin="8,0,0,0"/>
+                                            </StackPanel>
+                                            <TextBlock x:Name="GeneratedSelectionStatus" Text="尚未生成词条。" Style="{StaticResource SecondaryText}"/>
+                                            <Button x:Name="ImportGeneratedButton" Content="导入选中词条" Click="ImportGenerated_Click" Style="{StaticResource AccentButtonStyle}" IsEnabled="False"/>
+                                        </StackPanel>
+                                    </Border>
+                                </StackPanel>
+                            </ScrollViewer>
+                        </TabViewItem>
+                    </TabView>
+                </Grid>
+                <Grid x:Name="SettingsPage" Visibility="Collapsed" RowSpacing="12">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <ScrollViewer MaxWidth="850" HorizontalAlignment="Stretch" VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
+                        <StackPanel Margin="8,0,8,12" Spacing="16" HorizontalAlignment="Stretch">
+                            <Border Style="{StaticResource Card}">
+                                <StackPanel Spacing="12">
+                                    <TextBlock Text="语音识别" Style="{StaticResource SectionTitle}"/>
+                                    <TextBlock Text="阿里云百炼 · qwen-audio-3.0-asr-flash-streaming" Style="{StaticResource SecondaryText}"/>
+                                    <PasswordBox x:Name="BailianKeyBox" Header="API Key" PasswordRevealMode="Peek"/>
+                                    <Grid ColumnSpacing="12">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="140"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <ComboBox x:Name="RegionBox" Header="服务地域" SelectedIndex="0" HorizontalAlignment="Stretch">
+                                            <ComboBoxItem Content="北京"/>
+                                            <ComboBoxItem Content="新加坡"/>
+                                        </ComboBox>
+                                        <TextBox x:Name="WorkspaceBox" Grid.Column="1" Header="Workspace ID" PlaceholderText="业务空间 ID"/>
+                                    </Grid>
+                                    <CheckBox x:Name="LegacyBox" Content="使用兼容地址（无需 Workspace ID）"/>
+                                    <Button Content="保存设置并测试百炼" Click="TestBailian_Click"/>
+                                </StackPanel>
+                            </Border>
+                            <Border Style="{StaticResource Card}">
+                                <StackPanel Spacing="12">
+                                    <TextBlock Text="全文润色" Style="{StaticResource SectionTitle}"/>
+                                    <TextBlock Text="DeepSeek · 松开后统一整理全文，保护原意、数字与专业词条。" Style="{StaticResource SecondaryText}"/>
+                                    <PasswordBox x:Name="DeepSeekKeyBox" Header="API Key" PasswordRevealMode="Peek"/>
+                                    <CheckBox x:Name="PolishBox" Content="启用轻量润色"/>
+                                    <CheckBox x:Name="PreviousBox" Visibility="Collapsed" Content="旧版分片上下文设置"/>
+                                    <Button Content="保存设置并测试 DeepSeek" Click="TestDeepSeek_Click"/>
+                                    <TextBlock Text="连接测试会发起少量 API 调用。deepseek-flash 使用非思考模式，仅返回整理后的正文。" Style="{StaticResource SecondaryText}"/>
+                                    <Expander Header="编辑与试用润色提示词" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                                        <ContentControl x:Name="PromptEditorPanel" HorizontalContentAlignment="Stretch">
+                                            <StackPanel Spacing="12">
+                                                <TextBlock Text="在默认提示词上修改，保存后用于之后的润色。超出轻量整理范围时，程序会保留原文。" Style="{StaticResource SecondaryText}"/>
+                                                <TextBox x:Name="PolishPromptBox" Header="润色提示词" Height="240" TextWrapping="Wrap" AcceptsReturn="True" ScrollViewer.VerticalScrollBarVisibility="Auto" MaxLength="8000" ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
+                                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                                    <Button Content="保存提示词" Click="PromptSave_Click"/>
+                                                    <Button Content="恢复默认" Click="PromptReset_Click"/>
+                                                </StackPanel>
+                                                <TextBox x:Name="PolishSampleBox" Header="试用文本" Height="88" Text="嗯，这个方案我们先试一下。" TextWrapping="Wrap" AcceptsReturn="True" ScrollViewer.VerticalScrollBarVisibility="Auto" MaxLength="600" ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
+                                                <Button x:Name="PromptTestButton" Content="试用当前提示词" Click="PromptTest_Click"/>
+                                                <TextBox x:Name="PromptResultBox" Header="试用结果" MinHeight="56" MaxHeight="180" IsReadOnly="True" TextWrapping="Wrap" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
+                                                <TextBlock x:Name="PromptTestStatus" Text="试用会调用上方 DeepSeek Key，产生少量用量；无需先保存提示词。" Style="{StaticResource SecondaryText}"/>
+                                            </StackPanel>
+                                        </ContentControl>
+                                    </Expander>
+                                </StackPanel>
+                            </Border>
+                            <Border Style="{StaticResource Card}">
+                                <StackPanel Spacing="12">
+                                    <TextBlock Text="麦克风与操作" Style="{StaticResource SectionTitle}"/>
+                                    <Grid ColumnSpacing="8">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <ComboBox x:Name="DeviceBox" Header="输入设备" DisplayMemberPath="Name" SelectedValuePath="Id" HorizontalAlignment="Stretch"/>
+                                        <Button Grid.Column="1" Content="刷新设备" Click="Devices_Click" VerticalAlignment="Bottom"/>
+                                    </Grid>
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <Button x:Name="TestMicrophoneButton" Content="本地麦克风测试（3 秒）" Click="TestMicrophone_Click"/>
+                                        <Button Content="查看录音诊断" Click="Diagnostics_Click"/>
+                                    </StackPanel>
+                                    <TextBlock Text="麦克风测试不上传音频。诊断不包含 Key、录音或识别正文。" Style="{StaticResource SecondaryText}"/>
+                                    <Grid ColumnSpacing="16" RowSpacing="12">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                        </Grid.RowDefinitions>
+                                        <ComboBox x:Name="HotkeyBox" Header="按住说话键" SelectedIndex="0" HorizontalAlignment="Stretch">
+                                            <ComboBoxItem Content="RightCtrl"/>
+                                            <ComboBoxItem Content="F8"/>
+                                            <ComboBoxItem Content="F9"/>
+                                        </ComboBox>
+                                        <TextBox x:Name="SilenceBox" Grid.Column="1" Header="断句停顿（ms）"/>
+                                        <TextBox x:Name="HoldBox" Grid.Row="1" Header="长按确认（ms）"/>
+                                        <TextBox x:Name="MaxHoldBox" Grid.Row="1" Grid.Column="1" Header="最长按住（秒）"/>
+                                    </Grid>
+                                    <TextBlock Text="连续录音默认 600 秒，可设 30—1800 秒。断句停顿默认 2500 ms，可设 200—6000 ms；停顿只影响识别确认。" Style="{StaticResource SecondaryText}"/>
+                                    <CheckBox x:Name="ParagraphBox" Content="长停顿 2 秒时另起自然段"/>
+                                    <CheckBox x:Name="TrayBox" Content="关闭管理窗口时收至托盘"/>
+                                </StackPanel>
+                            </Border>
+                            <Border Style="{StaticResource Card}">
+                                <StackPanel Spacing="10">
+                                    <TextBlock Text="记忆与词库" Style="{StaticResource SectionTitle}" Margin="0,0,0,2"/>
+                                    <CheckBox x:Name="MemoryBox" Content="保存本地文本记忆"/>
+                                    <CheckBox x:Name="LearningBox" Content="允许词条整理（新会话默认）"/>
+                                    <CheckBox x:Name="UseTermsBox" Content="启用词库（识别热词、保护与确认纠错）"/>
+                                    <CheckBox x:Name="DynamicTermsBox" Content="根据使用与人工纠错调整热词优先级（需允许本地学习）"/>
+                                    <CheckBox x:Name="CorrectionLearningBox" Content="从手动修订中发现纠错候选（本地比较，确认后学习）"/>
+                                    <CheckBox x:Name="AutoExtractBox" Content="停止后自动整理词条"/>
+                                    <CheckBox x:Name="AsrContextBox" Content="向 ASR 提供已选领域词上下文"/>
+                                    <Grid ColumnSpacing="16" Margin="0,4,0,4">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBox x:Name="RetentionBox" Header="保留天数" PlaceholderText="留空为长期保留"/>
+                                        <TextBox x:Name="BudgetBox" Grid.Column="1" Header="每日词库 AI Token 预算（UTC）"/>
+                                    </Grid>
+                                    <TextBlock Text="已有会话可在“听写”页面单独设置整理许可。词条整理将已选文本发送给 DeepSeek，只生成待确认候选。默认不保存录音，每日预算按 UTC 日期重置。" Style="{StaticResource SecondaryText}"/>
+                                </StackPanel>
+                            </Border>
+                            <Expander Header="从全部历史提取词条" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                                <StackPanel Spacing="12">
+                                    <TextBlock Text="遍历所有项目中已保存、允许整理的历史输入，分批发送原文或手动修订文本给 DeepSeek。新词保存到来源项目并等待确认。已整理版本自动跳过，取消或预算耗尽后可继续。" Style="{StaticResource SecondaryText}"/>
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <Button x:Name="AllHistoryButton" Content="提取全部历史词条" Click="ExtractAllHistory_Click"/>
+                                        <Button x:Name="CancelHistoryButton" Content="取消历史提取" Click="CancelHistory_Click" IsEnabled="False"/>
+                                    </StackPanel>
+                                    <ProgressBar x:Name="HistoryExtractionProgressBar" Maximum="1" AutomationProperties.Name="历史词条提取进度"/>
+                                    <TextBlock x:Name="HistoryExtractionStatus" Text="覆盖全部已保存记录，不受历史列表最多显示 500 条的限制。" Style="{StaticResource SecondaryText}"/>
+                                </StackPanel>
+                            </Expander>
+                            <Expander Header="数据恢复与项目管理" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                                <StackPanel Spacing="12">
+                                    <TextBlock Text="保存失败时，可先复制或导出正文，再重试保存。删除项目将同时清除该项目的记忆与项目词条。" Style="{StaticResource SecondaryText}"/>
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <Button Content="重试保存未保存内容" Click="RetrySave_Click"/>
+                                        <Button Content="删除当前项目" Click="DeleteProject_Click"/>
+                                    </StackPanel>
+                                </StackPanel>
+                            </Expander>
+                        </StackPanel>
+                    </ScrollViewer>
+                    <Grid Grid.Row="1" MaxWidth="850" HorizontalAlignment="Stretch" ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="修改完成后保存，新的识别任务将使用最新设置。" Style="{StaticResource SecondaryText}" VerticalAlignment="Center"/>
+                        <Button Grid.Column="1" Content="保存设置" Style="{StaticResource AccentButtonStyle}" Click="SettingsSave_Click"/>
+                    </Grid>
+                </Grid>
+                <ScrollViewer x:Name="HelpPage" MaxWidth="850" HorizontalAlignment="Stretch" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
+                    <StackPanel Spacing="16" Margin="8,0,8,12" HorizontalAlignment="Stretch">
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel Spacing="14">
+                                <TextBlock Text="使用方法" Style="{StaticResource SectionTitle}"/>
+                                <TextBlock x:Name="UsageHelp" TextWrapping="Wrap" LineHeight="27"/>
+                            </StackPanel>
+                        </Border>
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel Spacing="14">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="本地用量记录" Style="{StaticResource SectionTitle}" VerticalAlignment="Center"/>
+                                    <Button x:Name="UsageRefreshButton" Grid.Column="1" Content="刷新" Click="Usage_Click"/>
+                                </Grid>
+                                <TextBox x:Name="UsageBox" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" Height="260" ScrollViewer.VerticalScrollBarVisibility="Auto" AutomationProperties.Name="本地用量记录" ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
+                            </StackPanel>
+                        </Border>
+                        <TextBlock x:Name="VersionInfo" Style="{StaticResource SecondaryText}"/>
+                    </StackPanel>
+                </ScrollViewer>
+            </Grid>
+        </NavigationView>
+        <Border Grid.Row="1" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="0,1,0,0" Padding="20,8" Background="{ThemeResource LayerFillColorDefaultBrush}">
+            <TextBlock x:Name="StatusText" Text="正在初始化…" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding Text, ElementName=StatusText}"/>
+        </Border>
+    </Grid>
 </Window>
