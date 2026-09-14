@@ -7,10 +7,11 @@ using RealtimeTranscription.Core;
 namespace RealtimeTranscription.Desktop.Input;
 
 internal record UiaRequest(string Operation, long Window = 0, long Focus = 0, uint Thread = 0,
-    uint Process = 0, string CaptureId = "", bool CheckSelection = true);
-internal record UiaResponse(string Code, string Message = "", string CaptureId = "");
+    uint Process = 0, string CaptureId = "", bool CheckSelection = true, string? Text = null, uint ClipboardSequence = 0);
+internal record UiaResponse(string Code, string Message = "", string CaptureId = "", uint? ClipboardSequence = null);
 
-// The same executable hosts one hidden worker. No audio, transcript, or credential is sent here.
+// The same executable hosts one hidden worker. Only target metadata and the final
+// text to copy are sent here; no audio or credentials. Requests are never logged.
 // Its stdin/stdout handles are private inherited pipes, and parent exit terminates the worker.
 public static class UiaWorker
 {
@@ -41,7 +42,7 @@ public static class UiaWorker
                 UiaResponse reply;
                 try
                 {
-                    var request = line.Length <= 4096 ? JsonSerializer.Deserialize<UiaRequest>(line) : null;
+                    var request = line.Length <= ClipboardPaste.MaxCharacters * 6 + 4096 ? JsonSerializer.Deserialize<UiaRequest>(line) : null;
                     reply = request == null ? new("Unavailable") : Handle(request);
                 }
                 catch { captured = null; reply = new("Unavailable"); }
@@ -61,6 +62,14 @@ public static class UiaWorker
         }
         if (request.Operation == "Validate" && captured is { } target && target.Id == request.CaptureId)
             return Validate(target, request.CheckSelection);
+        if (request.Operation == "PreparePaste" && captured is { } pasteTarget && pasteTarget.Id == request.CaptureId)
+        {
+            if (request.Text is null || !ClipboardPaste.IsSupportedText(request.Text)) return new("ClipboardUnavailable");
+            var validation = Validate(pasteTarget, true);
+            if (validation.Code != "Ready") return validation;
+            uint? sequence = NativeClipboard.Prepare(request.Text, pasteTarget.Native, request.ClipboardSequence);
+            return sequence is null ? new("ClipboardUnavailable") : new("Ready", ClipboardSequence: sequence);
+        }
         return new("Changed");
     }
     private static UiaResponse Capture(NativeTarget native)

@@ -31,6 +31,7 @@ internal static class Win32
     [DllImport("user32.dll")]public static extern bool IsWindowEnabled(IntPtr hwnd);
     [DllImport("user32.dll")]public static extern short GetAsyncKeyState(int key);
     [DllImport("user32.dll",SetLastError=true)]public static extern uint SendInput(uint count,Input[] input,int size);
+    [DllImport("user32.dll")]public static extern uint GetClipboardSequenceNumber();
     [DllImport("user32.dll",SetLastError=true)]public static extern IntPtr SetWindowsHookEx(int id,Hook callback,IntPtr module,uint thread);
     [DllImport("user32.dll")]public static extern bool UnhookWindowsHookEx(IntPtr hook);
     [DllImport("user32.dll")]public static extern IntPtr CallNextHookEx(IntPtr hook,int code,IntPtr w,IntPtr l);
@@ -166,21 +167,6 @@ public static class TextDelivery
         }
         return new(null,"ProviderUnavailable","输入框的辅助功能接口暂时无响应，未上传语音。请稍后重试。");
     }
-    private static async Task<bool> ValidateAsync(InputTarget target,CancellationToken token)
-    {
-        for(int attempt=0;attempt<3&&!token.IsCancellationRequested;attempt++)
-        {
-            var result=await Query(new("Validate",CaptureId:target.CaptureId,CheckSelection:target.CheckSelection),token,target.WorkerId);
-            // A timeout kills the worker and its selection. Do not recover a different range mid-send.
-            if(result==null)return false;
-            if(result.Value.Reply.Code!="Unavailable")return result.Value.Reply.Code=="Ready";
-            if(attempt<2&&!token.IsCancellationRequested)
-            {
-                try{await Task.Delay(80,token);}catch(OperationCanceledException){return false;}
-            }
-        }
-        return false;
-    }
     public static async Task<DeliveryResult> SendAsync(InputTarget target,string text,Func<bool> valid,CancellationToken token)
     {
         if(text.Length==0)return new("Empty","没有需要输入的文字。");
@@ -190,31 +176,36 @@ public static class TextDelivery
         if(Modified())return new("Blocked","修饰键仍未释放，文字已保留，可手动复制。");
         if(!valid()||token.IsCancellationRequested)return new("Blocked","检测到其他操作，文字已保留，可手动复制。");
         if(Win32.Composing(target.Native.Focus))return new("Blocked","输入法仍有未确认的候选词，文字已保留，可手动复制。");
-        if(!await ValidateAsync(target,token))return new("Blocked","输入框或光标选区已变化，或辅助功能接口无响应。文字已保留，可手动复制。");
-        var result=await PacedTextInput.SendAsync(text,SendScalar,
-            ()=>valid()&&Win32.Current()==target.Native&&!Modified()&&!Win32.Composing(target.Native.Focus),
-            cancellation=>ValidateAsync(target with{CheckSelection=false},cancellation),token);
+        bool Uninterrupted()=>valid()&&Win32.Current()==target.Native;
+        var result=await ClipboardPaste.SendAsync(text,async(body,cancellation)=>
+            {
+                uint previous=Win32.GetClipboardSequenceNumber();
+                var prepared=await Query(new("PreparePaste",CaptureId:target.CaptureId,Text:body,ClipboardSequence:previous),
+                    cancellation,target.WorkerId,timeoutMs:3000);
+                return prepared is {} response&&response.Reply.Code=="Ready"?response.Reply.ClipboardSequence:null;
+            },
+            sequence=>Win32.GetClipboardSequenceNumber()==sequence,
+            ()=>Uninterrupted()&&!Modified()&&!Win32.Composing(target.Native.Focus),
+            SendPasteShortcut,token,Uninterrupted);
         return result.State switch
         {
-            "Sent"=>new("Sent","文字已交给目标应用。",result.Accepted),
-            "Partial"=>new("Partial","文字可能只输入了一部分。请检查目标内容，不会自动重发。",result.Accepted),
-            _=>new("Blocked","目标未接受文字，或输入位置及按键状态已变化。文字已保留，可手动复制。",result.Accepted)
+            "Sent"=>new("PasteSent","已发起整段粘贴，正文保留在剪贴板。",result.Accepted),
+            "Unknown"=>new("Unknown","粘贴结果需要核对，请检查目标内容。不会自动重发。",result.Accepted),
+            _=>new("Blocked","未发起粘贴：剪贴板暂不可用、内容不受支持，或输入位置及按键状态已变化。文字已保留，可手动复制。",result.Accepted)
         };
     }
-    private static int SendScalar(string scalar)
+    private static int SendPasteShortcut()
     {
-        var input=new Win32.Input[scalar.Length*2];
-        for(int i=0;i<scalar.Length;i++)
-        {
-            input[i*2]=new(){Type=1,Data=new(){Key=new(){Scan=scalar[i],Flags=4,Extra=new UIntPtr(Win32.Marker)}}};
-            input[i*2+1]=new(){Type=1,Data=new(){Key=new(){Scan=scalar[i],Flags=6,Extra=new UIntPtr(Win32.Marker)}}};
-        }
+        static Win32.Input Key(ushort key,bool up)=>new(){Type=1,Data=new(){Key=new(){Vk=key,Flags=up?2u:0u,Extra=new UIntPtr(Win32.Marker)}}};
+        Win32.Input[] input=[Key(0x11,false),Key(0x56,false),Key(0x56,true),Key(0x11,true)];
         uint count=Win32.SendInput((uint)input.Length,input,Marshal.SizeOf<Win32.Input>());
-        if(count<input.Length&&count%2==1)
+        if(count is >0 and <4)
         {
-            // Release only the accepted scalar's unmatched key-down. Cleanup
-            // failure cannot hide the events already accepted by the first call.
-            try{var release=input[(int)count];Win32.SendInput(1,[release],Marshal.SizeOf<Win32.Input>());}catch{}
+            // A V-down may already have requested a paste. Release only keys
+            // that remain down; never retry V-down or fall back to typing.
+            if(count==2){try{Win32.SendInput(1,[input[2]],Marshal.SizeOf<Win32.Input>());}catch{}}
+            // Attempt Ctrl-up even if V-up cleanup failed or was blocked.
+            try{Win32.SendInput(1,[input[3]],Marshal.SizeOf<Win32.Input>());}catch{}
         }
         return (int)count;
     }

@@ -457,6 +457,7 @@ await CapsuleRegression.Run(Test);
 await StartupConnectionRegression.Run(Test);
 await StartupCaptureRegression.Run(Test);
 await DeliveryDispatchRegression.Run(Test);
+await ClipboardPasteRegression.Run(Test);
 Console.WriteLine($"RESULT: {passed} passed; {failed} failed. Interactive desktop, microphone and paid cloud calls were not executed.");
 return failed==0?0:1;
 

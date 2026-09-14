@@ -14,6 +14,7 @@ internal static class CapsuleRegression
             Check(CapsulePresentation.CompletionLabel(frame.DeliveryState) == "请核对");
             Check(CapsulePresentation.CompletionLabel("Partial") == "部分输入");
             Check(CapsulePresentation.CompletionLabel("Sent") == "已输入");
+            Check(CapsulePresentation.CompletionLabel("PasteSent") == "已发起粘贴");
             Check(CapsulePresentation.CompletionLabel("Dictated") == "待复制");
             Check(CapsulePresentation.CompletionLabel("Blocked") == "待复制");
             Check(CapsulePresentation.CompletionLabel(null) == "结束");

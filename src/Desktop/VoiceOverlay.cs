@@ -225,7 +225,7 @@ public sealed class VoiceOverlay : Window
         completion.Visibility = dismissPending && persistentWarning.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
         completion.Text = completionState switch
         {
-            "Sent" or "Dictated" => "\uE73E",
+            "Sent" or "PasteSent" or "Dictated" => "\uE73E",
             "Cancelled" => "\uE711",
             "Blocked" or "Partial" or "Unknown" => "\uE7BA",
             _ => "\uE946"

@@ -413,7 +413,7 @@ public static class DesktopSmoke
             checks.Add("Listening, processing, completion and save warnings keep the same capsule footprint and focus; save warnings stay visible until cleared");
             checks.Add("Terminal badges distinguish sent, dictation-only, blocked, canceled, partial, unknown and empty results without inferring success from status text");
             overlay.Clear();
-            Stage("Verify production Unicode delivery against isolated external controls");
+            Stage("Verify production whole-text paste against isolated external controls");
             checks.AddRange(await InputDeliverySmoke.CheckAsync());
             Stage("Desktop UI verification completed");
         }
@@ -687,7 +687,7 @@ public static class DesktopSmoke
         var badge = Find<TextBlock>(overlay, "OverlayElapsed");
         foreach (var terminal in new[]
         {
-            (State: "Sent", Label: "已输入"), (State: "Dictated", Label: "待复制"),
+            (State: "Sent", Label: "已输入"), (State: "PasteSent", Label: "已发起粘贴"), (State: "Dictated", Label: "待复制"),
             (State: "Cancelled", Label: "已取消"), (State: "Blocked", Label: "待复制"),
             (State: "Partial", Label: "部分输入"), (State: "Unknown", Label: "请核对"),
             (State: "Empty", Label: "无文字")
