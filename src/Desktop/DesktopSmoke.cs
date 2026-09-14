@@ -646,40 +646,43 @@ public static class DesktopSmoke
 
     private static void CheckPopupNativeFrame(IntPtr hwnd, string name)
     {
+        var failures = new List<string>();
+        void Check(bool condition, string message) { if (!condition) failures.Add(message); }
         bool overlay = name.StartsWith("overlay", StringComparison.Ordinal);
         long style = GetWindowLongPtr(hwnd, -16).ToInt64();
         long extendedStyle = GetWindowLongPtr(hwnd, -20).ToInt64();
         const long nativeFrame = 0x00C00000L | 0x00040000L;
-        Require((style & nativeFrame) == nativeFrame && (style & 0x80000000L) != 0 &&
+        Check((style & nativeFrame) == nativeFrame && (style & 0x80000000L) != 0 &&
             (style & (0x00080000L | 0x00030000L)) == 0 &&
-            (extendedStyle & (0x1L | 0x100L | 0x200L | 0x20000L)) == 0 && (extendedStyle & 0x80) != 0,
+            (extendedStyle & (0x1L | 0x200L | 0x20000L)) == 0 && (extendedStyle & 0x180) == 0x180,
             $"The {name} HWND lacks the required native DWM frame hints or has unwanted window controls (style {style:X}; extended {extendedStyle:X}).");
-        Require(GetWindowRect(hwnd, out var bounds), "The " + name + " outer frame could not be measured.");
-        Require(GetClientRect(hwnd, out var client), "The " + name + " client frame could not be measured.");
+        Check(GetWindowRect(hwnd, out var bounds), "The " + name + " outer frame could not be measured.");
+        Check(GetClientRect(hwnd, out var client), "The " + name + " client frame could not be measured.");
         var origin = new Point();
-        Require(ClientToScreen(hwnd, ref origin), "The " + name + " client origin could not be measured.");
-        Require(origin.X == bounds.Left && origin.Y == bounds.Top && client.Right == bounds.Right - bounds.Left && client.Bottom == bounds.Bottom - bounds.Top,
+        Check(ClientToScreen(hwnd, ref origin), "The " + name + " client origin could not be measured.");
+        Check(origin.X == bounds.Left && origin.Y == bounds.Top && client.Right == bounds.Right - bounds.Left && client.Bottom == bounds.Bottom - bounds.Top,
             $"The {name} content has an unwanted title/resize inset: window {bounds.Right - bounds.Left}×{bounds.Bottom - bounds.Top}, client {client.Right}×{client.Bottom}, offset {origin.X - bounds.Left},{origin.Y - bounds.Top}.");
         IntPtr region = CreateRectRgn(0, 0, 0, 0);
         try
         {
-            Require(region != IntPtr.Zero && GetWindowRgn(hwnd, region) == 0,
+            Check(region != IntPtr.Zero && GetWindowRgn(hwnd, region) == 0,
                 "The " + name + " still applies a hard-edged GDI window region, which disables native rounding.");
         }
         finally { if (region != IntPtr.Zero) DeleteObject(region); }
-        Require(DwmGetWindowAttribute(hwnd, 1, out int nonClientEnabled, sizeof(int)) == 0 && nonClientEnabled != 0,
+        Check(DwmGetWindowAttribute(hwnd, 1, out int nonClientEnabled, sizeof(int)) == 0 && nonClientEnabled != 0,
             "The " + name + " does not enable DWM non-client rendering.");
         if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000))
         {
-            Require(DwmGetWindowAttribute(hwnd, 33, out int corners, sizeof(int)) == 0 && corners == (overlay ? 2 : 3),
+            Check(DwmGetWindowAttribute(hwnd, 33, out int corners, sizeof(int)) == 0 && corners == (overlay ? 2 : 3),
                 "The " + name + " did not retain its native corner preference.");
-            Require(DwmGetWindowAttribute(hwnd, 20, out int dark, sizeof(int)) == 0 && dark == (name.EndsWith("Dark", StringComparison.Ordinal) ? 1 : 0),
+            Check(DwmGetWindowAttribute(hwnd, 20, out int dark, sizeof(int)) == 0 && dark == (name.EndsWith("Dark", StringComparison.Ordinal) ? 1 : 0),
                 "The " + name + " native frame did not follow its XAML theme.");
         }
         int x = bounds.Left + 2, y = bounds.Top + (bounds.Bottom - bounds.Top) / 2;
         var point = new IntPtr(unchecked((int)((uint)(ushort)x | ((uint)(ushort)y << 16))));
-        Require(SendMessage(hwnd, 0x0084, IntPtr.Zero, point).ToInt64() == (overlay ? -1 : 1),
+        Check(SendMessage(hwnd, 0x0084, IntPtr.Zero, point).ToInt64() == (overlay ? -1 : 1),
             "The " + name + " native border exposes an unexpected resize or activation hit target.");
+        Require(failures.Count == 0, string.Join(" | ", failures));
         Console.WriteLine($"Native frame {name}: DPI={GetDpiForWindow(hwnd)}, region=none, DWM non-client={nonClientEnabled}. Corner rendering follows Windows desktop/VM policy.");
     }
 

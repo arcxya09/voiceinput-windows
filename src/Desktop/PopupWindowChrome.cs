@@ -10,8 +10,8 @@ internal sealed class PopupWindowChrome : IDisposable
     private const long WsPopup = 0x80000000L;
     private const long WsCaption = 0x00C00000L, WsThickFrame = 0x00040000L;
     private const long WindowCommands = 0x00080000L | 0x00030000L;
-    private const long ExtendedFrameStyles = 0x00000001L | 0x00000100L | 0x00000200L | 0x00020000L;
-    private const long WsExToolWindow = 0x80, WsExAppWindow = 0x40000;
+    private const long ExtendedFrameStyles = 0x00000001L | 0x00000200L | 0x00020000L;
+    private const long WsExToolWindow = 0x80, WsExWindowEdge = 0x100, WsExAppWindow = 0x40000;
     private const long WsExNoActivate = 0x08000000, WsExTransparent = 0x20, WsExLayered = 0x80000;
     private const nuint SubclassId = 0x56494348;
     private readonly IntPtr hwnd;
@@ -78,7 +78,9 @@ internal sealed class PopupWindowChrome : IDisposable
 
     private long NormalizeExtendedStyle(long style)
     {
-        style = (style | WsExToolWindow) & ~(ExtendedFrameStyles | WsExAppWindow);
+        // Keep the native palette-window edge alongside DWM frame styles.
+        // Remove only the additional dialog, client and static 3D edges.
+        style = (style | WsExToolWindow | WsExWindowEdge) & ~(ExtendedFrameStyles | WsExAppWindow);
         return clickThrough
             ? style | WsExNoActivate | WsExTransparent | WsExLayered
             : style & ~(WsExNoActivate | WsExTransparent | WsExLayered);
