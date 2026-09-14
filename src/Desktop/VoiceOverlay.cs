@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Runtime.InteropServices;
 using Microsoft.UI;
 using Microsoft.UI.Windowing;
@@ -16,7 +15,8 @@ namespace RealtimeTranscription.Desktop;
 public sealed class VoiceOverlay : Window
 {
     private const double WidthDip = 360, HeightDip = 76, BottomMarginDip = 24;
-    private readonly TextBlock title, preview, elapsed, warning, measure;
+    private readonly TextBlock title, preview, elapsed, warning;
+    private readonly TailPreviewPanel previewLine;
     private readonly Border root;
     private readonly Grid surface;
     private readonly PopupWindowChrome chrome;
@@ -53,7 +53,7 @@ public sealed class VoiceOverlay : Window
         preview.TextAlignment = TextAlignment.Center;
         preview.HorizontalAlignment = HorizontalAlignment.Stretch;
         preview.TextTrimming = TextTrimming.None;
-        measure = Label("", preview.FontSize, white);
+        previewLine = new TailPreviewPanel(preview) { HorizontalAlignment = HorizontalAlignment.Stretch };
 
         // Equal side columns keep the status on the true centreline even when
         // the timer grows or the save-warning badge replaces the audio meter.
@@ -75,18 +75,17 @@ public sealed class VoiceOverlay : Window
         rows = new Grid { RowSpacing = 4 };
         rows.RowDefinitions.Add(new RowDefinition { Height = new GridLength(22) });
         rows.RowDefinitions.Add(new RowDefinition { Height = new GridLength(22) });
-        Grid.SetRow(preview, 1);
-        rows.Children.Add(heading); rows.Children.Add(preview);
+        Grid.SetRow(previewLine, 1);
+        rows.Children.Add(heading); rows.Children.Add(previewLine);
         root = new Border
         {
             Name = "OverlayRoot", RequestedTheme = ElementTheme.Default,
-            Background = Brush(24, 31, 42), BorderBrush = Brush(67, 80, 96),
-            BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(14),
+            Background = Brush(24, 31, 42),
+            BorderThickness = new Thickness(0), CornerRadius = new CornerRadius(0),
             Padding = new Thickness(16, 12, 16, 12), Child = rows,
             IsHitTestVisible = false
         };
-        // Fill the composition backing as well as the rounded border. Otherwise
-        // its antialiased corners can blend with WinUI's black default surface.
+        // One opaque XAML surface; DWM alone draws the outer outline and corners.
         surface = new Grid { Background = root.Background };
         surface.Children.Add(root);
         Content = surface;
@@ -100,16 +99,16 @@ public sealed class VoiceOverlay : Window
         AppWindow.SetPresenter(presenter);
         AppWindow.IsShownInSwitchers = false;
 
-        chrome = new PopupWindowChrome(hwnd, 14, clickThrough: true);
+        chrome = new PopupWindowChrome(hwnd, clickThrough: true);
+        ApplyAccessibility();
         windowProc = WindowProc;
         SetWindowSubclass(hwnd, windowProc, 1, 0);
-        root.Loaded += (_, _) => { Position(); FitPreview(); };
+        root.Loaded += (_, _) => { Position(); UpdatePreview(); };
         uiSettings.TextScaleFactorChanged += SystemAppearanceChanged;
         uiSettings.ColorValuesChanged += SystemAppearanceChanged;
         // AccessibilitySettings.HighContrastChanged cannot be registered on
         // some unpackaged desktops (ERROR_NOT_FOUND). Read its supported state
         // property when native setting/color/theme broadcasts arrive instead.
-        preview.SizeChanged += (_, _) => FitPreview();
         hide.Tick += (_, _) =>
         {
             hide.Stop();
@@ -132,7 +131,8 @@ public sealed class VoiceOverlay : Window
         startedAt = Environment.TickCount64;
         dismissPending = false;
         SetMeter(0, true);
-        Update("准备麦克风…");
+        previewSource = "";
+        Update("准备麦克风…", text: "");
     }
 
     public void SetMeter(float value, bool recording)
@@ -154,13 +154,14 @@ public sealed class VoiceOverlay : Window
         else if (startedAt == 0) elapsed.Text = "";
     }
 
-    public void Update(string status, string text = "", bool dismiss = false)
+    public void Update(string status, string? text = null, bool dismiss = false)
     {
         if (closed) return;
         dismissPending = dismiss;
         title.Text = UiPresentation.LatestText(status ?? "", 36);
-        previewSource = UiPresentation.LatestText(text ?? "", 80);
-        FitPreview();
+        // Status-only notifications must preserve the latest recognized words.
+        if (text != null) previewSource = UiPresentation.LatestText(text, 80);
+        UpdatePreview();
         hide.Stop();
         if (dismiss) SetMeter(0, false);
         if (targetMonitor == IntPtr.Zero) targetMonitor = MonitorFromWindow(GetForegroundWindow(), 2);
@@ -196,24 +197,11 @@ public sealed class VoiceOverlay : Window
         else AppWindow.Hide();
     }
 
-    private void FitPreview()
+    private void UpdatePreview()
     {
         if (closed) return;
-        string source = previewSource.Length == 0 ? "说话时会在这里显示文字" : previewSource;
-        // Measure a separate native TextBlock so the displayed line is never
-        // constrained while fitting. Trim whole graphemes from the beginning,
-        // preserving the newest spoken words, combining marks and emoji.
-        double available = preview.ActualWidth > 1 ? preview.ActualWidth : accessibleWidthDip - 34;
-        var starts = StringInfo.ParseCombiningCharacters(source);
-        string fitted = source;
-        for (int skip = 0; skip <= starts.Length; skip++)
-        {
-            fitted = skip == 0 ? source : skip < starts.Length ? "…" + source[starts[skip]..] : "…";
-            measure.Text = fitted;
-            measure.Measure(new Size(double.PositiveInfinity, accessibleHeightDip));
-            if (measure.DesiredSize.Width <= available || skip == starts.Length) break;
-        }
-        if (preview.Text != fitted) preview.Text = fitted;
+        previewLine.Text = previewSource.Length > 0 ? previewSource
+            : dismissPending ? "本轮尚未识别到文字" : "说话时会在这里显示文字";
         preview.Opacity = previewSource.Length == 0 && !accessibility.HighContrast
             ? root.ActualTheme == ElementTheme.Dark ? .55 : .72 : 1;
     }
@@ -227,7 +215,7 @@ public sealed class VoiceOverlay : Window
             if (closed) return;
             ApplyAccessibility();
             Position();
-            FitPreview();
+            UpdatePreview();
         });
     }
 
@@ -248,8 +236,9 @@ public sealed class VoiceOverlay : Window
         var foreground = highContrast ? new SolidColorBrush(uiSettings.GetColorValue(UIColorType.Foreground)) : dark ? Brush(241, 245, 249) : Brush(24, 39, 57);
         root.Background = highContrast ? new SolidColorBrush(uiSettings.GetColorValue(UIColorType.Background)) : dark ? Brush(24, 31, 42) : Brush(249, 251, 253);
         surface.Background = root.Background;
-        root.BorderBrush = highContrast ? foreground : dark ? Brush(67, 80, 96) : Brush(187, 199, 211);
-        title.Foreground = preview.Foreground = measure.Foreground = foreground;
+        chrome?.UpdateAppearance(dark, highContrast, foreground.Color);
+        title.Foreground = preview.Foreground = foreground;
+        previewLine.InvalidateTextMetrics();
         elapsed.Foreground = highContrast ? foreground : dark ? Brush(157, 175, 193) : Brush(85, 105, 124);
         warning.Foreground = highContrast ? foreground : dark ? Brush(255, 202, 119) : Brush(137, 74, 0);
         foreach (var bar in levels) bar.Background = highContrast ? foreground : dark ? Brush(104, 219, 186) : Brush(0, 119, 95);
@@ -289,7 +278,6 @@ public sealed class VoiceOverlay : Window
             int left = info.Work.Left + (workWidth - width) / 2;
             int top = Math.Max(info.Work.Top, info.Work.Bottom - height - (int)Math.Round(BottomMarginDip * scale));
             SetWindowPos(hwnd, new IntPtr(-1), left, top, 0, 0, 0x0011);
-            chrome.UpdateRegion();
         }
         finally { positioning = false; }
     }
@@ -310,7 +298,7 @@ public sealed class VoiceOverlay : Window
                 if (closed) return;
                 ApplyAccessibility();
                 Position();
-                FitPreview();
+                UpdatePreview();
             })) repositionQueued = false;
         }
         return result;

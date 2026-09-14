@@ -73,6 +73,18 @@ jobs:
             artifacts/build-output.log
             artifacts/SHA256SUMS.txt
           if-no-files-found: error
+      - name: Expose compact desktop captures for review
+        if: ${{ always() && github.event_name == 'pull_request' }}
+        shell: pwsh
+        run: |
+          # Small isolated-fixture images can be reviewed through read-only job logs.
+          foreach ($file in @('windows-frames.png', 'windows-overlay.png')) {
+            if ((Test-Path -LiteralPath $file) -and (Get-Item -LiteralPath $file).Length -lt 262144) {
+              Write-Host "::group::Desktop capture $file"
+              Write-Host ("VOICEINPUT_CAPTURE:" + $file + ":" + [Convert]::ToBase64String([IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $file))))
+              Write-Host "::endgroup::"
+            }
+          }
       - name: Preserve generated dependency locks
         if: always() && inputs.refresh_dependency_locks == true
         uses: actions/upload-artifact@v4
