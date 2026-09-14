@@ -6,6 +6,7 @@ using Windows.Graphics;
 using Windows.Storage.Pickers;
 using RealtimeTranscription.Desktop.Input;
 using RealtimeTranscription.Core;
+using RealtimeTranscription.Infrastructure;
 
 namespace RealtimeTranscription.Desktop;
 
