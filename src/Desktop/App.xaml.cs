@@ -27,14 +27,32 @@ public partial class App : Microsoft.UI.Xaml.Application
             Exit();
             return;
         }
+        if (StartupServiceSmoke.IsStartupSmoke(commandLine))
+        {
+            Environment.ExitCode = await StartupServiceSmoke.RunStartupAsync(commandLine);
+            Exit();
+            return;
+        }
 
         string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RealtimeTranscription");
         var controller = new AppController(folder);
-        MainWindow = new MainWindow(controller);
-        MainWindow.Activate();
+        MainWindow = CreateWindowForLaunch(controller, Program.IsStartupLaunch);
+        string? startupError = null;
         try { await controller.InitializeAsync(); }
-        catch { await ShowErrorAsync("配置载入未完成，请检查设置。本地数据已保留。", "启动"); }
+        catch
+        {
+            startupError = "配置载入未完成，请检查设置。本地数据已保留。";
+            if (!Program.IsStartupLaunch) await ShowErrorAsync(startupError, "启动");
+        }
         MainWindow.Ready();
+        if (Program.IsStartupLaunch && startupError != null) MainWindow.NotifyStartupError(startupError);
+    }
+
+    internal static MainWindow CreateWindowForLaunch(AppController controller, bool startupLaunch)
+    {
+        var window = new MainWindow(controller);
+        if (!startupLaunch) window.Activate();
+        return window;
     }
 
     private async Task ShowErrorAsync(string message, string title)

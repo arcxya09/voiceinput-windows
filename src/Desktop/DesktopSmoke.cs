@@ -29,6 +29,7 @@ public static class DesktopSmoke
         var checks = new List<string>();
         var errors = new List<string>();
         var captures = new List<object>();
+        var desktopImages = new List<Pixels>();
         MainWindow? window = null;
         VoiceOverlay? overlay = null;
         TrayMenuWindow? trayMenu = null;
@@ -50,11 +51,14 @@ public static class DesktopSmoke
             var credentials = new SettingsStore(folder, new WindowsProtector()).LoadCredentials();
             Require(credentials == new Credentials("SMOKE_LOCAL_ONLY", "SMOKE_LOCAL_ONLY"), "Windows DPAPI credential round-trip failed.");
             checks.Add("Windows DPAPI credentials and SQLite initialized in an isolated temporary directory");
+            checks.AddRange(StartupServiceSmoke.RunIsolatedChecks());
 
             window = new MainWindow(controller);
             window.Activate();
             window.AppWindow.Resize(new SizeInt32(1040, 760));
             await LayoutAsync(window);
+            CheckMainWindowFrame(WinRT.Interop.WindowNative.GetWindowHandle(window));
+            checks.Add("Main window retains its native resizable frame and taskbar system menu");
 
             const string text = "离线界面验收：JUNA 测量 12C(α,γ)16O。\r\n\r\n第二段核对完整正文。";
             var session = new SessionData { Title = "离线界面验收", WholePolishState = "Fallback", DeliveryState = "NotRequested" };
@@ -167,6 +171,37 @@ public static class DesktopSmoke
             vocabulary.SelectedIndex = 0;
             checks.Add("All five WinUI navigation pages and every native vocabulary tab render actual content");
 
+            // Exercise the actual WinUI layout at a narrow supported width.
+            // This is a resized-window check at the runner's current DPI, not
+            // a claim of physical mixed-DPI monitor coverage.
+            double mainScale = Math.Max(96, GetDpiForWindow(WinRT.Interop.WindowNative.GetWindowHandle(window))) / 96.0;
+            var responsiveImages = new List<Pixels>();
+            foreach (var size in new[] { (Width: 700, Height: 620), (Width: 600, Height: 420) })
+            {
+                window.AppWindow.Resize(new SizeInt32((int)Math.Round(size.Width * mainScale), (int)Math.Round(size.Height * mainScale)));
+                for (int i = 0; i < pageNames.Length; i++)
+                {
+                    window.ShowPage(i);
+                    await LayoutAsync(window);
+                    responsiveImages.Add(await CaptureAsync((FrameworkElement)window.Content));
+                    await SaveContactSheetAsync(EvidencePath(report, "responsive"), responsiveImages, 2);
+                    CheckHorizontalLayout(Find<FrameworkElement>(window, pageNames[i]), (FrameworkElement)window.Content, $"{pageNames[i]} at {size.Width}×{size.Height}");
+                }
+                window.ShowPage(2);
+                for (int i = 0; i < vocabulary.TabItems.Count; i++)
+                {
+                    vocabulary.SelectedIndex = i;
+                    await LayoutAsync(window);
+                    var tab = (TabViewItem)vocabulary.SelectedItem;
+                    CheckHorizontalLayout((FrameworkElement)tab.Content, (FrameworkElement)window.Content, $"Vocabulary tab {i} at {size.Width}×{size.Height}");
+                    if (i > 0) responsiveImages.Add(await CaptureAsync((FrameworkElement)window.Content));
+                }
+                vocabulary.SelectedIndex = 0;
+            }
+            await SaveContactSheetAsync(EvidencePath(report, "responsive"), responsiveImages, 2);
+            vocabulary.SelectedIndex = 0;
+            checks.Add("All five native pages and three vocabulary tabs remain inside the horizontal viewport at 700 by 620 and the supported minimum 600 by 420 DIPs");
+
             // Exercise a tray-origin dialog while its owner is hidden, including
             // the production owner restore, XamlRoot and modal queue. Change only
             // the editor, then invoke Cancel; the repository must remain unchanged.
@@ -194,6 +229,8 @@ public static class DesktopSmoke
             var dialogCapture = await CaptureAsync(termDialog);
             pageImages.Add(dialogCapture);
             captures.Add(new { name = "TermEditorContentDialog", width = dialogCapture.Width, height = dialogCapture.Height });
+            Require(termDialog.ActualWidth <= ((FrameworkElement)window.Content).ActualWidth && termDialog.ActualHeight <= ((FrameworkElement)window.Content).ActualHeight,
+                "The native dialog is larger than its narrow owner viewport.");
             var cancelButton = Visuals<Button>(termDialog).FirstOrDefault(button => button.Content?.ToString() == "取消")
                 ?? throw new InvalidOperationException("The native term editor has no visible Cancel button.");
             var cancelPeer = FrameworkElementAutomationPeer.CreatePeerForElement(cancelButton) ?? new ButtonAutomationPeer(cancelButton);
@@ -202,6 +239,8 @@ public static class DesktopSmoke
             Require(await editing.WaitAsync(TimeSpan.FromSeconds(6)) == null, "Cancel unexpectedly accepted the term editor changes.");
             Require(!Dialogs.IsOpen && controller.Terms.Single() == originalTerm, "Cancel changed the term or failed to release the modal queue.");
             checks.Add("Production ContentDialog restores its hidden owner, renders native fields on the owner XamlRoot, and cancels edits without changing the lexicon");
+            window.AppWindow.Resize(new SizeInt32(1040, 760));
+            await LayoutAsync(window);
 
             // The native menu is tested independently of the Shell icon. Its
             // injected callback records commands instead of touching clipboard,
@@ -217,6 +256,15 @@ public static class DesktopSmoke
             Require(menu.IsOpen && menu.AppWindow.IsVisible && commands.Count == 0, "Opening the native tray menu invoked a command or failed to show it.");
             IntPtr menuHwnd = WinRT.Interop.WindowNative.GetWindowHandle(menu);
             CheckTrayBounds(menuHwnd);
+            foreach (var theme in new[] { ElementTheme.Light, ElementTheme.Dark })
+            {
+                ((FrameworkElement)menu.Content).RequestedTheme = theme;
+                await LayoutAsync(menu);
+                desktopImages.Add(CaptureDesktopWindow(menuHwnd));
+                await SaveContactSheetAsync(EvidencePath(report, "frames"), desktopImages, 2);
+                CheckPopupNativeFrame(menuHwnd, "tray " + theme);
+                CheckPopupSurfaceOnDesktop(menuHwnd, Find<Border>(menu, "TrayMenuRoot"), "tray " + theme);
+            }
             Require(window.AppWindow.IsVisible && GetWindowRect(mainHwnd, out var managerWithMenu) && managerWithMenu.Equals(managerBefore),
                 "Opening the tray menu changed the main window's visibility or bounds.");
             var menuCapture = await CaptureAsync((FrameworkElement)menu.Content);
@@ -260,7 +308,15 @@ public static class DesktopSmoke
             Require(hwnd != IntPtr.Zero && (style & 0x08000000) != 0 && (style & 0x20) != 0, "The voice overlay is missing its non-activation or pointer pass-through safeguards.");
             Require(foreground == IntPtr.Zero || GetForegroundWindow() == foreground, "The voice overlay changed foreground focus.");
             var original = CheckOverlayBounds(hwnd);
-            CheckOverlayVisibleOnDesktop(overlay, original);
+            foreach (var theme in new[] { ElementTheme.Light, ElementTheme.Dark })
+            {
+                ((FrameworkElement)overlay.Content).RequestedTheme = theme;
+                await LayoutAsync(overlay);
+                desktopImages.Add(CaptureDesktopWindow(hwnd));
+                await SaveContactSheetAsync(EvidencePath(report, "frames"), desktopImages, 2);
+                CheckPopupNativeFrame(hwnd, "overlay " + theme);
+                CheckOverlayVisibleOnDesktop(overlay, original);
+            }
             var preview = Find<TextBlock>(overlay, "OverlayPreview");
             string suffix = preview.Text.TrimStart('…');
             Require(preview.TextWrapping == TextWrapping.NoWrap && preview.ActualHeight <= 26, "The live preview grew beyond one line.");
@@ -268,6 +324,7 @@ public static class DesktopSmoke
             int boundary = longText.Length - suffix.Length;
             Require(StringInfo.ParseCombiningCharacters(longText).Contains(boundary), "The compact preview split a Unicode grapheme.");
             checks.Add("Actual overlay HWND is visible on the desktop, preserves focus, passes pointers through, and is centered at 360 by 76 DIPs");
+            checks.Add("Tray and overlay outer HWND frames have no caption, resize border or inset client area; light and dark composed-desktop captures include surrounding pixels");
             checks.Add("Long live previews stay on one line and retain complete Unicode graphemes at the transcript tail");
 
             var overlayImages = new List<Pixels> { await CaptureAsync((FrameworkElement)overlay.Content) };
@@ -286,7 +343,7 @@ public static class DesktopSmoke
             Require(Find<TextBlock>(overlay, "OverlayWarning").Visibility == Visibility.Visible, "The persistent save warning is hidden.");
             Require(foreground == IntPtr.Zero || GetForegroundWindow() == foreground, "An overlay state transition changed foreground focus.");
             overlayImages.Add(await CaptureAsync((FrameworkElement)overlay.Content));
-            await SaveContactSheetAsync(Path.Combine(Path.GetDirectoryName(report)!, "windows-overlay.png"), overlayImages, columns: 1);
+            await SaveContactSheetAsync(EvidencePath(report, "overlay"), overlayImages, columns: 1);
             checks.Add("Listening, processing, complete and save-warning overlays captured without expanding the window or taking focus");
             overlay.Clear();
         }
@@ -319,6 +376,41 @@ public static class DesktopSmoke
     }
 
     private static string CanonicalLines(string text) => text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
+
+    private static string EvidencePath(string report, string kind)
+    {
+        string stem = Path.GetFileNameWithoutExtension(report);
+        if (stem.EndsWith("-smoke", StringComparison.Ordinal)) stem = stem[..^6];
+        return Path.Combine(Path.GetDirectoryName(report)!, stem + "-" + kind + ".png");
+    }
+
+    private static void CheckHorizontalLayout(FrameworkElement page, FrameworkElement root, string name)
+    {
+        foreach (var control in Visuals<FrameworkElement>(page).Where(element =>
+            element is Button or ComboBox or TextBox or PasswordBox))
+        {
+            if (control.ActualWidth <= 0 || control.ActualHeight <= 0 || !IsVisibleWithin(control, page)) continue;
+            var bounds = control.TransformToVisual(root).TransformBounds(new Windows.Foundation.Rect(0, 0, control.ActualWidth, control.ActualHeight));
+            Require(bounds.Left >= -.5 && bounds.Right <= root.ActualWidth + .5,
+                $"{name}: {control.Name} ({control.GetType().Name}) is horizontally clipped ({bounds.Left:F2}–{bounds.Right:F2}, window {root.ActualWidth:F2} DIPs).");
+        }
+        foreach (var scroll in Visuals<ScrollViewer>(page))
+        {
+            if (scroll.ViewportWidth <= 0 || !IsVisibleWithin(scroll, page) || scroll.HorizontalScrollMode != ScrollMode.Disabled) continue;
+            Require(scroll.ScrollableWidth <= 1.5,
+                $"{name}: a disabled horizontal viewport still overflows by {scroll.ScrollableWidth:F2} DIPs.");
+        }
+    }
+
+    private static bool IsVisibleWithin(FrameworkElement element, FrameworkElement root)
+    {
+        for (DependencyObject? current = element; current != null; current = VisualTreeHelper.GetParent(current))
+        {
+            if (current is FrameworkElement view && view.Visibility != Visibility.Visible) return false;
+            if (ReferenceEquals(current, root)) return true;
+        }
+        return false;
+    }
 
     private static Task UntilAsync(Func<bool> condition, string failure) => UntilAsync(condition, () => failure);
 
@@ -424,6 +516,95 @@ public static class DesktopSmoke
         return rectangle;
     }
 
+    private static void CheckMainWindowFrame(IntPtr hwnd)
+    {
+        long style = GetWindowLongPtr(hwnd, -16).ToInt64();
+        const long required = 0x00C00000L | 0x00040000L | 0x00080000L | 0x00020000L | 0x00010000L;
+        Require((style & required) == required && GetSystemMenu(hwnd, false) != IntPtr.Zero,
+            "The main window lost its native caption, resize controls, or taskbar system menu.");
+    }
+
+    private static void CheckPopupNativeFrame(IntPtr hwnd, string name)
+    {
+        long style = GetWindowLongPtr(hwnd, -16).ToInt64();
+        long extendedStyle = GetWindowLongPtr(hwnd, -20).ToInt64();
+        Require((style & (0x00C00000L | 0x00040000L | 0x00080000L)) == 0 && (style & 0x80000000L) != 0 &&
+            (extendedStyle & (0x1L | 0x100L | 0x200L | 0x20000L)) == 0 && (extendedStyle & 0x80) != 0,
+            $"The {name} native HWND still has an OS caption, resize border, or edge (style {style:X}; extended {extendedStyle:X}).");
+        Require(GetWindowRect(hwnd, out var bounds), "The " + name + " outer frame could not be measured.");
+        Require(GetClientRect(hwnd, out var client), "The " + name + " client frame could not be measured.");
+        var origin = new Point();
+        Require(ClientToScreen(hwnd, ref origin), "The " + name + " client origin could not be measured.");
+        Require(origin.X == bounds.Left && origin.Y == bounds.Top && client.Right == bounds.Right - bounds.Left && client.Bottom == bounds.Bottom - bounds.Top,
+            $"The {name} content is inset by a non-client frame: window {bounds.Right - bounds.Left}×{bounds.Bottom - bounds.Top}, client {client.Right}×{client.Bottom}, offset {origin.X - bounds.Left},{origin.Y - bounds.Top}.");
+        IntPtr region = CreateRectRgn(0, 0, 0, 0);
+        try
+        {
+            Require(region != IntPtr.Zero && GetWindowRgn(hwnd, region) > 1 && !PtInRegion(region, 0, 0) && PtInRegion(region, client.Right / 2, client.Bottom / 2),
+                "The " + name + " does not have the intended rounded native window region.");
+        }
+        finally { if (region != IntPtr.Zero) DeleteObject(region); }
+    }
+
+    private static Pixels CaptureDesktopWindow(IntPtr hwnd)
+    {
+        Require(GetWindowRect(hwnd, out var frame), "The desktop capture window bounds could not be read.");
+        int padding = Math.Max(12, (int)Math.Round(GetDpiForWindow(hwnd) / 96.0 * 16));
+        int virtualLeft = GetSystemMetrics(76), virtualTop = GetSystemMetrics(77);
+        int left = Math.Max(virtualLeft, frame.Left - padding), top = Math.Max(virtualTop, frame.Top - padding);
+        int right = Math.Min(virtualLeft + GetSystemMetrics(78), frame.Right + padding);
+        int bottom = Math.Min(virtualTop + GetSystemMetrics(79), frame.Bottom + padding);
+        int width = right - left, height = bottom - top;
+        Require(width > 0 && height > 0, "The desktop capture has empty bounds.");
+        IntPtr screen = GetDC(IntPtr.Zero), memory = IntPtr.Zero, bitmap = IntPtr.Zero, original = IntPtr.Zero;
+        try
+        {
+            Require(screen != IntPtr.Zero, "The composed desktop DC could not be opened.");
+            memory = CreateCompatibleDC(screen);
+            bitmap = CreateCompatibleBitmap(screen, width, height);
+            Require(memory != IntPtr.Zero && bitmap != IntPtr.Zero, "The desktop bitmap could not be allocated.");
+            original = SelectObject(memory, bitmap);
+            DwmFlush();
+            Require(BitBlt(memory, 0, 0, width, height, screen, left, top, 0x40CC0020), "The composed desktop window could not be copied.");
+            SelectObject(memory, original); original = IntPtr.Zero;
+            var header = new BitmapInfoHeader { Size = (uint)Marshal.SizeOf<BitmapInfoHeader>(), Width = width, Height = -height, Planes = 1, BitCount = 32 };
+            byte[] pixels = new byte[checked(width * height * 4)];
+            Require(GetDIBits(memory, bitmap, 0, (uint)height, pixels, ref header, 0) == height, "The composed desktop pixels could not be read.");
+            for (int i = 3; i < pixels.Length; i += 4) pixels[i] = 255;
+            return new Pixels(width, height, pixels);
+        }
+        finally
+        {
+            if (original != IntPtr.Zero && memory != IntPtr.Zero) SelectObject(memory, original);
+            if (bitmap != IntPtr.Zero) DeleteObject(bitmap);
+            if (memory != IntPtr.Zero) DeleteDC(memory);
+            if (screen != IntPtr.Zero) ReleaseDC(IntPtr.Zero, screen);
+        }
+    }
+
+    private static void CheckPopupSurfaceOnDesktop(IntPtr hwnd, Border root, string name)
+    {
+        Require(GetWindowRect(hwnd, out var frame), "The " + name + " visible bounds could not be read.");
+        Require(root.Background is SolidColorBrush, "The " + name + " surface has no opaque background brush.");
+        var expected = ((SolidColorBrush)root.Background).Color;
+        int inset = Math.Max(3, (int)Math.Round(GetDpiForWindow(hwnd) / 96.0 * 4));
+        int width = frame.Right - frame.Left, height = frame.Bottom - frame.Top;
+        IntPtr dc = GetDC(IntPtr.Zero);
+        Require(dc != IntPtr.Zero, "The composed " + name + " desktop could not be inspected.");
+        try
+        {
+            DwmFlush();
+            foreach (var point in new[] { (width / 2, inset), (inset, height / 2), (width - inset, height / 2) })
+            {
+                uint color = GetPixel(dc, frame.Left + point.Item1, frame.Top + point.Item2);
+                Require(color != uint.MaxValue && Math.Abs((int)(color & 255) - expected.R) <= 8 &&
+                    Math.Abs((int)((color >> 8) & 255) - expected.G) <= 8 && Math.Abs((int)((color >> 16) & 255) - expected.B) <= 8,
+                    "The actual desktop does not show the " + name + " surface at its outer content edge.");
+            }
+        }
+        finally { ReleaseDC(IntPtr.Zero, dc); }
+    }
+
     private static void CheckTrayBounds(IntPtr hwnd)
     {
         Require(GetWindowRect(hwnd, out var rectangle), "The native tray menu bounds could not be read.");
@@ -443,7 +624,7 @@ public static class DesktopSmoke
         // RenderTargetBitmap proves that the XAML tree rendered. Also inspect
         // the composed desktop: a broken native layered-window setup can leave
         // a perfectly valid XAML bitmap while the user sees an empty rectangle.
-        var expected = ((SolidColorBrush)((Border)overlay.Content).Background).Color;
+        var expected = ((SolidColorBrush)Find<Border>(overlay, "OverlayRoot").Background).Color;
         IntPtr dc = GetDC(IntPtr.Zero);
         Require(dc != IntPtr.Zero, "The composed desktop could not be inspected.");
         try
@@ -468,10 +649,20 @@ public static class DesktopSmoke
     }
 
     [StructLayout(LayoutKind.Sequential)] private struct Rect { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)] private struct Point { public int X, Y; }
+    [StructLayout(LayoutKind.Sequential)] private struct BitmapInfoHeader
+    {
+        public uint Size; public int Width, Height; public ushort Planes, BitCount; public uint Compression, SizeImage;
+        public int XPelsPerMeter, YPelsPerMeter; public uint ClrUsed, ClrImportant;
+    }
     [StructLayout(LayoutKind.Sequential)] private struct MonitorInfo { public int Size; public Rect Monitor, Work; public uint Flags; }
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] private static extern IntPtr GetWindowLongPtr(IntPtr window, int index);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetWindowRect(IntPtr window, out Rect rectangle);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetClientRect(IntPtr window, out Rect rectangle);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool ClientToScreen(IntPtr window, ref Point point);
+    [DllImport("user32.dll")] private static extern IntPtr GetSystemMenu(IntPtr window, [MarshalAs(UnmanagedType.Bool)] bool revert);
+    [DllImport("user32.dll")] private static extern int GetSystemMetrics(int index);
     [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr window, uint flags);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr window);
@@ -479,5 +670,15 @@ public static class DesktopSmoke
     [DllImport("user32.dll")] private static extern IntPtr GetDC(IntPtr window);
     [DllImport("user32.dll")] private static extern int ReleaseDC(IntPtr window, IntPtr dc);
     [DllImport("gdi32.dll")] private static extern uint GetPixel(IntPtr dc, int x, int y);
+    [DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleDC(IntPtr dc);
+    [DllImport("gdi32.dll")] private static extern IntPtr CreateRectRgn(int left, int top, int right, int bottom);
+    [DllImport("user32.dll")] private static extern int GetWindowRgn(IntPtr window, IntPtr region);
+    [DllImport("gdi32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool PtInRegion(IntPtr region, int x, int y);
+    [DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleBitmap(IntPtr dc, int width, int height);
+    [DllImport("gdi32.dll")] private static extern IntPtr SelectObject(IntPtr dc, IntPtr obj);
+    [DllImport("gdi32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool DeleteObject(IntPtr obj);
+    [DllImport("gdi32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool DeleteDC(IntPtr dc);
+    [DllImport("gdi32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool BitBlt(IntPtr destination, int x, int y, int width, int height, IntPtr source, int sourceX, int sourceY, uint operation);
+    [DllImport("gdi32.dll")] private static extern int GetDIBits(IntPtr dc, IntPtr bitmap, uint start, uint lines, [Out] byte[] bits, ref BitmapInfoHeader info, uint usage);
     [DllImport("dwmapi.dll")] private static extern int DwmFlush();
 }

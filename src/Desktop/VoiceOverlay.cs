@@ -8,6 +8,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using RealtimeTranscription.Core;
 using Windows.Foundation;
+using Windows.UI.ViewManagement;
 
 namespace RealtimeTranscription.Desktop;
 
@@ -17,6 +18,11 @@ public sealed class VoiceOverlay : Window
     private const double WidthDip = 360, HeightDip = 76, BottomMarginDip = 24;
     private readonly TextBlock title, preview, elapsed, warning, measure;
     private readonly Border root;
+    private readonly Grid surface;
+    private readonly PopupWindowChrome chrome;
+    private readonly Grid heading, rows;
+    private readonly UISettings uiSettings = new();
+    private readonly AccessibilitySettings accessibility = new();
     private readonly Border[] levels = new Border[5];
     private readonly DispatcherTimer hide = new() { Interval = TimeSpan.FromSeconds(3) };
     private readonly SubclassProc windowProc;
@@ -25,6 +31,7 @@ public sealed class VoiceOverlay : Window
     private long startedAt;
     private string previewSource = "", persistentWarning = "";
     private bool positioning, dismissPending, closed, repositionQueued;
+    private double accessibleWidthDip = WidthDip, accessibleHeightDip = HeightDip;
 
     public VoiceOverlay()
     {
@@ -50,7 +57,7 @@ public sealed class VoiceOverlay : Window
 
         // Equal side columns keep the status on the true centreline even when
         // the timer grows or the save-warning badge replaces the audio meter.
-        var heading = new Grid { Height = 22, ColumnSpacing = 8 };
+        heading = new Grid { Height = 22, ColumnSpacing = 8 };
         heading.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(58) });
         heading.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         heading.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(58) });
@@ -65,20 +72,26 @@ public sealed class VoiceOverlay : Window
         left.Children.Add(warning);
         Grid.SetColumn(title, 1); Grid.SetColumn(elapsed, 2);
         heading.Children.Add(left); heading.Children.Add(title); heading.Children.Add(elapsed);
-        var rows = new Grid { RowSpacing = 4 };
+        rows = new Grid { RowSpacing = 4 };
         rows.RowDefinitions.Add(new RowDefinition { Height = new GridLength(22) });
         rows.RowDefinitions.Add(new RowDefinition { Height = new GridLength(22) });
         Grid.SetRow(preview, 1);
         rows.Children.Add(heading); rows.Children.Add(preview);
         root = new Border
         {
-            Name = "OverlayRoot", RequestedTheme = ElementTheme.Dark,
+            Name = "OverlayRoot", RequestedTheme = ElementTheme.Default,
             Background = Brush(24, 31, 42), BorderBrush = Brush(67, 80, 96),
             BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(14),
             Padding = new Thickness(16, 12, 16, 12), Child = rows,
             IsHitTestVisible = false
         };
-        Content = root;
+        // Fill the composition backing as well as the rounded border. Otherwise
+        // its antialiased corners can blend with WinUI's black default surface.
+        surface = new Grid { Background = root.Background };
+        surface.Children.Add(root);
+        Content = surface;
+        ApplyAccessibility();
+        root.ActualThemeChanged += (_, _) => { if (!closed) ApplyAccessibility(); };
         hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
         var presenter = OverlappedPresenter.Create();
         presenter.IsResizable = false; presenter.IsMinimizable = false;
@@ -87,15 +100,13 @@ public sealed class VoiceOverlay : Window
         AppWindow.SetPresenter(presenter);
         AppWindow.IsShownInSwitchers = false;
 
-        // Layered + transparent makes mouse hit testing pass through to other
-        // processes. Keep alpha fully opaque: WinUI renders via composition and
-        // must not use a GDI colour key to fake a transparent XAML background.
-        long exStyle = GetWindowLongPtr(hwnd, -20).ToInt64();
-        SetWindowLongPtr(hwnd, -20, new IntPtr((exStyle | 0x08000000 | 0x80 | 0x20 | 0x80000) & ~0x40000L));
-        SetLayeredWindowAttributes(hwnd, 0, 255, 2);
+        chrome = new PopupWindowChrome(hwnd, 14, clickThrough: true);
         windowProc = WindowProc;
         SetWindowSubclass(hwnd, windowProc, 1, 0);
         root.Loaded += (_, _) => { Position(); FitPreview(); };
+        uiSettings.TextScaleFactorChanged += SystemAppearanceChanged;
+        uiSettings.ColorValuesChanged += SystemAppearanceChanged;
+        accessibility.HighContrastChanged += HighContrastChanged;
         preview.SizeChanged += (_, _) => FitPreview();
         hide.Tick += (_, _) =>
         {
@@ -106,6 +117,10 @@ public sealed class VoiceOverlay : Window
         {
             closed = true; hide.Stop();
             RemoveWindowSubclass(hwnd, windowProc, 1);
+            chrome.Dispose();
+            uiSettings.TextScaleFactorChanged -= SystemAppearanceChanged;
+            uiSettings.ColorValuesChanged -= SystemAppearanceChanged;
+            accessibility.HighContrastChanged -= HighContrastChanged;
         };
     }
 
@@ -187,18 +202,58 @@ public sealed class VoiceOverlay : Window
         // Measure a separate native TextBlock so the displayed line is never
         // constrained while fitting. Trim whole graphemes from the beginning,
         // preserving the newest spoken words, combining marks and emoji.
-        double available = preview.ActualWidth > 1 ? preview.ActualWidth : WidthDip - 34;
+        double available = preview.ActualWidth > 1 ? preview.ActualWidth : accessibleWidthDip - 34;
         var starts = StringInfo.ParseCombiningCharacters(source);
         string fitted = source;
         for (int skip = 0; skip <= starts.Length; skip++)
         {
             fitted = skip == 0 ? source : skip < starts.Length ? "…" + source[starts[skip]..] : "…";
             measure.Text = fitted;
-            measure.Measure(new Size(double.PositiveInfinity, HeightDip));
+            measure.Measure(new Size(double.PositiveInfinity, accessibleHeightDip));
             if (measure.DesiredSize.Width <= available || skip == starts.Length) break;
         }
         if (preview.Text != fitted) preview.Text = fitted;
-        preview.Opacity = previewSource.Length == 0 ? .55 : 1;
+        preview.Opacity = previewSource.Length == 0 && !accessibility.HighContrast
+            ? root.ActualTheme == ElementTheme.Dark ? .55 : .72 : 1;
+    }
+
+    private void HighContrastChanged(AccessibilitySettings sender, object args) => QueueAppearanceUpdate();
+    private void SystemAppearanceChanged(UISettings sender, object args) => QueueAppearanceUpdate();
+
+    private void QueueAppearanceUpdate()
+    {
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (closed) return;
+            ApplyAccessibility();
+            Position();
+            FitPreview();
+        });
+    }
+
+    private void ApplyAccessibility()
+    {
+        // Honor Windows text size without putting enlarged glyphs into the
+        // original fixed-height rows. The normal-size footprint stays 360x76.
+        double textScale = Math.Clamp(uiSettings.TextScaleFactor, 1, 2.25);
+        double rowHeight = Math.Ceiling(22 * textScale);
+        heading.Height = rowHeight;
+        foreach (var row in rows.RowDefinitions) row.Height = new GridLength(rowHeight);
+        heading.ColumnDefinitions[0].Width = heading.ColumnDefinitions[2].Width = new GridLength(58 * textScale);
+        accessibleWidthDip = WidthDip * Math.Min(textScale, 1.5);
+        accessibleHeightDip = HeightDip + 2 * (rowHeight - 22);
+
+        bool highContrast = accessibility.HighContrast;
+        bool dark = root.ActualTheme == ElementTheme.Dark;
+        var foreground = highContrast ? new SolidColorBrush(uiSettings.GetColorValue(UIColorType.Foreground)) : dark ? Brush(241, 245, 249) : Brush(24, 39, 57);
+        root.Background = highContrast ? new SolidColorBrush(uiSettings.GetColorValue(UIColorType.Background)) : dark ? Brush(24, 31, 42) : Brush(249, 251, 253);
+        surface.Background = root.Background;
+        root.BorderBrush = highContrast ? foreground : dark ? Brush(67, 80, 96) : Brush(187, 199, 211);
+        title.Foreground = preview.Foreground = measure.Foreground = foreground;
+        elapsed.Foreground = highContrast ? foreground : dark ? Brush(157, 175, 193) : Brush(85, 105, 124);
+        warning.Foreground = highContrast ? foreground : dark ? Brush(255, 202, 119) : Brush(137, 74, 0);
+        foreach (var bar in levels) bar.Background = highContrast ? foreground : dark ? Brush(104, 219, 186) : Brush(0, 119, 95);
+        preview.Opacity = highContrast || previewSource.Length > 0 ? 1 : dark ? .55 : .72;
     }
 
     private void Position()
@@ -221,8 +276,8 @@ public sealed class VoiceOverlay : Window
             double scale = (dpi == 0 ? 96 : dpi) / 96.0;
             int workWidth = Math.Max(1, info.Work.Right - info.Work.Left);
             int workHeight = Math.Max(1, info.Work.Bottom - info.Work.Top);
-            int width = Math.Min((int)Math.Round(WidthDip * scale), Math.Max(1, workWidth - (int)Math.Round(32 * scale)));
-            int height = Math.Min((int)Math.Round(HeightDip * scale), workHeight);
+            int width = Math.Min((int)Math.Round(accessibleWidthDip * scale), Math.Max(1, workWidth - (int)Math.Round(32 * scale)));
+            int height = Math.Min((int)Math.Round(accessibleHeightDip * scale), workHeight);
             SetWindowPos(hwnd, new IntPtr(-1), 0, 0, width, height, 0x0012);
             // Centre the actual HWND, not XAML's desired size; neither long text
             // nor an unsaved badge can change its footprint.
@@ -234,10 +289,7 @@ public sealed class VoiceOverlay : Window
             int left = info.Work.Left + (workWidth - width) / 2;
             int top = Math.Max(info.Work.Top, info.Work.Bottom - height - (int)Math.Round(BottomMarginDip * scale));
             SetWindowPos(hwnd, new IntPtr(-1), left, top, 0, 0, 0x0011);
-            // A native rounded region also works on Windows 10 and clips the
-            // rectangular composition surface without unsupported transparency.
-            IntPtr region = CreateRoundRectRgn(0, 0, width + 1, height + 1, (int)Math.Round(28 * scale), (int)Math.Round(28 * scale));
-            if (region != IntPtr.Zero && SetWindowRgn(hwnd, region, true) == 0) DeleteObject(region);
+            chrome.UpdateRegion();
         }
         finally { positioning = false; }
     }
@@ -278,12 +330,6 @@ public sealed class VoiceOverlay : Window
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr hwnd);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetWindowRect(IntPtr hwnd, out Rect rect);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int width, int height, uint flags);
-    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] private static extern IntPtr GetWindowLongPtr(IntPtr hwnd, int index);
-    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")] private static extern IntPtr SetWindowLongPtr(IntPtr hwnd, int index, IntPtr value);
-    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint key, byte alpha, uint flags);
-    [DllImport("user32.dll")] private static extern int SetWindowRgn(IntPtr hwnd, IntPtr region, [MarshalAs(UnmanagedType.Bool)] bool redraw);
-    [DllImport("gdi32.dll")] private static extern IntPtr CreateRoundRectRgn(int left, int top, int right, int bottom, int ellipseWidth, int ellipseHeight);
-    [DllImport("gdi32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool DeleteObject(IntPtr value);
     [DllImport("comctl32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SetWindowSubclass(IntPtr hwnd, SubclassProc callback, nuint id, nuint data);
     [DllImport("comctl32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool RemoveWindowSubclass(IntPtr hwnd, SubclassProc callback, nuint id);
     [DllImport("comctl32.dll")] private static extern IntPtr DefSubclassProc(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam);

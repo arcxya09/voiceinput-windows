@@ -106,13 +106,19 @@ public partial class MainWindow
         var batch=rows.Select(r=>r.ToTerm(scope,enable)).ToArray();
         if(batch.Length==0)throw new InvalidOperationException("请先勾选要导入的词条。");
         importingGenerated=true;ImportGeneratedButton.IsEnabled=false;
+        GeneratedTermsGrid.IsEnabled=GeneratedSelectAllButton.IsEnabled=GeneratedSelectNoneButton.IsEnabled=GeneratedEnableBox.IsEnabled=GenerationRequestPanel.IsEnabled=false;
         try
         {
             int added=await controller.ImportTermsAsync(batch,ignoreCase:true);
             foreach(var row in rows)row.Selected=false;RefreshGeneratedMatches();
             GenerationStatus.Text=$"已导入 {added} 个词条到{GenerationScopeName}，跳过 {batch.Length-added} 个重复项。"+(enable?"下一轮识别即可使用。":"可在“词库”页确认后启用。");
         }
-        finally{importingGenerated=false;RefreshGeneratedSelection();}
+        finally
+        {
+            importingGenerated=false;
+            GeneratedTermsGrid.IsEnabled=GeneratedSelectAllButton.IsEnabled=GeneratedSelectNoneButton.IsEnabled=GeneratedEnableBox.IsEnabled=GenerationRequestPanel.IsEnabled=true;
+            RefreshGeneratedSelection();
+        }
     });
     private async void ExtractAllHistory_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>
     {
@@ -143,4 +149,3 @@ public partial class MainWindow
     private void CancelHistory_Click(object sender,RoutedEventArgs e)
     {controller.CancelExtraction();CancelHistoryButton.IsEnabled=HistoryCancelButton.IsEnabled=false;HistoryExtractionStatus.Text="正在取消，已完成的批次保留。";}
 }
-

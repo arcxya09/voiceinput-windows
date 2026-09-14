@@ -24,8 +24,9 @@ public partial class MainWindow : Window
     private TranscriptSnapshot? pending;
     private CancellationTokenSource? search;
     private bool ready,updating,closed,shuttingDown,microphoneTesting;
-    private bool savingSettings,changingProject,changingLearning,updatingLearning;
-    private bool ManagementBusy=>Dialogs.IsOpen||pickerOpen||correctionBusy||extractingHistory||generatingTerms||importingGenerated||testingPrompt||microphoneTesting||savingSettings||changingProject||changingLearning||ptt?.Busy==true;
+    private bool savingSettings,changingProject,changingLearning,updatingLearning,testingConnection;
+    private bool ManagementOperationBusy=>Dialogs.IsOpen||pickerOpen||correctionBusy||extractingHistory||generatingTerms||importingGenerated||testingPrompt||testingConnection||microphoneTesting||savingSettings||changingProject||changingLearning;
+    private bool ManagementBusy=>ManagementOperationBusy||ptt?.Busy==true;
     private float level;
     public string CurrentProject=>controller.Settings.ProjectId;
     public MainWindow(AppController controller)
@@ -37,7 +38,7 @@ public partial class MainWindow : Window
         controller.CorrectionsUpdated+=()=>UI(async()=>{if(!shuttingDown&&controller.MemoryAvailable)await Safe(RefreshCorrections);});
         controller.Extracting+=v=>UI(()=>{ExtractButton.IsEnabled=!v;AllHistoryButton.IsEnabled=HistoryExtractAllButton.IsEnabled=!v;ExtractButton.Content=v?"正在整理…":"整理当前会话词条";});
         render.Tick+=(_,_)=>Render();render.Start();AppWindow.Closing+=ClosingWindow;
-        ConfigureWindow();
+        ConfigureWindow();InitializeStartupSettings();
         SystemEvents.PowerModeChanged+=PowerChanged;SystemEvents.SessionSwitch+=SessionChanged;
     }
     private void UI(Action fn){if(!closed)DispatcherQueue.TryEnqueue(()=>{if(!closed)fn();});}
@@ -50,24 +51,25 @@ public partial class MainWindow : Window
             ProjectsRefresh();RefreshTerms();
             if(controller.MemoryAvailable)
                 try{await RefreshCorrections();}catch(Exception e){CorrectionStatus.Text="纠错记录暂不可用："+AppController.SafeError(e);}
-            ptt=new(controller){CanStart=()=>!Dialogs.IsOpen&&!Volatile.Read(ref pickerOpen)&&!Volatile.Read(ref shuttingDown)&&Volatile.Read(ref trayMenu)?.IsOpen!=true};ptt.Notice+=text=>UI(()=>{overlay.Update(text,dismiss:true);StatusText.Text=text;});
+            ptt=new(controller){CanStart=()=>!ManagementOperationBusy&&!Volatile.Read(ref shuttingDown)&&Volatile.Read(ref trayMenu)?.IsOpen!=true};ptt.Notice+=text=>UI(()=>{overlay.Update(text,dismiss:true);StatusText.Text=text;});
             ptt.Listening+=active=>UI(()=>{if(active)overlay.BeginTurn();});
             await ptt.InitializeAsync();
             devices=new DeviceWatcher((id,isDefault)=>{if(ptt.Busy&&((isDefault&&controller.Settings.DeviceId=="")||(!isDefault&&controller.ActiveDeviceId==id))){ptt.Cancel("麦克风设备已变化，本轮停止，确认文字可复制。");controller.RequestStopCapture();}});ready=true;
-            if(controller.Keys.BailianKey.Length==0)ShowPage(3);
-            else if(controller.MemoryAvailable){Hide();tray?.ShowBalloonTip(2500,"语音输入法已就绪",controller.Settings.DictationOnly?$"按住 {UiPresentation.HotkeyName(controller.Settings.Hotkey)} 听写，完成后复制正文。":$"在文本框中按住 {UiPresentation.HotkeyName(controller.Settings.Hotkey)} 说话，松开输入。",Forms.ToolTipIcon.Info);}
+            CompleteStartupPresentation();
             pending=await controller.SnapshotAsync();
         }
-        catch(Exception e){ready=true;StatusText.Text=AppController.SafeError(e);await Dialogs.MessageAsync(this,"启动",AppController.SafeError(e));}
+        catch(Exception e){ready=true;StatusText.Text=AppController.SafeError(e);if(Program.IsStartupLaunch)NotifyStartupError(AppController.SafeError(e));else await Dialogs.MessageAsync(this,"启动",AppController.SafeError(e));}
     }
     private void Render()
     {
         ProjectBox.IsEnabled=!ManagementBusy;
+        SaveSettingsButton.IsEnabled=TestBailianButton.IsEnabled=TestDeepSeekButton.IsEnabled=!ManagementBusy;
+        RefreshSelectionActions();
         SessionLearningBox.IsEnabled=!ManagementBusy&&SessionLearningBox.Tag is string;
         var s=Interlocked.Exchange(ref pending,null);if(s!=null)lastSnapshot=s;RefreshLiveState();if(s==null)return;
         string body=TranscriptText.Render(s);if(!SameDisplayedText(OutputBox.Text,body)){bool follow=IsAtTranscriptEnd(OutputBox);OutputBox.Text=body;if(follow)ScrollTranscriptToEnd(OutputBox);}
         string preview=string.Join(" ",s.Segments.Where(x=>x.AsrState==AsrState.Partial).Select(x=>x.PartialText));
-        PreviewBox.Text=preview;ScrollTranscriptToEnd(PreviewBox);BodyCount.Text=$"本轮正文 · {JsonCodec.Count(body)} 字";StatusText.Text=s.Status;
+        if(!SameDisplayedText(PreviewBox.Text,preview)){bool follow=IsAtTranscriptEnd(PreviewBox);PreviewBox.Text=preview;if(follow)ScrollTranscriptToEnd(PreviewBox);}BodyCount.Text=$"本轮正文 · {JsonCodec.Count(body)} 字";StatusText.Text=s.Status;
         LexiconLiveStatus.Text=s.Session is {} session?$"本轮热词 {session.Hotwords.Count}/{session.EligibleHotwordCount} · {HotwordStateText(session.HotwordState)} · 保护词 {session.ProtectedTermCount} · 纠正 {session.AppliedCorrectionCount} 处":"尚无本轮词库记录";
         SaveLabel.Text=$"待润色 {s.Pending} · 未确认 {s.Segments.Count(x=>x.AsrState==AsrState.Unresolved)} · 未保存 {s.Unsaved} · {s.Session?.DeliveryReason}";
         updatingLearning=true;
@@ -104,7 +106,7 @@ public partial class MainWindow : Window
         tray.DoubleClick+=(_,_)=>UI(()=>{trayMenu.HideMenu();OpenManager();});
     }
     public void OpenManager(){Show();if(AppWindow.Presenter is OverlappedPresenter presenter)presenter.Restore();Activate();}
-    private void EnsureIdle(){if(correctionBusy)throw new InvalidOperationException("纠错学习操作尚未完成，请稍候。");if(savingSettings||changingProject||changingLearning)throw new InvalidOperationException("设置或项目切换正在保存，请稍候。");if(extractingHistory)throw new InvalidOperationException("全部历史词条提取尚未结束，请先取消或等待完成。");if(generatingTerms||importingGenerated)throw new InvalidOperationException("词库生成或导入尚未结束，请稍候或先取消生成。");if(testingPrompt)throw new InvalidOperationException("提示词试用尚未结束，请稍候。");if(microphoneTesting)throw new InvalidOperationException("麦克风测试尚未结束，请稍候。");if(ptt?.Busy==true)throw new InvalidOperationException("当前输入尚未完成，请松开快捷键并等待结果后再操作。");}
+    private void EnsureIdle(){if(correctionBusy)throw new InvalidOperationException("纠错学习操作尚未完成，请稍候。");if(savingSettings||changingProject||changingLearning)throw new InvalidOperationException("设置或项目切换正在保存，请稍候。");if(extractingHistory)throw new InvalidOperationException("全部历史词条提取尚未结束，请先取消或等待完成。");if(generatingTerms||importingGenerated)throw new InvalidOperationException("词库生成或导入尚未结束，请稍候或先取消生成。");if(testingPrompt)throw new InvalidOperationException("提示词试用尚未结束，请稍候。");if(testingConnection)throw new InvalidOperationException("连接测试尚未结束，请稍候。");if(microphoneTesting)throw new InvalidOperationException("麦克风测试尚未结束，请稍候。");if(ptt?.Busy==true)throw new InvalidOperationException("当前输入尚未完成，请松开快捷键并等待结果后再操作。");}
     private async Task Safe(Func<Task> fn){try{await fn();}catch(OperationCanceledException){StatusText.Text="操作已取消。";}catch(Exception e){await Dialogs.MessageAsync(this,"语音输入法",AppController.SafeError(e));}}
     private void ProjectsRefresh(){updating=true;ProjectBox.ItemsSource=controller.Projects.ToArray();ProjectBox.SelectedValue=CurrentProject;updating=false;RefreshGeneratedMatches();}
     private async void Project_Changed(object sender,SelectionChangedEventArgs e)
@@ -152,11 +154,19 @@ public partial class MainWindow : Window
     {
         search?.Cancel();search=new();var current=search;string? project=AllProjects.IsChecked==true?null:CurrentProject;
         DateTimeOffset? since=HistoryDays.SelectedIndex switch{1=>DateTimeOffset.UtcNow.AddDays(-7),2=>DateTimeOffset.UtcNow.AddDays(-30),_=>null};HistoryStatus.Text="正在检索…";
-        var hits=await controller.Repository.SearchAsync(project,HistoryQuery.Text.Trim(),since,current.Token);if(search!=current)return;
-        HistoryGrid.ItemsSource=hits;HistoryStatus.Text=$"找到 {hits.Count} 条记录"+(hits.Count==500?"（最多显示最近 500 条，请缩小筛选范围）":"");
+        try
+        {
+            var hits=await controller.Repository.SearchAsync(project,HistoryQuery.Text.Trim(),since,current.Token);if(search!=current)return;
+            string? selected=(HistoryGrid.SelectedItem as MemoryHit)?.Session.Id;
+            HistoryGrid.ItemsSource=hits;HistoryGrid.SelectedItem=hits.FirstOrDefault(hit=>hit.Session.Id==selected);
+            HistoryStatus.Text=$"找到 {hits.Count} 条记录"+(hits.Count==500?"（最多显示最近 500 条，请缩小筛选范围）":"");
+        }
+        catch(OperationCanceledException)when(current.IsCancellationRequested){if(search==current)HistoryStatus.Text="搜索已取消。";}
+        catch{if(search==current)HistoryStatus.Text="搜索未完成，请检查错误提示后重试。";throw;}
+        finally{if(search==current)search=null;current.Dispose();}
     });
     private void HistoryCancel_Click(object sender,RoutedEventArgs e)=>search?.Cancel();
-    private async void HistoryOpen_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>{EnsureIdle();if(HistoryGrid.SelectedItem is MemoryHit hit){await controller.LoadSessionAsync(hit.Session);ProjectsRefresh();ShowPage(0);}});
+    private async void HistoryOpen_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>{var hit=ResolveListAction<MemoryHit>(HistoryGrid,e);if(hit==null)return;EnsureIdle();await controller.LoadSessionAsync(hit.Session);ProjectsRefresh();ShowPage(0);});
     private async void HistoryExport_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>
     {
         if(HistoryGrid.SelectedItem is not MemoryHit hit)return;var file=await PickSaveAsync("语音输入记录.json",".json");if(file==null)return;
@@ -168,7 +178,10 @@ public partial class MainWindow : Window
     private void RefreshTerms()
     {
         if(TermsGrid==null||TermFilter==null)return;string query=TermQuery.Text.Trim();var items=controller.Terms.Where(t=>t.Text.Contains(query,StringComparison.OrdinalIgnoreCase)&&(TermFilter.SelectedIndex switch{1=>t.State==TermState.Enabled,2=>t.State==TermState.Candidate,3=>t.State==TermState.Disabled,_=>true})).OrderByDescending(t=>t.Pinned).ThenBy(t=>t.State).ThenBy(t=>t.Text).ToArray();
-        RefreshGeneratedMatches();TermsGrid.ItemsSource=items;TermsCount.Text=$"当前显示 {items.Length} 个 · 全局及本项目 {controller.Terms.Count} 个 · 下轮提交 {controller.NextHotwords().Count} 个 · 待确认 {controller.Terms.Count(t=>t.State==TermState.Candidate)} 个 · "+(controller.Settings.DynamicLexicon?"动态排序已开启":"使用手动权重");
+        var selected=TermsGrid.SelectedItems.Cast<TermData>().Select(t=>t.Id).ToHashSet();
+        RefreshGeneratedMatches();TermsGrid.ItemsSource=items;
+        foreach(var item in items)if(selected.Contains(item.Id))TermsGrid.SelectedItems.Add(item);
+        RefreshSelectionActions();TermsCount.Text=$"当前显示 {items.Length} 个 · 全局及本项目 {controller.Terms.Count} 个 · 下轮提交 {controller.NextHotwords().Count} 个 · 待确认 {controller.Terms.Count(t=>t.State==TermState.Candidate)} 个 · "+(controller.Settings.DynamicLexicon?"动态排序已开启":"使用手动权重");
     }
     private void TermFilter_Changed(object sender,RoutedEventArgs e){if(ready)RefreshTerms();}
     private async void TermAdd_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>{var term=await Dialogs.EditTermAsync(this,new(){Scope=CurrentProject});if(term!=null)await controller.SaveTermAsync(term);});
@@ -249,8 +262,19 @@ public partial class MainWindow : Window
     }
     private async void SettingsSave_Click(object sender,RoutedEventArgs e)=>await Safe(SaveSettings);
     private async void RetrySave_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>{EnsureIdle();await controller.RetrySaveAsync();});
-    private async void TestBailian_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>{await SaveSettings();StatusText.Text="正在测试百炼…";await controller.TestBailianAsync();StatusText.Text="百炼短任务测试完成。";});
-    private async void TestDeepSeek_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>{await SaveSettings();StatusText.Text="正在测试 DeepSeek…";await controller.TestDeepSeekAsync();StatusText.Text="DeepSeek 请求测试完成。";});
+    private async Task TestConnectionAsync(bool bailian)
+    {
+        await SaveSettings();testingConnection=true;
+        try
+        {
+            StatusText.Text=bailian?"正在测试百炼…":"正在测试 DeepSeek…";
+            if(bailian)await controller.TestBailianAsync();else await controller.TestDeepSeekAsync();
+            StatusText.Text=bailian?"百炼短任务测试完成。":"DeepSeek 请求测试完成。";
+        }
+        finally{testingConnection=false;}
+    }
+    private async void TestBailian_Click(object sender,RoutedEventArgs e)=>await Safe(()=>TestConnectionAsync(true));
+    private async void TestDeepSeek_Click(object sender,RoutedEventArgs e)=>await Safe(()=>TestConnectionAsync(false));
     private async void DeleteProject_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>{EnsureIdle();if(!await Dialogs.ConfirmAsync(this,"删除项目","删除当前项目及其全部记忆和项目词条？全局手动词条保留。","删除项目"))return;await controller.DeleteCurrentProjectAsync();ProjectsRefresh();});
     private async void Usage_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>{var usage=await controller.Repository.UsageAsync();UsageBox.Text=usage.Count==0?"尚无用量记录。":string.Join("\n",usage.Select(u=>$"{u.At:yyyy-MM-dd} · {u.Purpose} · 输入 {u.InputTokens:N0} / 输出 {u.OutputTokens:N0} Token · ASR {u.AudioSeconds:F1} 秒"+(u.Unknown?" · 包含未知用量":"")))+"\n\nterm_budget 是预算占用，已知用量会结算，未知请求保留预留；不与 term_extraction / term_generation 相加作为账单。以服务商账单为准。";});
     private void PowerChanged(object sender,PowerModeChangedEventArgs e){if(e.Mode==PowerModes.Suspend){ptt?.Cancel("系统睡眠，自动输入已取消。");controller.Suspend();}}

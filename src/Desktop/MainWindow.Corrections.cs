@@ -38,13 +38,17 @@ public partial class MainWindow
         try{await action(candidate);}
         finally{correctionBusy=false;CorrectionActions.IsEnabled=true;await RefreshCorrections();}
     }
-    private async void CorrectionLearn_Click(object sender,RoutedEventArgs e)=>await Safe(()=>WithCorrection(async candidate=>
+    private async void CorrectionLearn_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>
     {
+        if(ResolveListAction<CorrectionCandidate>(CorrectionsGrid,e)==null)return;
+        await WithCorrection(async candidate=>
+        {
         if(candidate.State!=CorrectionState.Pending)throw new InvalidOperationException("请选择待确认项。已忽略项可先恢复候选。");
         var evidence=await controller.Repository.CorrectionEvidenceAsync(candidate.Id);
         var approval=await Dialogs.ConfirmCorrectionAsync(this,candidate,evidence);
         if(approval!=null)await controller.ConfirmCorrectionAsync(candidate,approval);
-    }));
+        });
+    });
     private async void CorrectionIgnore_Click(object sender,RoutedEventArgs e)=>await Safe(()=>WithCorrection(c=>controller.SetCorrectionIgnoredAsync(c,true)));
     private async void CorrectionRestore_Click(object sender,RoutedEventArgs e)=>await Safe(()=>WithCorrection(c=>controller.SetCorrectionIgnoredAsync(c,false)));
     private async void CorrectionRevoke_Click(object sender,RoutedEventArgs e)=>await Safe(()=>WithCorrection(c=>controller.RevokeCorrectionAsync(c)));
@@ -58,4 +62,3 @@ public partial class MainWindow
     });
     public void OpenCorrections(){ShowPage(2);VocabularyTabs.SelectedIndex=1;}
 }
-

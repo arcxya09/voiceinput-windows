@@ -35,7 +35,7 @@ function Write-WinUIResourceDiagnostics {
         }
     }
     if (Test-Path $PublishDirectory) {
-        Write-Host 'Portable output root files:'
+        Write-Host 'Published runtime files (packaged under app/):'
         Get-ChildItem $PublishDirectory -File | ForEach-Object { Write-Host $_.Name }
     }
     # Inspect only public SDK build definitions, never application data or secrets.
@@ -61,9 +61,27 @@ foreach ($required in @('RealtimeTranscription.exe','Microsoft.UI.Xaml.dll','cor
 $ResourceIndices = @(Get-ChildItem -LiteralPath $PublishDirectory -Filter '*.pri' -File | Where-Object { $_.Name -notlike 'Microsoft.*' })
 if ($ResourceIndices.Count -eq 0) { Write-WinUIResourceDiagnostics; throw 'Portable WinUI package is missing its application resource index.' }
 Write-Host "Application resource indices: $($ResourceIndices.Name -join ', ')"
-Copy-Item -Path 'licenses' -Destination (Join-Path $PublishDirectory 'licenses') -Recurse -Force
-$AppVersion = ([xml](Get-Content Directory.Build.props -Raw)).Project.PropertyGroup.Version
-$OutputZip = "artifacts/VoiceInput-Windows-x64-$AppVersion.zip"
+$AppVersion = [string]([xml](Get-Content Directory.Build.props -Raw)).Project.PropertyGroup.Version
+if ($AppVersion -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid release version.' }
+$PackageDirectory = 'artifacts/package/win-x64'
+if (Test-Path $PackageDirectory) { Remove-Item $PackageDirectory -Recurse -Force }
+[IO.Directory]::CreateDirectory([IO.Path]::GetFullPath($PackageDirectory)) | Out-Null
+Copy-Item -LiteralPath $PublishDirectory -Destination (Join-Path $PackageDirectory 'app') -Recurse
+Copy-Item -LiteralPath 'licenses' -Destination (Join-Path $PackageDirectory 'licenses') -Recurse
+$PackageReadme = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'installer/README.txt')).Replace('@VERSION@', $AppVersion)
+[IO.File]::WriteAllText([IO.Path]::GetFullPath((Join-Path $PackageDirectory 'README.txt')), $PackageReadme, [Text.UTF8Encoding]::new($true))
+& (Join-Path $PSScriptRoot 'scripts/BuildLauncher.ps1') -OutputDirectory $PackageDirectory -Version $AppVersion
+
+# The user-facing root is intentionally small; all framework and application
+# resources remain together under app/ so WinUI's resource lookup stays intact.
+$ExpectedRoot = @('VoiceInput.exe','app','licenses','README.txt')
+$ActualRoot = @(Get-ChildItem -LiteralPath $PackageDirectory | Select-Object -ExpandProperty Name)
+if (@(Compare-Object $ExpectedRoot $ActualRoot).Count) { throw 'The portable root contains unexpected or missing files.' }
+foreach ($required in @('VoiceInput.exe','README.txt','app/RealtimeTranscription.exe','app/RealtimeTranscription.pri','app/Microsoft.UI.Xaml.dll','app/coreclr.dll','app/Assets/AppIcon.ico','app/Assets/Logo.png')) {
+    if (!(Test-Path (Join-Path $PackageDirectory $required))) { throw "The organized portable package is missing $required" }
+}
+$OutputZip = "artifacts/VoiceInput-Portable-x64-$AppVersion.zip"
 if (Test-Path $OutputZip) { Remove-Item $OutputZip -Force }
-[IO.Compression.ZipFile]::CreateFromDirectory([IO.Path]::GetFullPath($PublishDirectory), [IO.Path]::GetFullPath($OutputZip), [IO.Compression.CompressionLevel]::Optimal, $false)
+[IO.Compression.ZipFile]::CreateFromDirectory([IO.Path]::GetFullPath($PackageDirectory), [IO.Path]::GetFullPath($OutputZip), [IO.Compression.CompressionLevel]::Optimal, $false)
 Get-FileHash $OutputZip -Algorithm SHA256
+& (Join-Path $PSScriptRoot 'scripts/BuildInstaller.ps1') -PackageDirectory $PackageDirectory -OutputDirectory 'artifacts' -Version $AppVersion
