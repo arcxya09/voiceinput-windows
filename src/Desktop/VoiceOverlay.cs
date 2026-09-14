@@ -221,6 +221,7 @@ public sealed class VoiceOverlay : Window
 
     private void UpdateIndicators()
     {
+        UpdateIndicatorWidth();
         warning.Visibility = persistentWarning.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
         completion.Visibility = dismissPending && persistentWarning.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
         completion.Text = completionState switch
@@ -287,7 +288,7 @@ public sealed class VoiceOverlay : Window
     {
         // Respect the Windows text-size setting while retaining a single row.
         double textScale = Math.Clamp(uiSettings.TextScaleFactor, 1, 2.25);
-        row.ColumnDefinitions[0].Width = row.ColumnDefinitions[2].Width = new GridLength(46 * textScale);
+        UpdateIndicatorWidth();
         accessibleWidthDip = WidthDip * Math.Min(textScale, 1.5);
         accessibleHeightDip = HeightDip + Math.Ceiling(22 * textScale) - 22;
         bool highContrast = accessibility.HighContrast;
@@ -302,6 +303,15 @@ public sealed class VoiceOverlay : Window
         completion.Foreground = foreground;
         foreach (var bar in levels) bar.Background = highContrast ? foreground : dark ? Brush(104, 219, 186) : Brush(0, 119, 95);
         preview.Opacity = highContrast || previewSource.Length > 0 ? 1 : dark ? .72 : .8;
+    }
+
+    private void UpdateIndicatorWidth()
+    {
+        // Reserve the full five-character paste status without clipping it or
+        // moving the transcript off centre; recording keeps its compact sides.
+        double width = dismissPending && completionState == "PasteSent" ? 64 : 46;
+        row.ColumnDefinitions[0].Width = row.ColumnDefinitions[2].Width =
+            new GridLength(width * Math.Clamp(uiSettings.TextScaleFactor, 1, 2.25));
     }
 
     private void Position()

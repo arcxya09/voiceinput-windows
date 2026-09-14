@@ -697,6 +697,7 @@ public static class DesktopSmoke
             await LayoutAsync(overlay);
             Require(preview.Text == recognized && badge.Text == terminal.Label,
                 "The terminal capsule lost the transcript or misreported delivery state " + terminal.State + ".");
+            Require(!badge.IsTextTrimmed, "The capsule clipped its terminal label " + terminal.State + ".");
             Require(!IsVisibleWithin(Find<TextBlock>(overlay, "OverlayStatus"), (FrameworkElement)overlay.Content),
                 "A terminal result restored the old second status row.");
             CheckCapsuleLayout(overlay);
