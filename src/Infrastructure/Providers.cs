@@ -101,25 +101,64 @@ public sealed class BailianClient : IAsyncDisposable
     // Inject the wire for deterministic tests. Production always uses the fixed official WSS endpoint.
     internal BailianClient(Func<AsrEvent,Task> receive,WebSocket socket,Func<Uri,string,CancellationToken,Task> connect)
     {this.receive=receive;this.socket=socket;this.connect=connect;}
-    public async Task StartAsync(AppSettings options, string key, IReadOnlyList<TermData> terms, CancellationToken token)
+    public Task StartAsync(AppSettings options, string key, IReadOnlyList<TermData> terms, CancellationToken token)
+        => StartPreparedAsync(options, key, Task.FromResult(terms), token);
+
+    public async Task StartPreparedAsync(AppSettings options, string key, Task<IReadOnlyList<TermData>> terms, CancellationToken token)
     {
+        ArgumentNullException.ThrowIfNull(terms);
+        Observe(terms);
         if (string.IsNullOrWhiteSpace(key)) throw new ArgumentException("请填写百炼 API Key。");
         using var startup = CancellationTokenSource.CreateLinkedTokenSource(token, lifetime.Token); startup.CancelAfter(TimeSpan.FromSeconds(8));
+        Task? connecting = null;
+        bool preparing = false;
         try
         {
-            await connect(options.AsrUri(),key,startup.Token).ConfigureAwait(false);
+            startup.Token.ThrowIfCancellationRequested();
+            if (terms.IsCompleted)
+            {
+                preparing = true;
+                await terms.ConfigureAwait(false);
+                preparing = false;
+            }
+            // Open the transport while local vocabulary selection runs. Await whichever
+            // finishes first so a preparation fault does not wait for the connection timeout.
+            connecting = connect(options.AsrUri(),key,startup.Token);
+            if (await Task.WhenAny(connecting, terms).WaitAsync(startup.Token).ConfigureAwait(false) == terms)
+            {
+                preparing = true;
+                await terms.ConfigureAwait(false);
+                preparing = false;
+            }
+            await connecting.WaitAsync(startup.Token).ConfigureAwait(false);
+            preparing = true;
+            var selected = await terms.WaitAsync(startup.Token).ConfigureAwait(false);
+            preparing = false;
+            startup.Token.ThrowIfCancellationRequested();
             receiveTask = ReceiveLoop();
-            await socket.SendAsync(BailianProtocol.Start(TaskId, options, terms).AsMemory(), WebSocketMessageType.Text, true, startup.Token);
+            await socket.SendAsync(BailianProtocol.Start(TaskId, options, selected).AsMemory(), WebSocketMessageType.Text, true, startup.Token);
             sendTask = SendLoop();
             await started.Task.WaitAsync(TimeSpan.FromSeconds(5), startup.Token).ConfigureAwait(false);
         }
         catch(Exception e)
         {
-            if(Volatile.Read(ref failure) is {} root)throw root;
-            if(token.IsCancellationRequested||lifetime.IsCancellationRequested)throw;
+            if(Volatile.Read(ref failure) is {} root){Abort();throw root;}
+            // Local preparation errors belong to the controller, and must not become
+            // a misleading network failure. Every unsuccessful startup closes the wire.
+            if((preparing && (terms.IsFaulted || terms.IsCanceled)) || token.IsCancellationRequested || lifetime.IsCancellationRequested)
+            {Abort();throw;}
             Fail(e is OperationCanceledException or TimeoutException?new ProviderException("百炼连接或任务启动超时，请检查网络后重试。"):e);
+            Abort();
             throw Volatile.Read(ref failure) ?? e;
         }
+        finally { if (connecting != null) Observe(connecting); }
+    }
+
+    private static void Observe(Task task)
+    {
+        if (task.IsCompleted) { _ = task.Exception; return; }
+        _ = task.ContinueWith(static completed => { _ = completed.Exception; }, CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
 
     public ValueTask AudioAsync(byte[] bytes, CancellationToken token)
@@ -215,6 +254,7 @@ public sealed class BailianClient : IAsyncDisposable
         });
         if(Interlocked.CompareExchange(ref failure,safe,null)!=null)return;
         started.TrySetException(safe); finished.TrySetException(safe);
+        Observe(started.Task); Observe(finished.Task);
         lifetime.Cancel(); outgoing.Writer.TryComplete(safe); _ = NotifyFault(safe.Message);
     }
     private async Task NotifyFault(string message) { try { await receive(new AsrEvent("connection-failed", TaskId, Error: message)); } catch { } }

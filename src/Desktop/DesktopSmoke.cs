@@ -652,6 +652,22 @@ public static class DesktopSmoke
     {
         var preview = Find<TextBlock>(overlay, "OverlayPreview");
         var panel = (TailPreviewPanel)VisualTreeHelper.GetParent(preview);
+        var startupPreview = new VoicePreviewState();
+        const string startupTurn = "startup-feedback-smoke";
+        startupPreview.Begin(startupTurn);
+        var connecting = new TranscriptSnapshot(new SessionData { Id = startupTurn }, [], CaptureState.Connecting, 0, 0, "识别服务尚未连接");
+        foreach (var phase in new[]
+        {
+            (Snapshot: connecting, Text: "准备麦克风…"),
+            (Snapshot: connecting with { LocalAudioReady = true }, Text: "正在聆听"),
+            (Snapshot: connecting with { LocalAudioReady = true, CaptureReleased = true }, Text: "正在整理…")
+        })
+        {
+            var frame = startupPreview.Snapshot(phase.Snapshot, true, true, false)!;
+            overlay.Update(frame.Status, frame.Text, frame.Dismiss);
+            await LayoutAsync(overlay);
+            Require(preview.Text == phase.Text, "The native capsule waited for cloud readiness or restored listening after release.");
+        }
         foreach (string sample in new[] { "你好", "正在测试实时文字预览", "12C(α,γ)16O", "新的结果" })
         {
             overlay.Update("正在聆听", sample);
