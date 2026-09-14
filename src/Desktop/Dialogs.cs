@@ -33,15 +33,18 @@ internal static class Dialogs
         if (owner.Content is not FrameworkElement { XamlRoot: { } xamlRoot } root)
             throw new InvalidOperationException("窗口尚未就绪，请稍后重试。");
         double availableWidth = root.ActualWidth > 0 ? Math.Max(240, root.ActualWidth - 64) : preferredWidth;
+        double maximumWidth = Math.Min(preferredWidth, availableWidth);
+        double minimumWidth = Math.Min(maximumWidth, Math.Clamp(preferredWidth - 40, 320, 480));
         var dialog = new ContentDialog
         {
             Title = title,
             XamlRoot = xamlRoot,
             RequestedTheme = root.ActualTheme,
             CloseButtonText = "关闭",
-            MaxWidth = Math.Min(preferredWidth, availableWidth)
+            MaxWidth = maximumWidth
         };
-        dialog.Resources["ContentDialogMaxWidth"] = Math.Min(preferredWidth, availableWidth);
+        dialog.Resources["ContentDialogMinWidth"] = minimumWidth;
+        dialog.Resources["ContentDialogMaxWidth"] = maximumWidth;
         return dialog;
     }
 
@@ -54,7 +57,9 @@ internal static class Dialogs
         {
             Content = content,
             MaxHeight = BodyHeight(owner, preferredHeight),
+            HorizontalContentAlignment = HorizontalAlignment.Stretch,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollMode = ScrollMode.Disabled,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
         };
 

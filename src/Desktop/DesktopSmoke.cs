@@ -119,10 +119,30 @@ public static class DesktopSmoke
                 Require(page.Visibility == Visibility.Visible && page.ActualWidth > 0 && page.ActualHeight > 0, "A WinUI page did not render: " + pageNames[i]);
                 for (int other = 0; other < pageNames.Length; other++)
                     if (other != i) Require(Find<FrameworkElement>(window, pageNames[other]).Visibility == Visibility.Collapsed, "An inactive page remains visible: " + pageNames[other]);
+                var mainRoot = (FrameworkElement)window.Content;
+                var stateLabel = Find<TextBlock>(window, "StateLabel");
+                var stateBounds = stateLabel.TransformToVisual(mainRoot).TransformBounds(
+                    new Windows.Foundation.Rect(0, 0, stateLabel.ActualWidth, stateLabel.ActualHeight));
+                double stateRightGap = mainRoot.ActualWidth - stateBounds.Right;
+                Require(stateLabel.ActualWidth > 0 && stateRightGap >= 11.5,
+                    $"The header status lacks its 12 DIP right margin on {pageNames[i]} (actual {stateRightGap:F2} DIPs).");
+                if (pageNames[i] == "HelpPage")
+                {
+                    var help = Find<ScrollViewer>(window, "HelpPage");
+                    var refresh = Find<Button>(window, "UsageRefreshButton");
+                    var buttonBounds = refresh.TransformToVisual(help).TransformBounds(
+                        new Windows.Foundation.Rect(0, 0, refresh.ActualWidth, refresh.ActualHeight));
+                    double visibleWidth = Math.Min(help.ActualWidth, help.ViewportWidth);
+                    Require(help.ScrollableWidth <= 1,
+                        $"The help page overflows its horizontal viewport by {help.ScrollableWidth:F2} DIPs.");
+                    Require(refresh.ActualWidth > 0 && visibleWidth > 0 && buttonBounds.Left >= -.5 && buttonBounds.Right <= visibleWidth + .5,
+                        $"The usage refresh button is horizontally clipped (bounds {buttonBounds.Left:F2}–{buttonBounds.Right:F2}; viewport {visibleWidth:F2} DIPs).");
+                }
                 var capture = await CaptureAsync((FrameworkElement)window.Content);
                 pageImages.Add(capture);
                 captures.Add(new { name = pageNames[i], width = capture.Width, height = capture.Height });
             }
+            checks.Add("Header status keeps its right margin on all five pages; Help has no horizontal overflow and its refresh button stays inside the viewport");
             window.ShowPage(2);
             var vocabulary = Find<TabView>(window, "VocabularyTabs");
             Require(vocabulary.TabItems.Count >= 3, "The vocabulary workspace is missing a tab.");

@@ -48,7 +48,7 @@
                 <NavigationViewItem Content="用量与帮助" Icon="Help" Tag="4"/>
             </NavigationView.FooterMenuItems>
             <NavigationView.Header>
-                <Grid Margin="0,4,0,4" ColumnSpacing="16">
+                <Grid Margin="0,4,24,4" ColumnSpacing="16">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
@@ -57,8 +57,8 @@
                         <TextBlock x:Name="PageTitle" Text="听写" FontSize="28" FontWeight="SemiBold"/>
                         <TextBlock x:Name="HotkeyHint" Text="按住说话 · 松开输入" FontSize="13" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
                     </StackPanel>
-                    <Border Grid.Column="1" CornerRadius="14" Padding="12,6" VerticalAlignment="Center" Background="{ThemeResource AccentFillColorTertiaryBrush}">
-                        <TextBlock x:Name="StateLabel" Text="准备中" FontSize="12" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"/>
+                    <Border Grid.Column="1" CornerRadius="14" Padding="12,6" VerticalAlignment="Center" Background="{ThemeResource AccentFillColorDefaultBrush}">
+                        <TextBlock x:Name="StateLabel" Text="准备中" FontSize="12" Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}"/>
                     </Border>
                 </Grid>
             </NavigationView.Header>
@@ -114,7 +114,7 @@
                                     </Button.Flyout>
                                 </Button>
                             </Grid>
-                            <TextBox x:Name="OutputBox" Grid.Row="1" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.HorizontalScrollBarVisibility="Disabled" FontSize="20" BorderThickness="0" Padding="20,16" Background="Transparent" PlaceholderText="识别后的正文会显示在这里。" AutomationProperties.Name="听写正文"/>
+                            <TextBox x:Name="OutputBox" Grid.Row="1" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.HorizontalScrollBarVisibility="Disabled" FontSize="20" BorderThickness="0" Padding="20,16" Background="Transparent" PlaceholderText="识别后的正文会显示在这里。" AutomationProperties.Name="听写正文" ScrollViewer.HorizontalScrollMode="Disabled"/>
                         </Grid>
                     </Border>
                     <Border Grid.Row="2" Style="{StaticResource Card}" Padding="16,12">
@@ -133,7 +133,7 @@
                                 <ProgressBar x:Name="MicLevel" Grid.Column="1" Height="4" Minimum="0" Maximum="1" VerticalAlignment="Center" AutomationProperties.Name="麦克风音量"/>
                                 <Button x:Name="StopButton" Grid.Column="2" Content="取消本轮" Click="Stop_Click"/>
                             </Grid>
-                            <TextBox x:Name="PreviewBox" Grid.Row="1" Text="" IsReadOnly="True" TextWrapping="Wrap" FontSize="15" BorderThickness="0" Background="Transparent" Padding="0" MinHeight="24" MaxHeight="54" ScrollViewer.VerticalScrollBarVisibility="Auto" PlaceholderText="开始说话后，在这里查看实时文字。" AutomationProperties.Name="实时识别预览"/>
+                            <TextBox x:Name="PreviewBox" Grid.Row="1" Text="" IsReadOnly="True" TextWrapping="Wrap" FontSize="15" BorderThickness="0" Background="Transparent" Padding="0" MinHeight="24" MaxHeight="54" ScrollViewer.VerticalScrollBarVisibility="Auto" PlaceholderText="开始说话后，在这里查看实时文字。" AutomationProperties.Name="实时识别预览" ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
                         </Grid>
                     </Border>
                     <StackPanel Grid.Row="3" Spacing="6">
@@ -409,15 +409,15 @@
                             </Grid>
                         </TabViewItem>
                         <TabViewItem Header="AI 生成" IsClosable="False">
-                            <ScrollViewer VerticalScrollBarVisibility="Auto">
-                                <StackPanel Margin="0,16,8,12" Spacing="16" MaxWidth="900" HorizontalAlignment="Stretch">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
+                                <StackPanel Margin="8,16,8,12" Spacing="16" MaxWidth="900" HorizontalAlignment="Stretch">
                                     <Border Style="{StaticResource Card}">
                                         <StackPanel Spacing="12">
                                             <TextBlock Text="生成专业词库" Style="{StaticResource SectionTitle}"/>
                                             <TextBlock Text="描述你的领域和要求，生成后逐项检查，再导入到当前项目或全局词库。" Style="{StaticResource SecondaryText}"/>
                                             <ContentControl x:Name="GenerationRequestPanel" HorizontalContentAlignment="Stretch">
                                                 <StackPanel Spacing="12">
-                                                    <TextBox x:Name="GenerationRequirementBox" Header="领域与要求" Height="108" AcceptsReturn="True" TextWrapping="Wrap" ScrollViewer.VerticalScrollBarVisibility="Auto" MaxLength="1000" PlaceholderText="例如：生成 100 个核天体物理领域的专业词条，包含核反应与实验装置名称。"/>
+                                                    <TextBox x:Name="GenerationRequirementBox" Header="领域与要求" Height="108" AcceptsReturn="True" TextWrapping="Wrap" ScrollViewer.VerticalScrollBarVisibility="Auto" MaxLength="1000" PlaceholderText="例如：生成 100 个核天体物理领域的专业词条，包含核反应与实验装置名称。" ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
                                                     <Grid ColumnSpacing="16">
                                                         <Grid.ColumnDefinitions>
                                                             <ColumnDefinition Width="120"/>
@@ -482,8 +482,8 @@
                         <RowDefinition Height="*"/>
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
-                    <ScrollViewer VerticalScrollBarVisibility="Auto">
-                        <StackPanel Margin="0,0,8,12" Spacing="16" MaxWidth="850" HorizontalAlignment="Stretch">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
+                        <StackPanel Margin="8,0,8,12" Spacing="16" MaxWidth="850" HorizontalAlignment="Stretch">
                             <Border Style="{StaticResource Card}">
                                 <StackPanel Spacing="12">
                                     <TextBlock Text="语音识别" Style="{StaticResource SectionTitle}"/>
@@ -517,14 +517,14 @@
                                         <ContentControl x:Name="PromptEditorPanel" HorizontalContentAlignment="Stretch">
                                             <StackPanel Spacing="12">
                                                 <TextBlock Text="在默认提示词上修改，保存后用于之后的润色。超出轻量整理范围时，程序会保留原文。" Style="{StaticResource SecondaryText}"/>
-                                                <TextBox x:Name="PolishPromptBox" Header="润色提示词" Height="240" TextWrapping="Wrap" AcceptsReturn="True" ScrollViewer.VerticalScrollBarVisibility="Auto" MaxLength="8000"/>
+                                                <TextBox x:Name="PolishPromptBox" Header="润色提示词" Height="240" TextWrapping="Wrap" AcceptsReturn="True" ScrollViewer.VerticalScrollBarVisibility="Auto" MaxLength="8000" ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
                                                 <StackPanel Orientation="Horizontal" Spacing="8">
                                                     <Button Content="保存提示词" Click="PromptSave_Click"/>
                                                     <Button Content="恢复默认" Click="PromptReset_Click"/>
                                                 </StackPanel>
-                                                <TextBox x:Name="PolishSampleBox" Header="试用文本" Height="88" Text="嗯，这个方案我们先试一下。" TextWrapping="Wrap" AcceptsReturn="True" ScrollViewer.VerticalScrollBarVisibility="Auto" MaxLength="600"/>
+                                                <TextBox x:Name="PolishSampleBox" Header="试用文本" Height="88" Text="嗯，这个方案我们先试一下。" TextWrapping="Wrap" AcceptsReturn="True" ScrollViewer.VerticalScrollBarVisibility="Auto" MaxLength="600" ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
                                                 <Button x:Name="PromptTestButton" Content="试用当前提示词" Click="PromptTest_Click"/>
-                                                <TextBox x:Name="PromptResultBox" Header="试用结果" MinHeight="56" MaxHeight="180" IsReadOnly="True" TextWrapping="Wrap" ScrollViewer.VerticalScrollBarVisibility="Auto"/>
+                                                <TextBox x:Name="PromptResultBox" Header="试用结果" MinHeight="56" MaxHeight="180" IsReadOnly="True" TextWrapping="Wrap" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
                                                 <TextBlock x:Name="PromptTestStatus" Text="试用会调用上方 DeepSeek Key，产生少量用量；无需先保存提示词。" Style="{StaticResource SecondaryText}"/>
                                             </StackPanel>
                                         </ContentControl>
@@ -622,8 +622,8 @@
                         <Button Grid.Column="1" Content="保存设置" Style="{StaticResource AccentButtonStyle}" Click="SettingsSave_Click"/>
                     </Grid>
                 </Grid>
-                <ScrollViewer x:Name="HelpPage" Visibility="Collapsed" VerticalScrollBarVisibility="Auto">
-                    <StackPanel Spacing="16" MaxWidth="850" Margin="0,0,8,12" HorizontalAlignment="Stretch">
+                <ScrollViewer x:Name="HelpPage" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
+                    <StackPanel Spacing="16" MaxWidth="850" Margin="8,0,8,12" HorizontalAlignment="Stretch">
                         <Border Style="{StaticResource Card}">
                             <StackPanel Spacing="14">
                                 <TextBlock Text="使用方法" Style="{StaticResource SectionTitle}"/>
@@ -638,9 +638,9 @@
                                         <ColumnDefinition Width="Auto"/>
                                     </Grid.ColumnDefinitions>
                                     <TextBlock Text="本地用量记录" Style="{StaticResource SectionTitle}" VerticalAlignment="Center"/>
-                                    <Button Grid.Column="1" Content="刷新" Click="Usage_Click"/>
+                                    <Button x:Name="UsageRefreshButton" Grid.Column="1" Content="刷新" Click="Usage_Click"/>
                                 </Grid>
-                                <TextBox x:Name="UsageBox" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" Height="260" ScrollViewer.VerticalScrollBarVisibility="Auto" AutomationProperties.Name="本地用量记录"/>
+                                <TextBox x:Name="UsageBox" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" Height="260" ScrollViewer.VerticalScrollBarVisibility="Auto" AutomationProperties.Name="本地用量记录" ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
                             </StackPanel>
                         </Border>
                         <TextBlock x:Name="VersionInfo" Style="{StaticResource SecondaryText}"/>
