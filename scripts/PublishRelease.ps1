@@ -155,14 +155,20 @@ function Wait-PublishedRelease([string]$Tag, [string]$ExpectedCommit, [string[]]
         $release = Read-Release $Tag
         if ($release.tag_name -cne $Tag -or $release.target_commitish -cne $ExpectedCommit) { throw 'Published release metadata does not match the intended commit.' }
         if (!$release.draft) {
-            if ((Get-TagCommit $Tag) -cne $ExpectedCommit) { throw 'The published tag points to a different commit.' }
-            Verify-RemoteRelease $release $Expected $ExpectedCommit $LocalDirectory
-            Write-Host "Verified published $Tag, commit $ExpectedCommit, and all four release assets."
-            return
+            # Publication and git-ref visibility may become observable at different
+            # times. A confirmed HTTP 404 may consume this bounded read-back loop;
+            # authentication errors and an actual mismatched commit still fail.
+            $tagCommit = Get-TagCommit $Tag -AllowMissing
+            if ($null -ne $tagCommit) {
+                if ($tagCommit -cne $ExpectedCommit) { throw 'The published tag points to a different commit.' }
+                Verify-RemoteRelease $release $Expected $ExpectedCommit $LocalDirectory
+                Write-Host "Verified published $Tag, commit $ExpectedCommit, and all four release assets."
+                return
+            }
         }
         if ($attempt -lt 4) { Start-Sleep -Seconds 3 }
     }
-    throw 'The release is still a verified draft after read-back. Rerun the workflow to resume publication.'
+    throw 'The public release and matching git tag were not both visible after bounded read-back. No publication mutation was repeated.'
 }
 
 function Publish-VoiceInputRelease {

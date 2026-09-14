@@ -79,10 +79,54 @@ Test 'An existing public release is verified without mutating its assets' {
 }
 Test 'A mismatched published tag is rejected before success' {
     Set-PublicationFixture; $script:remote.draft = $false
-    Mock 'Get-TagCommit' { param($Tag, [switch]$AllowMissing) return ('b' * 40) }
+    $script:tagReads = 0
+    Mock 'Get-TagCommit' { param($Tag, [switch]$AllowMissing) $script:tagReads++; return ('b' * 40) }
     $failed = $false
     try { Wait-PublishedRelease 'v2.0.0' ('a' * 40) @() '' } catch { $failed = $true }
-    Assert ($failed -and $script:verified -eq 0) 'An unrelated tag must not be accepted.'
+    Assert ($failed -and $script:tagReads -eq 1 -and $script:verified -eq 0) 'An unrelated tag must fail immediately.'
+}
+Test 'A published release waits for its git ref without repeating publication' {
+    Set-PublicationFixture; $script:remote.draft = $false
+    Mock 'Get-TagCommit' $originals['Get-TagCommit']
+    $script:tagReads = 0
+    Mock 'Invoke-GitHubRead' {
+        param($Endpoint, [switch]$AllowMissing)
+        Assert ($Endpoint -eq 'git/ref/tags/v2.0.0' -and $AllowMissing) 'Only tag-ref absence may wait after publication.'
+        $script:tagReads++
+        if ($script:tagReads -lt 3) { return $null }
+        return @{ object = @{ type = 'commit'; sha = ('a' * 40) } }
+    }
+    Mock 'Invoke-GitHubCommand' { param($Arguments) throw 'Post-publication visibility may only trigger reads.' }
+    Wait-PublishedRelease 'v2.0.0' ('a' * 40) @() ''
+    Assert ($script:tagReads -eq 3 -and $script:verified -eq 1) 'A temporarily invisible tag must be checked again and verified once.'
+}
+Test 'A persistently missing published git ref exhausts bounded reads and fails' {
+    Set-PublicationFixture; $script:remote.draft = $false
+    Mock 'Get-TagCommit' $originals['Get-TagCommit']
+    $script:tagReads = 0
+    Mock 'Invoke-GitHubRead' {
+        param($Endpoint, [switch]$AllowMissing)
+        Assert ($Endpoint -eq 'git/ref/tags/v2.0.0' -and $AllowMissing) 'Only explicit tag-ref absence may return null.'
+        $script:tagReads++; return $null
+    }
+    Mock 'Invoke-GitHubCommand' { param($Arguments) throw 'A missing published tag must never cause a mutation.' }
+    $failed = $false
+    try { Wait-PublishedRelease 'v2.0.0' ('a' * 40) @() '' } catch { $failed = $true }
+    Assert ($failed -and $script:tagReads -eq 5 -and $script:verified -eq 0) 'Missing tag must fail after exactly five confirmation reads.'
+}
+Test 'Post-publication tag authentication failures are not treated as visibility delays' {
+    Set-PublicationFixture; $script:remote.draft = $false
+    Mock 'Get-TagCommit' $originals['Get-TagCommit']
+    $script:tagReads = 0
+    Mock 'Invoke-GitHubRead' {
+        param($Endpoint, [switch]$AllowMissing)
+        $script:tagReads++
+        throw 'GitHub read rejected: HTTP 403 (git/ref/tags/v2.0.0)'
+    }
+    Mock 'Invoke-GitHubCommand' { param($Arguments) throw 'Authentication failure must not cause a mutation.' }
+    $failed = $false
+    try { Wait-PublishedRelease 'v2.0.0' ('a' * 40) @() '' } catch { $failed = $_.Exception.Message -like 'GitHub read rejected: HTTP 403*' }
+    Assert ($failed -and $script:tagReads -eq 1 -and $script:verified -eq 0) 'Authentication rejection must propagate immediately.'
 }
 Test 'A publication that remains a draft is never retried as a mutation' {
     Set-PublicationFixture
