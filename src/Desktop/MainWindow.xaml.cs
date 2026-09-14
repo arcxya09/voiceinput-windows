@@ -152,7 +152,33 @@ public partial class MainWindow : Window
     }
     private void TermFilter_Changed(object sender,RoutedEventArgs e){if(ready)RefreshTerms();}
     private async void TermAdd_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>{var term=await Dialogs.EditTermAsync(this,new(){Scope=CurrentProject});if(term!=null)await controller.SaveTermAsync(term);});
-    private async void TermEdit_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>{if(TermsGrid.SelectedItem is TermData old){var term=await Dialogs.EditTermAsync(this,old);if(term!=null)await controller.SaveTermAsync(term);}});
+    private async void TermEdit_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>
+    {
+        TermData? old=null;
+        if(e is Microsoft.UI.Xaml.Input.DoubleTappedRoutedEventArgs doubleTap)
+        {
+            // In multiple-selection mode SelectedItem can refer to another row.
+            // Resolve the actual item container without changing the batch selection.
+            for(DependencyObject? source=doubleTap.OriginalSource as DependencyObject;
+                source!=null&&source!=TermsGrid;
+                source=Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(source))
+            {
+                if(source is ListViewItem item&&TermsGrid.IndexFromContainer(item)>=0&&item.Content is TermData hit)
+                {old=hit;break;}
+            }
+            if(old==null)return; // Double-tapping empty list space must not edit a selected row.
+            doubleTap.Handled=true;
+        }
+        else
+        {
+            if(TermsGrid.SelectedItems.Count!=1)
+                throw new InvalidOperationException("请仅选择一个词条进行编辑。");
+            old=TermsGrid.SelectedItems[0] as TermData;
+        }
+        if(old==null)return;
+        var term=await Dialogs.EditTermAsync(this,old);
+        if(term!=null)await controller.SaveTermAsync(term);
+    });
     private async void TermConfirm_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>{foreach(var term in TermsGrid.SelectedItems.Cast<TermData>().ToArray())await controller.SaveTermAsync(term with{State=TermState.Enabled});});
     private async void TermDisable_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>{foreach(var term in TermsGrid.SelectedItems.Cast<TermData>().ToArray())await controller.SaveTermAsync(term with{State=TermState.Disabled});});
     private async void TermDelete_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>{var selected=TermsGrid.SelectedItems.Cast<TermData>().ToArray();if(selected.Length==0)return;if(!await Dialogs.ConfirmAsync(this,"词库",$"删除选中的 {selected.Length} 个词条？","删除"))return;foreach(var term in selected)await controller.DeleteTermAsync(term);});

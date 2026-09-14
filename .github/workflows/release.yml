@@ -32,7 +32,7 @@ jobs:
       - name: Test and publish Windows x64
         shell: pwsh
         env:
-          REFRESH_DEPENDENCY_LOCKS: ${{ inputs.refresh_dependency_locks || (github.event_name == 'pull_request' && github.head_ref == 'refactor/winui-2.0') }}
+          REFRESH_DEPENDENCY_LOCKS: ${{ inputs.refresh_dependency_locks }}
         run: ./build.ps1 -UpdateDependencyLocks:($env:REFRESH_DEPENDENCY_LOCKS -eq 'true') *>&1 | Tee-Object -FilePath build-output.log -Append
       - name: Exercise actual Windows executable without microphone or cloud
         shell: pwsh

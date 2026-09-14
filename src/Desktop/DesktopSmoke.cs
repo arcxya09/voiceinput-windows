@@ -109,8 +109,42 @@ public static class DesktopSmoke
             }
             vocabulary.SelectedIndex = 0;
             checks.Add("All five WinUI navigation pages and every native vocabulary tab render actual content");
+
+            // Exercise the production dialog factory, owner XamlRoot and modal
+            // queue. Change only the editor, then invoke its actual Cancel button.
+            // The isolated repository must keep the original term unchanged.
+            var originalTerm = controller.Terms.Single();
+            Task<TermData?> editing = Dialogs.EditTermAsync(window, originalTerm);
+            ContentDialog? termDialog = null;
+            await UntilAsync(() =>
+            {
+                termDialog = VisualTreeHelper.GetOpenPopupsForXamlRoot(((FrameworkElement)window.Content).XamlRoot)
+                    .Where(popup => popup.Child != null)
+                    .Select(popup => Visuals<ContentDialog>(popup.Child).FirstOrDefault())
+                    .FirstOrDefault(dialog => dialog != null);
+                return termDialog != null && termDialog.ActualWidth > 0 && termDialog.ActualHeight > 0;
+            }, "The native term editor ContentDialog did not open.");
+            Require(termDialog!.XamlRoot == ((FrameworkElement)window.Content).XamlRoot && Dialogs.IsOpen,
+                "The term editor is not attached to the owner's modal queue and XamlRoot.");
+            var wordEditor = Visuals<TextBox>(termDialog).FirstOrDefault(box => box.Header?.ToString() == "词条（1—64 字）")
+                ?? throw new InvalidOperationException("The native term editor is missing its word input.");
+            Require(wordEditor.Text == originalTerm.Text, "The term editor did not load its original word.");
+            wordEditor.Text = "临时修改，不保存";
+            termDialog.UpdateLayout();
+            await Task.Delay(150);
+            var dialogCapture = await CaptureAsync(termDialog);
+            pageImages.Add(dialogCapture);
+            captures.Add(new { name = "TermEditorContentDialog", width = dialogCapture.Width, height = dialogCapture.Height });
+            var cancelButton = Visuals<Button>(termDialog).FirstOrDefault(button => button.Content?.ToString() == "取消")
+                ?? throw new InvalidOperationException("The native term editor has no visible Cancel button.");
+            var cancelPeer = FrameworkElementAutomationPeer.CreatePeerForElement(cancelButton) ?? new ButtonAutomationPeer(cancelButton);
+            Require(cancelPeer.GetPattern(PatternInterface.Invoke) is IInvokeProvider, "The term editor Cancel button is not invokable.");
+            ((IInvokeProvider)cancelPeer.GetPattern(PatternInterface.Invoke)).Invoke();
+            Require(await editing.WaitAsync(TimeSpan.FromSeconds(6)) == null, "Cancel unexpectedly accepted the term editor changes.");
+            Require(!Dialogs.IsOpen && controller.Terms.Single() == originalTerm, "Cancel changed the term or failed to release the modal queue.");
+            checks.Add("Production ContentDialog opens on the owner XamlRoot, renders native fields, and cancels edits without changing the lexicon");
             await SaveContactSheetAsync(Path.ChangeExtension(report, ".png"), pageImages, columns: 2);
-            checks.Add("Five actual WinUI pages captured with RenderTargetBitmap into windows-smoke.png");
+            checks.Add("Five actual WinUI pages and the term ContentDialog captured with RenderTargetBitmap into windows-smoke.png");
 
             overlay = new VoiceOverlay();
             IntPtr foreground = GetForegroundWindow();
@@ -213,6 +247,13 @@ public static class DesktopSmoke
         for (int i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
             if (FindVisual<T>(VisualTreeHelper.GetChild(root, i), name) is { } child) return child;
         return null;
+    }
+
+    private static IEnumerable<T> Visuals<T>(DependencyObject root) where T : DependencyObject
+    {
+        if (root is T found) yield return found;
+        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+            foreach (var child in Visuals<T>(VisualTreeHelper.GetChild(root, i))) yield return child;
     }
 
     private sealed record Pixels(int Width, int Height, byte[] Data);
