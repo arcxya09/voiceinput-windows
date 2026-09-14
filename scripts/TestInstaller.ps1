@@ -24,6 +24,7 @@ $fixture = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) "Rea
 $fixtureText = "VoiceInput installer preservation fixture $token 词库和历史保留"
 $mayUninstall = $false
 $fixtureCreated = $false
+$script:installedUninstaller = $null
 
 function Add-Check([string]$Message) {
     $checks.Add($Message)
@@ -49,6 +50,28 @@ function Assert-UserDataPreserved {
     }
 }
 
+function Read-RegisteredUninstaller {
+    $registration = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($uninstallSubkey)
+    try {
+        if (!$registration) { return $null }
+        $command = [string]$registration.GetValue('UninstallString')
+    }
+    finally { if ($registration) { $registration.Dispose() } }
+    # Inno chooses an available uninsNNN name. Only accept a single executable
+    # belonging directly to this test installation; never execute arbitrary
+    # registry command text or an uninstaller from another installation.
+    if ($command -notmatch '^"([^"\r\n]+)"$') { throw 'The uninstall registration is not a single quoted executable path.' }
+    $candidate = [IO.Path]::GetFullPath($Matches[1])
+    if ([IO.Path]::GetFileName($candidate) -notmatch '^unins\d{3}\.exe$' -or
+        ![string]::Equals([IO.Path]::GetDirectoryName($candidate), [IO.Path]::GetFullPath($installDirectory), [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The uninstall registration points outside the installed application.'
+    }
+    if (!(Test-Path -LiteralPath $candidate -PathType Leaf) -or !(Test-Path -LiteralPath ([IO.Path]::ChangeExtension($candidate, '.dat')) -PathType Leaf)) {
+        throw 'The registered uninstaller executable or its data file is missing.'
+    }
+    return $candidate
+}
+
 function Invoke-InstallerProcess([string]$Path, [string[]]$Arguments) {
     $start = [Diagnostics.ProcessStartInfo]::new($Path)
     $start.UseShellExecute = $false
@@ -64,38 +87,45 @@ function Invoke-InstallerProcess([string]$Path, [string[]]$Arguments) {
 
 function Invoke-TestInstall([string]$Suffix) {
     Invoke-InstallerProcess $setup @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$installDirectory", "/GROUP=$group", "/LOG=$(Join-Path $evidenceDirectory "installer-install$Suffix.log")")
-    foreach ($relative in @('VoiceInput.exe', 'app/RealtimeTranscription.exe', 'app/RealtimeTranscription.pri', 'app/Microsoft.UI.Xaml.dll', 'unins000.exe')) {
+    foreach ($relative in @('VoiceInput.exe', 'app/RealtimeTranscription.exe', 'app/RealtimeTranscription.pri', 'app/Microsoft.UI.Xaml.dll')) {
         if (!(Test-Path -LiteralPath (Join-Path $installDirectory $relative) -PathType Leaf)) { throw "The installer did not create $relative." }
     }
     $registration = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($uninstallSubkey)
     try {
         if (!$registration -or $registration.GetValue('DisplayVersion') -ne $version) { throw 'The per-user uninstall registration has no matching application version.' }
-        if ($registration.GetValue('UninstallString') -notlike "*$installDirectory*unins000.exe*") { throw 'The uninstall registration points outside the installed application.' }
     }
     finally { if ($registration) { $registration.Dispose() } }
+    $script:installedUninstaller = Read-RegisteredUninstaller
+    if (!$script:installedUninstaller) { throw 'The installer did not register its uninstaller executable.' }
+    Write-Host "Registered test uninstaller: $([IO.Path]::GetFileName($script:installedUninstaller))"
     Assert-UserDataPreserved
 }
 
 function Invoke-TestUninstall([string]$Suffix) {
-    $uninstaller = Join-Path $installDirectory 'unins000.exe'
-    if (!(Test-Path -LiteralPath $uninstaller)) { throw 'The installed uninstaller is missing.' }
+    $uninstaller = Read-RegisteredUninstaller
+    if (!$uninstaller -or $uninstaller -ne $script:installedUninstaller) { throw 'The installed uninstaller registration changed unexpectedly.' }
+    $uninstallData = [IO.Path]::ChangeExtension($uninstaller, '.dat')
     Invoke-InstallerProcess $uninstaller @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=$(Join-Path $evidenceDirectory "installer-uninstall$Suffix.log")")
-    # Inno can complete final file cleanup through its temporary uninstaller.
+    # Inno can return from its bootstrap executable before its temporary
+    # uninstaller finishes self-removal. Wait for the exact registered exe/dat
+    # as well as the application and registry before reusing this directory.
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     do {
         $registration = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($uninstallSubkey)
         $registered = $null -ne $registration
         if ($registration) { $registration.Dispose() }
-        if (!$registered -and !(Test-Path -LiteralPath $launcher)) { break }
+        $selfCleanupPending = (Test-Path -LiteralPath $uninstaller) -or (Test-Path -LiteralPath $uninstallData)
+        if (!$registered -and !(Test-Path -LiteralPath $launcher) -and !$selfCleanupPending) { break }
         Start-Sleep -Milliseconds 100
     } while ([DateTime]::UtcNow -lt $deadline)
-    if ($registered -or (Test-Path -LiteralPath $launcher) -or (Test-Path -LiteralPath (Join-Path $installDirectory 'app/RealtimeTranscription.exe'))) {
-        throw 'Uninstall left the registration, launcher, or application executable behind.'
+    if ($registered -or $selfCleanupPending -or (Test-Path -LiteralPath $launcher) -or (Test-Path -LiteralPath (Join-Path $installDirectory 'app/RealtimeTranscription.exe'))) {
+        throw 'Uninstall left the registration, launcher, application executable, or its own executable/data file behind.'
     }
     if ((Test-Path -LiteralPath $shortcutDirectory) -and @(Get-ChildItem -LiteralPath $shortcutDirectory -Filter '*.lnk' -Recurse).Count -ne 0) {
         throw 'Uninstall left the installed Start menu shortcut behind.'
     }
     Assert-UserDataPreserved
+    $script:installedUninstaller = $null
 }
 
 try {
@@ -141,8 +171,15 @@ catch {
     Write-Host "FAIL Installer: $($_.Exception.Message)"
 }
 finally {
-    if ($mayUninstall -and (Test-Path -LiteralPath (Join-Path $installDirectory 'unins000.exe'))) {
-        try { Invoke-TestUninstall '-cleanup' } catch { $errors.Add('Installer cleanup: ' + $_.Exception.Message) }
+    if ($mayUninstall) {
+        try {
+            $registeredUninstaller = Read-RegisteredUninstaller
+            if ($registeredUninstaller) {
+                $script:installedUninstaller = $registeredUninstaller
+                Invoke-TestUninstall '-cleanup'
+            }
+        }
+        catch { $errors.Add('Installer cleanup: ' + $_.Exception.Message) }
     }
     if ($mayUninstall) {
         $currentStartup = Read-Startup
