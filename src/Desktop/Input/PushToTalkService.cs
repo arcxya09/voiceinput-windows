@@ -3,7 +3,7 @@ using RealtimeTranscription.Core;
 
 namespace RealtimeTranscription.Desktop.Input;
 
-public sealed class PushToTalkService : IAsyncDisposable
+public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
 {
     private sealed class Turn(long at,NativeTarget? native,long activityVersion,bool dictationOnly)
     {
@@ -33,7 +33,9 @@ public sealed class PushToTalkService : IAsyncDisposable
     public Func<bool>? CanStart { get; set; }
     public bool Busy=>Volatile.Read(ref active)!=null;
     public bool DictationOnly=>controller.Settings.DictationOnly;
-    public event Action<string>? Notice;
+    public event Action<VoiceInputNotice>? Notice;
+    public event Action<string>? TurnStarted;
+    public event Action<VoiceTurnCompletion>? TurnCompleted;
     public event Action<bool>? Listening;
     public PushToTalkService(AppController controller)
     {
@@ -48,7 +50,7 @@ public sealed class PushToTalkService : IAsyncDisposable
     }
     public async Task InitializeAsync(){await hook.Ready;Configure();await TextDelivery.InitializeAsync();}
     public void Configure()=>hook.Configure(controller.Settings.Hotkey);
-    public void SetEnabled(bool value){Enabled=value;hook.Enable(value);Notice?.Invoke(value?"按住说话已启用。":"按住说话已暂停。");}
+    public void SetEnabled(bool value){Enabled=value;hook.Enable(value);PublishNotice(value?"按住说话已启用。":"按住说话已暂停。");}
     public void Cancel(string reason="本轮输入已取消，确认文字已保留。")
     {
         activity.Advance();
@@ -63,12 +65,12 @@ public sealed class PushToTalkService : IAsyncDisposable
                 if(s.Kind=="down")
                 {
                     if(!Enabled||CanStart?.Invoke()==false)continue;
-                    if(active!=null){Notice?.Invoke("上一段仍在整理，请稍后再按。");continue;}
+                    if(active!=null){PublishNotice("上一段仍在整理，请稍后再按。");continue;}
                     var native=s.Target;bool dictationOnly=DictationOnly;
-                    if(!dictationOnly&&native==null){Notice?.Invoke("暂时无法确认外部输入窗口，请重新按住说话；也可开启“只听写，不自动输入”。");continue;}
-                    if(InputSafety.HasOtherModifier(hook.Trigger,Win32.Down)){Notice?.Invoke("检测到组合键，本次不启动语音。");continue;}
-                    if(!activity.Matches(s.ActivityVersion)||(!dictationOnly&&Win32.Observe(native!)==FocusObservation.Changed)){Notice?.Invoke("按键后输入位置或操作已改变，请重新按住说话。");continue;}
-                    var t=new Turn(s.At,native,s.ActivityVersion,dictationOnly);active=t;Listening?.Invoke(true);running=Run(t);
+                    if(!dictationOnly&&native==null){PublishNotice("暂时无法确认外部输入窗口，请重新按住说话；也可开启“只听写，不自动输入”。");continue;}
+                    if(InputSafety.HasOtherModifier(hook.Trigger,Win32.Down)){PublishNotice("检测到组合键，本次不启动语音。");continue;}
+                    if(!activity.Matches(s.ActivityVersion)||(!dictationOnly&&Win32.Observe(native!)==FocusObservation.Changed)){PublishNotice("按键后输入位置或操作已改变，请重新按住说话。");continue;}
+                    var t=new Turn(s.At,native,s.ActivityVersion,dictationOnly);active=t;TurnStarted?.Invoke(t.Id);Listening?.Invoke(true);running=Run(t);
                 }
                 else if(active is {} t)
                 {
@@ -121,7 +123,7 @@ public sealed class PushToTalkService : IAsyncDisposable
             await t.Released.Task.WaitAsync(TimeSpan.FromSeconds(controller.Settings.MaxHoldSeconds+2));
             t.Stop??=controller.StopAsync(false);await t.Stop;
             await controller.FinishCurrentAsync(t.Id,!t.Invalid,t.Cancel.Token);
-            var snapshot=await controller.SnapshotAsync();if(snapshot.Session?.Id!=t.Id){Notice?.Invoke(t.Reason.Length>0?t.Reason:snapshot.Status);return;}string text=TranscriptText.Render(snapshot);
+            var snapshot=await controller.SnapshotAsync();if(snapshot.Session?.Id!=t.Id){await CompletePreviewAsync(t,t.Reason.Length>0?t.Reason:snapshot.Status);return;}string text=TranscriptText.Render(snapshot);
             DeliveryResult result;
             if(t.Invalid||t.Cancel.IsCancellationRequested||!activity.Matches(t.ActivityVersion))result=new("Cancelled",t.Reason.Length>0?t.Reason:"本轮输入已取消，结果已保留。");
             else if((!t.DictationOnly&&target==null)||snapshot.State==CaptureState.Faulted||snapshot.Session?.Gaps.Count>0||snapshot.Segments.Any(s=>s.AsrState==AsrState.Unresolved))result=new("Blocked","识别未完整结束，确认文字可手动复制。");
@@ -132,11 +134,32 @@ public sealed class PushToTalkService : IAsyncDisposable
                 await controller.SetDeliveryAsync("Sending","正在输入…",turnId:t.Id);
                 result=await TextDelivery.SendAsync(target!,text,()=>!t.Invalid&&activity.Matches(t.ActivityVersion)&&ReferenceEquals(active,t),t.Cancel.Token);
             }
-            await controller.SetDeliveryAsync(result.State,result.Message,result.Accepted,t.Id);Notice?.Invoke(result.Message);
+            await controller.SetDeliveryAsync(result.State,result.Message,result.Accepted,t.Id);
+            await CompletePreviewAsync(t,result.Message);
         }
-        catch(Exception e){await controller.StopAsync(false);string reason=t.Reason.Length>0?t.Reason:AppController.SafeError(e);await controller.SetDeliveryAsync("Blocked",reason,turnId:t.Id);Notice?.Invoke(reason);}
+        catch(Exception e)
+        {
+            string reason=t.Reason.Length>0?t.Reason:AppController.SafeError(e);
+            try { await controller.StopAsync(false);await controller.SetDeliveryAsync("Blocked",reason,turnId:t.Id); }
+            finally { await CompletePreviewAsync(t,reason); }
+        }
         finally{if(capturedTarget!=null)await TextDelivery.ReleaseAsync(capturedTarget);Listening?.Invoke(false);Interlocked.CompareExchange(ref active,null,t);t.Cancel.Dispose();}
     }
+    private void PublishNotice(string message)
+        => Notice?.Invoke(new(message, Volatile.Read(ref active)?.Id));
+
+    private async Task CompletePreviewAsync(Turn turn, string status)
+    {
+        string text = "";
+        try
+        {
+            var snapshot = await controller.SnapshotAsync();
+            if (snapshot.Session?.Id == turn.Id) text = TranscriptText.Render(snapshot);
+        }
+        catch { /* A controller being disposed cannot supply another snapshot. */ }
+        TurnCompleted?.Invoke(new(turn.Id, status, text));
+    }
+
     private async Task Watchdog()
     {
         try

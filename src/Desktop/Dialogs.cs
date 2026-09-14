@@ -274,8 +274,8 @@ internal static class Dialogs
             content.Children.Add(tabs);
 
             var whole = new StackPanel { Spacing = 10 };
-            whole.Children.Add(Label("本轮完整识别原文"));
-            var rawWhole = Editor(TranscriptText.Render(snapshot.Segments.Select(s => s with { FinalText = s.RawText })), true);
+            whole.Children.Add(Label("本轮识别原文（已确认）"));
+            var rawWhole = Editor(TranscriptComparison.Original(snapshot.Segments), true);
             whole.Children.Add(rawWhole);
             var wholeLabel = Label("本轮最终正文 · " + snapshot.Session?.WholePolishReason);
             whole.Children.Add(wholeLabel);
@@ -324,7 +324,7 @@ internal static class Dialogs
                 var latest = await controller.SnapshotAsync();
                 list.ItemsSource = latest.Segments;
                 list.SelectedItem = latest.Segments.FirstOrDefault(s => s.Id == selectedId) ?? latest.Segments.FirstOrDefault();
-                rawWhole.Text = TranscriptText.Render(latest.Segments.Select(s => s with { FinalText = s.RawText }));
+                rawWhole.Text = TranscriptComparison.Original(latest.Segments);
                 finalWhole.Text = TranscriptText.Render(latest);
                 wholeLabel.Text = "本轮最终正文 · " + latest.Session?.WholePolishReason;
             }
@@ -376,6 +376,7 @@ internal static class Dialogs
             void RefreshSelection()
             {
                 var selected = list.SelectedItem as SegmentData;
+                raw.Header = selected?.AsrState == AsrState.Confirmed ? "服务端已确认原文" : "未确认草稿（不计入原文对照）";
                 raw.Text = selected is null ? "" : selected.RawText.Length > 0 ? selected.RawText : selected.PartialText;
                 final.Text = selected?.FinalText ?? "";
                 bool editable = selected?.OutputState is OutputState.Published or OutputState.Deleted;

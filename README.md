@@ -186,6 +186,7 @@ Pull Request 会执行回归测试、Windows 构建、发布脚本离线测试�
 ## 文档
 
 - [技术设计](docs/技术设计_v3.0.md)
+- [2.1.2 全项目审查修复](docs/releases/2.1.2.md)
 - [2.1.1 原生窗口边缘与实时预览修复](docs/releases/2.1.1.md)
 - [2.1.0 界面修正、安装版与开机自启动](docs/releases/2.1.0.md)
 - [2.0.0 原生 WinUI 3 界面重构](docs/releases/2.0.0.md)

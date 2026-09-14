@@ -38,12 +38,16 @@ public partial class App : Microsoft.UI.Xaml.Application
         var controller = new AppController(folder);
         MainWindow = CreateWindowForLaunch(controller, Program.IsStartupLaunch);
         string? startupError = null;
-        try { await controller.InitializeAsync(); }
+        try
+        {
+            await controller.InitializeAsync();
+            startupError = controller.StartupWarning;
+        }
         catch
         {
             startupError = "配置载入未完成，请检查设置。本地数据已保留。";
-            if (!Program.IsStartupLaunch) await ShowErrorAsync(startupError, "启动");
         }
+        if (!Program.IsStartupLaunch && startupError != null) await ShowErrorAsync(startupError, "启动");
         MainWindow.Ready();
         if (Program.IsStartupLaunch && startupError != null) MainWindow.NotifyStartupError(startupError);
     }

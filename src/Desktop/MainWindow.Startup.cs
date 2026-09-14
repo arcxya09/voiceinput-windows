@@ -93,13 +93,15 @@ public partial class MainWindow
             // The main window has never been activated on this path. Registering
             // the hotkey does not start recording; only an explicit hold does.
             Hide();
-            if (controller.Keys.BailianKey.Length == 0)
+            if (controller.StartupWarning is { } warning)
+                NotifyStartupError(warning);
+            else if (controller.Keys.BailianKey.Length == 0)
                 NotifyStartupError("请双击托盘图标，在设置中填写百炼 API Key。");
             else if (!controller.MemoryAvailable)
                 NotifyStartupError("本地记忆暂不可用，请双击托盘图标检查启动提示。");
             return;
         }
-        if (controller.Keys.BailianKey.Length == 0) ShowPage(3);
+        if (controller.StartupWarning != null || controller.Keys.BailianKey.Length == 0) ShowPage(3);
         else if (controller.MemoryAvailable)
         {
             Hide();

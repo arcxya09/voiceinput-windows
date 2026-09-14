@@ -66,17 +66,11 @@ public sealed partial class MemoryRepository
                 candidate=new(){ProjectId=session.ProjectId,Original=change.Original,Corrected=change.Corrected};
                 SaveCorrection(c,candidate);existing.Add(candidate);
             }
-            string after=ContextAround(segment.FinalText,change.Corrected);
+            string after=change.AfterContext;
             var evidence=new CorrectionEvidence(session.Id,segment.Id,segment.SourceRevision,segment.EditRevision,change.BeforeContext,after,change.At);
             using var insert=Command(c,"INSERT OR REPLACE INTO correction_sources(candidate,segment,session,created,payload) VALUES($c,$s,$session,$at,$b)",("$c",candidate.Id),("$s",segment.Id),("$session",session.Id),("$at",change.At.ToUniversalTime().ToString("O")),("$b",Pack(evidence)));insert.ExecuteNonQuery();
         }
         PruneCorrections(c);
-    }
-    private static string ContextAround(string text,string word)
-    {
-        int index=text.IndexOf(word,StringComparison.Ordinal);if(index<0)return "";
-        var left=text[..index].EnumerateRunes().TakeLast(24);var right=text[index..].EnumerateRunes().Take(JsonCodec.Count(word)+24);
-        return string.Concat(left.Concat(right).Select(r=>r.ToString()));
     }
     private List<CorrectionEvidence> LiveCorrectionEvidence(SqliteConnection c,CorrectionCandidate candidate)
     {
@@ -85,7 +79,8 @@ public sealed partial class MemoryRepository
         while(reader.Read())
         {
             var evidence=Unpack<CorrectionEvidence>((byte[])reader[0]);var session=Unpack<SessionData>((byte[])reader[1]);var segment=Unpack<SegmentData>((byte[])reader[2]);
-            if(session.AllowLearning&&session.ProjectId==candidate.ProjectId&&segment.AsrState==AsrState.Confirmed&&segment.OutputState==OutputState.Published&&segment.EditRevision==evidence.EditRevision&&segment.SourceRevision==evidence.SourceRevision)result.Add(evidence);
+            if(session.AllowLearning&&session.ProjectId==candidate.ProjectId&&segment.AsrState==AsrState.Confirmed&&segment.OutputState==OutputState.Published&&segment.EditRevision==evidence.EditRevision&&segment.SourceRevision==evidence.SourceRevision
+                &&CorrectionRules.Active(segment).Any(change=>CorrectionRules.SamePair(candidate,change)))result.Add(evidence);
         }
         return result;
     }

@@ -92,7 +92,11 @@ public sealed partial class AppController : IAsyncDisposable
     }
     private int UnsavedCount() => (engine?.Segments.Count(s=>s.SaveState is SaveState.Pending or SaveState.Failed)??0)
         + failedWrites.Keys.Count(id=>!ReferenceEquals(failedSources[id],engine)) + pendingSessions.Count;
-    private void Notify()=>Updated?.Invoke(Snapshot());
+    private void Notify()
+    {
+        // Save failures are application state even when no window is subscribed.
+        var snapshot=Snapshot();Updated?.Invoke(snapshot);
+    }
     private void Status(string text){status=text;Notify();}
     private void NewEngine(SessionData session,IEnumerable<SegmentData>? saved=null)
     {
@@ -123,22 +127,25 @@ public sealed partial class AppController : IAsyncDisposable
             source.SetSaveState(s.Id,s.Revision,ok);
             if(ok){if(failedWrites.TryGetValue(s.Id,out var old)&&old.Revision<=s.Revision){failedWrites.Remove(s.Id);failedSources.Remove(s.Id);}}
             else if(!failedWrites.TryGetValue(s.Id,out var newer)||newer.Revision<=s.Revision){failedWrites[s.Id]=s;failedSources[s.Id]=source;}
-            if(ReferenceEquals(source,engine))
-            {
-                if(!ok)status="保存失败：正文仍可复制和导出，请重试保存。";
-                Notify();
-                if(Repository.Queued>=900||failedWrites.Count>=1000||failedWrites.Values.Sum(x=>Encoding.UTF8.GetByteCount(x.RawText+x.FinalText))>=4*1024*1024)_=StopAsync(true);
-            }
+            if(ReferenceEquals(source,engine)&&!ok)status="保存失败：正文仍可复制和导出，请重试保存。";
+            // A previous turn can fail after the user switches project or starts
+            // another turn. Always refresh the global warning and exit guard.
+            Notify();
+            if(Repository.Queued>=900||failedWrites.Count>=1000||failedWrites.Values.Sum(x=>Encoding.UTF8.GetByteCount(x.RawText+x.FinalText))>=4*1024*1024)_=StopAsync(true);
         });
         if(ok&&(s.EditRevision>0||s.AsrState==AsrState.Confirmed))await ReloadTerms();
         return ok;
     }
     public async Task InitializeAsync()
     {
-        var loaded=await Task.Run(()=> (settingsStore.Load(),settingsStore.LoadCredentials()));
-        Settings=loaded.Item1;Keys=loaded.Item2;Settings.Validate();
+        var loaded=await Task.Run(settingsStore.LoadForStartup);
+        Settings=loaded.Settings;Keys=loaded.Credentials;StartupWarning=loaded.Warning;
         await InitializeMemoryAsync();
-        await OnActor(()=>Status(Keys.BailianKey.Length==0?"请先在设置中填写百炼 Key。":!MemoryAvailable?MemoryStatus:$"准备就绪。按住 {HotkeyLabel} 说话，松开后{(Settings.DictationOnly?"查看并复制结果":"输入")}。"));
+        await OnActor(()=>
+        {
+            string readiness=Keys.BailianKey.Length==0?"请先在设置中填写百炼 Key。":!MemoryAvailable?MemoryStatus:$"准备就绪。按住 {HotkeyLabel} 说话，松开后{(Settings.DictationOnly?"查看并复制结果":"输入")}。";
+            Status(StartupWarning is { } warning ? warning + (!MemoryAvailable ? "\n" + MemoryStatus : "") : readiness);
+        });
     }
     private async Task ReloadTerms()
     {
@@ -160,7 +167,7 @@ public sealed partial class AppController : IAsyncDisposable
         if(keys.BailianKey.Any(char.IsControl)||keys.DeepSeekKey.Any(char.IsControl))throw new ArgumentException("Key 不能包含换行或控制字符。");
         var current=await SnapshotAsync();if(current.State is CaptureState.Recording or CaptureState.Connecting or CaptureState.Draining)throw new InvalidOperationException("请先暂停录音，再修改设置。");
         await Task.Run(()=>settingsStore.Save(options,keys));
-        await OnActor(()=>{Settings=options;Keys=keys;polishCircuit=false;knowledgeEpoch++;CancelToken(extraction);engine?.SetMemoryState(CanSaveMemory);Status("设置已保存。");});
+        await OnActor(()=>{Settings=options;Keys=keys;StartupWarning=null;polishCircuit=false;knowledgeEpoch++;CancelToken(extraction);engine?.SetMemoryState(CanSaveMemory);Status("设置已保存。");});
         await MaintainMemoryAsync();await ReloadTerms();
         }
         finally{settingsGate.Release();}
@@ -367,17 +374,46 @@ public sealed partial class AppController : IAsyncDisposable
     });
     public Task UndoAsync(string id)=>EditAsync(id,"","撤销");
     public async Task<string> StopAndTextAsync(){await StopAsync(false);await FinishCurrentAsync();return TranscriptText.Render(await SnapshotAsync());}
-    public async Task LoadSessionAsync(SessionData session)
+    public async Task LoadSessionAsync(SessionData session,CancellationToken token=default)
     {
-        await StopAsync(false);CancelToken(extraction);await Repository.BarrierAsync();
-        if(await OnActor(()=>HasPending(session.Id)))
+        token.ThrowIfCancellationRequested();
+        var previous=await OnActor(()=>(Engine:engine,Project:Settings.ProjectId)).WaitAsync(token);
+        // Stop owns captureGate internally. Only acquire it after the stop completes,
+        // then keep it through the read and installation so StartAsync cannot replace
+        // the engine while this operation is suspended on database I/O.
+        await StopAsync(false).WaitAsync(token);
+        using var budget=CancellationTokenSource.CreateLinkedTokenSource(token,lifetime.Token);
+        budget.CancelAfter(TimeSpan.FromSeconds(15));
+        var loadToken=budget.Token;
+        await captureGate.WaitAsync(loadToken);
+        try
         {
-            await RetrySaveAsync();
-            if(await OnActor(()=>HasPending(session.Id)))throw new InvalidOperationException("该会话仍有内容未保存，已保留现有文字。请先重试保存，再重新载入历史。");
+            void VerifyTarget()
+            {
+                // Check inside the actor as well: cancellation of an awaiting caller
+                // does not remove an action that is already in the actor queue.
+                loadToken.ThrowIfCancellationRequested();
+                if(!ReferenceEquals(engine,previous.Engine)||Settings.ProjectId!=previous.Project||state is CaptureState.Connecting or CaptureState.Recording or CaptureState.Draining or CaptureState.Closing)
+                    throw new InvalidOperationException("当前会话已变化，未载入历史。请结束本轮输入后重试。");
+            }
+            await OnActor(()=>{VerifyTarget();CancelToken(extraction);}).WaitAsync(loadToken);
+            await Repository.BarrierAsync().WaitAsync(loadToken);
+            if(await OnActor(()=>HasPending(session.Id)).WaitAsync(loadToken))
+            {
+                await RetrySaveAsync().WaitAsync(loadToken);
+                if(await OnActor(()=>HasPending(session.Id)).WaitAsync(loadToken))throw new InvalidOperationException("该会话仍有内容未保存，已保留现有文字。请先重试保存，再重新载入历史。");
+            }
+            var saved=await Repository.LoadSessionAsync(session.Id).WaitAsync(loadToken)??throw new InvalidOperationException("该历史记录已删除，请刷新列表。");
+            await OnActor(()=>
+            {
+                VerifyTarget();
+                var loaded=saved.Session;
+                engine?.FinishAll();NewEngine(loaded.DeliveryState=="Sending"?loaded with{DeliveryState="Unknown",DeliveryReason="上次输入结果未知，不自动重发。"}:loaded,saved.Segments);
+                Settings=Settings with{ProjectId=loaded.ProjectId};state=CaptureState.Paused;Status("已载入历史供查看与编辑；历史文字不会自动输入。");
+            }).WaitAsync(loadToken);
+            await ReloadTerms().WaitAsync(loadToken);
         }
-        var saved=await Repository.LoadSessionAsync(session.Id)??throw new InvalidOperationException("该历史记录已删除，请刷新列表。");session=saved.Session;
-        await OnActor(()=>{engine?.FinishAll();NewEngine(session.DeliveryState=="Sending"?session with{DeliveryState="Unknown",DeliveryReason="上次输入结果未知，不自动重发。"}:session,saved.Segments);Settings=Settings with{ProjectId=session.ProjectId};state=CaptureState.Paused;Status("已载入历史供查看与编辑；历史文字不会自动输入。");});
-        await ReloadTerms();
+        finally{captureGate.Release();}
     }
     public async Task DeleteSessionAsync(SessionData session)
     {

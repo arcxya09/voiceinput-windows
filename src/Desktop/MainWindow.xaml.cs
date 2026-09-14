@@ -25,7 +25,8 @@ public partial class MainWindow : Window
     private CancellationTokenSource? search;
     private bool ready,updating,closed,shuttingDown,microphoneTesting;
     private bool savingSettings,changingProject,changingLearning,updatingLearning,testingConnection;
-    private bool ManagementOperationBusy=>Dialogs.IsOpen||pickerOpen||correctionBusy||extractingHistory||generatingTerms||importingGenerated||testingPrompt||testingConnection||microphoneTesting||savingSettings||changingProject||changingLearning;
+    private int managementOperations;
+    private bool ManagementOperationBusy=>Volatile.Read(ref managementOperations)>0||Dialogs.IsOpen||pickerOpen||correctionBusy||extractingHistory||generatingTerms||importingGenerated||testingPrompt||testingConnection||microphoneTesting||savingSettings||changingProject||changingLearning;
     private bool ManagementBusy=>ManagementOperationBusy||ptt?.Busy==true;
     private float level;
     public string CurrentProject=>controller.Settings.ProjectId;
@@ -51,8 +52,8 @@ public partial class MainWindow : Window
             ProjectsRefresh();RefreshTerms();
             if(controller.MemoryAvailable)
                 try{await RefreshCorrections();}catch(Exception e){CorrectionStatus.Text="纠错记录暂不可用："+AppController.SafeError(e);}
-            ptt=new(controller){CanStart=()=>!ManagementOperationBusy&&!Volatile.Read(ref shuttingDown)&&Volatile.Read(ref trayMenu)?.IsOpen!=true};ptt.Notice+=text=>UI(()=>{overlay.Update(text,dismiss:true);StatusText.Text=text;});
-            ptt.Listening+=active=>UI(()=>{if(active)overlay.BeginTurn();});
+            ptt=new(controller){CanStart=CanStartVoiceTurn};
+            ConnectPreviewEvents(ptt);
             await ptt.InitializeAsync();
             devices=new DeviceWatcher((id,isDefault)=>{if(ptt.Busy&&((isDefault&&controller.Settings.DeviceId=="")||(!isDefault&&controller.ActiveDeviceId==id))){ptt.Cancel("麦克风设备已变化，本轮停止，确认文字可复制。");controller.RequestStopCapture();}});ready=true;
             CompleteStartupPresentation();
@@ -75,7 +76,7 @@ public partial class MainWindow : Window
         updatingLearning=true;
         SessionLearningBox.Tag=s.Session?.Id;SessionLearningBox.IsChecked=s.Session?.AllowLearning==true;SessionLearningBox.IsEnabled=s.Session!=null&&!ManagementBusy;
         updatingLearning=false;
-        if(ptt?.Busy==true&&s.Session?.DeliveryState is "Pending" or "Sending")overlay.Update(UiPresentation.Phase(s,ptt.Busy,ptt.Enabled,controller.Settings.DictationOnly),UiPresentation.LatestText(preview.Length>0?preview:body));
+        RefreshPreview(s);
     }
     private void CreateTray()
     {
@@ -106,8 +107,18 @@ public partial class MainWindow : Window
         tray.DoubleClick+=(_,_)=>UI(()=>{trayMenu.HideMenu();OpenManager();});
     }
     public void OpenManager(){Show();if(AppWindow.Presenter is OverlappedPresenter presenter)presenter.Restore();Activate();}
-    private void EnsureIdle(){if(correctionBusy)throw new InvalidOperationException("纠错学习操作尚未完成，请稍候。");if(savingSettings||changingProject||changingLearning)throw new InvalidOperationException("设置或项目切换正在保存，请稍候。");if(extractingHistory)throw new InvalidOperationException("全部历史词条提取尚未结束，请先取消或等待完成。");if(generatingTerms||importingGenerated)throw new InvalidOperationException("词库生成或导入尚未结束，请稍候或先取消生成。");if(testingPrompt)throw new InvalidOperationException("提示词试用尚未结束，请稍候。");if(testingConnection)throw new InvalidOperationException("连接测试尚未结束，请稍候。");if(microphoneTesting)throw new InvalidOperationException("麦克风测试尚未结束，请稍候。");if(ptt?.Busy==true)throw new InvalidOperationException("当前输入尚未完成，请松开快捷键并等待结果后再操作。");}
+    private void EnsureIdle(){if(Volatile.Read(ref managementOperations)>0)throw new InvalidOperationException("管理操作尚未完成，请稍候。");if(correctionBusy)throw new InvalidOperationException("纠错学习操作尚未完成，请稍候。");if(savingSettings||changingProject||changingLearning)throw new InvalidOperationException("设置或项目切换正在保存，请稍候。");if(extractingHistory)throw new InvalidOperationException("全部历史词条提取尚未结束，请先取消或等待完成。");if(generatingTerms||importingGenerated)throw new InvalidOperationException("词库生成或导入尚未结束，请稍候或先取消生成。");if(testingPrompt)throw new InvalidOperationException("提示词试用尚未结束，请稍候。");if(testingConnection)throw new InvalidOperationException("连接测试尚未结束，请稍候。");if(microphoneTesting)throw new InvalidOperationException("麦克风测试尚未结束，请稍候。");if(ptt?.Busy==true)throw new InvalidOperationException("当前输入尚未完成，请松开快捷键并等待结果后再操作。");}
     private async Task Safe(Func<Task> fn){try{await fn();}catch(OperationCanceledException){StatusText.Text="操作已取消。";}catch(Exception e){await Dialogs.MessageAsync(this,"语音输入法",AppController.SafeError(e));}}
+    internal bool CanStartVoiceTurn() => !ManagementOperationBusy && !Volatile.Read(ref shuttingDown)
+        && Volatile.Read(ref trayMenu)?.IsOpen != true;
+    private Task Manage(Func<Task> action) => Safe(() => RunManagementOperationAsync(action));
+    internal async Task RunManagementOperationAsync(Func<Task> action)
+    {
+        EnsureIdle();
+        Interlocked.Increment(ref managementOperations);
+        try { await action(); }
+        finally { Interlocked.Decrement(ref managementOperations); }
+    }
     private void ProjectsRefresh(){updating=true;ProjectBox.ItemsSource=controller.Projects.ToArray();ProjectBox.SelectedValue=CurrentProject;updating=false;RefreshGeneratedMatches();}
     private async void Project_Changed(object sender,SelectionChangedEventArgs e)
     {
@@ -128,12 +139,12 @@ public partial class MainWindow : Window
             finally{changingLearning=false;pending=await controller.SnapshotAsync();}
         });
     }
-    private async void NewProject_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>{EnsureIdle();string? name=await Dialogs.AskAsync(this,"新建项目","项目名称");if(name!=null){await controller.CreateProjectAsync(name);ProjectsRefresh();}});
+    private async void NewProject_Click(object sender,RoutedEventArgs e)=>await Manage(async()=>{string? name=await Dialogs.AskAsync(this,"新建项目","项目名称");if(name!=null){await controller.CreateProjectAsync(name);ProjectsRefresh();}});
     private void Start_Click(object sender,RoutedEventArgs e){if(ptt==null){StatusText.Text="快捷键未启动，请检查启动提示后重新打开程序。";return;}ptt.SetEnabled(true);StatusText.Text=controller.Settings.DictationOnly?"请按住说话键听写，完成后复制正文。":"请在其他应用的文本框中按住说话键。";}
     private void Pause_Click(object sender,RoutedEventArgs e)=>ptt?.SetEnabled(false);
     private void Stop_Click(object sender,RoutedEventArgs e)=>ptt?.Cancel();
     private async void Paragraph_Click(object sender,RoutedEventArgs e)=>await Safe(()=>controller.ParagraphAsync());
-    private async void Review_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>{EnsureIdle();await Dialogs.ReviewAsync(this,controller);});
+    private async void Review_Click(object sender,RoutedEventArgs e)=>await Manage(async()=>{await Dialogs.ReviewAsync(this,controller);});
     private async Task ClipboardAsync(string text)
     {
         if(text.Length==0){StatusText.Text="当前没有可复制的正文。";return;}
@@ -166,7 +177,7 @@ public partial class MainWindow : Window
         finally{if(search==current)search=null;current.Dispose();}
     });
     private void HistoryCancel_Click(object sender,RoutedEventArgs e)=>search?.Cancel();
-    private async void HistoryOpen_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>{var hit=ResolveListAction<MemoryHit>(HistoryGrid,e);if(hit==null)return;EnsureIdle();await controller.LoadSessionAsync(hit.Session);ProjectsRefresh();ShowPage(0);});
+    private async void HistoryOpen_Click(object sender,RoutedEventArgs e)=>await Manage(async()=>{var hit=ResolveListAction<MemoryHit>(HistoryGrid,e);if(hit==null)return;await controller.LoadSessionAsync(hit.Session);ProjectsRefresh();ShowPage(0);});
     private async void HistoryExport_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>
     {
         if(HistoryGrid.SelectedItem is not MemoryHit hit)return;var file=await PickSaveAsync("语音输入记录.json",".json");if(file==null)return;
@@ -174,7 +185,7 @@ public partial class MainWindow : Window
         var latest=await controller.Repository.LoadSessionAsync(hit.Session.Id)??throw new InvalidOperationException("该历史记录已删除，请刷新列表。");
         await File.WriteAllTextAsync(file,JsonSerializer.Serialize(new{schemaVersion=3,session=latest.Session,segments=latest.Segments},new JsonSerializerOptions(JsonCodec.Options){WriteIndented=true}),new UTF8Encoding(false));
     });
-    private async void HistoryDelete_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>{EnsureIdle();if(HistoryGrid.SelectedItem is not MemoryHit hit)return;if(!await Dialogs.ConfirmAsync(this,"清除记忆","清除此记录及其派生词条来源？此操作不能撤销，外部文档不受影响。","清除"))return;await controller.DeleteSessionAsync(hit.Session);HistorySearch_Click(sender,e);});
+    private async void HistoryDelete_Click(object sender,RoutedEventArgs e)=>await Manage(async()=>{if(HistoryGrid.SelectedItem is not MemoryHit hit)return;if(!await Dialogs.ConfirmAsync(this,"清除记忆","清除此记录及其派生词条来源？此操作不能撤销，外部文档不受影响。","清除"))return;await controller.DeleteSessionAsync(hit.Session);HistorySearch_Click(sender,e);});
     private void RefreshTerms()
     {
         if(TermsGrid==null||TermFilter==null)return;string query=TermQuery.Text.Trim();var items=controller.Terms.Where(t=>t.Text.Contains(query,StringComparison.OrdinalIgnoreCase)&&(TermFilter.SelectedIndex switch{1=>t.State==TermState.Enabled,2=>t.State==TermState.Candidate,3=>t.State==TermState.Disabled,_=>true})).OrderByDescending(t=>t.Pinned).ThenBy(t=>t.State).ThenBy(t=>t.Text).ToArray();
@@ -184,8 +195,8 @@ public partial class MainWindow : Window
         RefreshSelectionActions();TermsCount.Text=$"当前显示 {items.Length} 个 · 全局及本项目 {controller.Terms.Count} 个 · 下轮提交 {controller.NextHotwords().Count} 个 · 待确认 {controller.Terms.Count(t=>t.State==TermState.Candidate)} 个 · "+(controller.Settings.DynamicLexicon?"动态排序已开启":"使用手动权重");
     }
     private void TermFilter_Changed(object sender,RoutedEventArgs e){if(ready)RefreshTerms();}
-    private async void TermAdd_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>{var term=await Dialogs.EditTermAsync(this,new(){Scope=CurrentProject});if(term!=null)await controller.SaveTermAsync(term);});
-    private async void TermEdit_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>
+    private async void TermAdd_Click(object sender,RoutedEventArgs e)=>await Manage(async()=>{var term=await Dialogs.EditTermAsync(this,new(){Scope=CurrentProject});if(term!=null)await controller.SaveTermAsync(term);});
+    private async void TermEdit_Click(object sender,RoutedEventArgs e)=>await Manage(async()=>
     {
         TermData? old=null;
         if(e is Microsoft.UI.Xaml.Input.DoubleTappedRoutedEventArgs doubleTap)
@@ -212,19 +223,19 @@ public partial class MainWindow : Window
         var term=await Dialogs.EditTermAsync(this,old);
         if(term!=null)await controller.SaveTermAsync(term);
     });
-    private async void TermConfirm_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>{foreach(var term in TermsGrid.SelectedItems.Cast<TermData>().ToArray())await controller.SaveTermAsync(term with{State=TermState.Enabled});});
-    private async void TermDisable_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>{foreach(var term in TermsGrid.SelectedItems.Cast<TermData>().ToArray())await controller.SaveTermAsync(term with{State=TermState.Disabled});});
-    private async void TermDelete_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>{var selected=TermsGrid.SelectedItems.Cast<TermData>().ToArray();if(selected.Length==0)return;if(!await Dialogs.ConfirmAsync(this,"词库",$"删除选中的 {selected.Length} 个词条？","删除"))return;foreach(var term in selected)await controller.DeleteTermAsync(term);});
+    private async void TermConfirm_Click(object sender,RoutedEventArgs e)=>await Manage(async()=>{foreach(var term in TermsGrid.SelectedItems.Cast<TermData>().ToArray())await controller.SaveTermAsync(term with{State=TermState.Enabled});});
+    private async void TermDisable_Click(object sender,RoutedEventArgs e)=>await Manage(async()=>{foreach(var term in TermsGrid.SelectedItems.Cast<TermData>().ToArray())await controller.SaveTermAsync(term with{State=TermState.Disabled});});
+    private async void TermDelete_Click(object sender,RoutedEventArgs e)=>await Manage(async()=>{var selected=TermsGrid.SelectedItems.Cast<TermData>().ToArray();if(selected.Length==0)return;if(!await Dialogs.ConfirmAsync(this,"词库",$"删除选中的 {selected.Length} 个词条？","删除"))return;foreach(var term in selected)await controller.DeleteTermAsync(term);});
     private async void TermEvidence_Click(object sender,RoutedEventArgs e){if(TermsGrid.SelectedItem is TermData term)await Dialogs.TextAsync(this,"词条来源",$"来源类型：{(term.Origin=="AiGenerated"?"AI 领域生成":term.Origin=="CorrectionLearning"?"纠错学习（来源见词库的纠错学习页）":term.Origin)}\n旧写法：{term.Alias}\n"+(term.GenerationRequirement.Length>0?$"生成要求：{term.GenerationRequirement}\n":"")+"\n"+(term.Evidence.Count==0?"此词条没有自动提取证据。":string.Join("\n\n",term.Evidence.Select(v=>$"会话 {v.SessionId}\n片段 {v.SegmentId} · 原文版本 {v.SourceRevision} · 编辑版本 {v.EditRevision}\n{v.Quote}"))));}
-    private async void TermImport_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>
+    private async void TermImport_Click(object sender,RoutedEventArgs e)=>await Manage(async()=>
     {
-        EnsureIdle();var file=await PickOpenAsync(".txt",".csv",".json");if(file==null)return;if(new FileInfo(file).Length>5*1024*1024)throw new ArgumentException("导入文件最多 5 MiB。");
+        var file=await PickOpenAsync(".txt",".csv",".json");if(file==null)return;if(new FileInfo(file).Length>5*1024*1024)throw new ArgumentException("导入文件最多 5 MiB。");
         var terms=TermExchange.Parse(await File.ReadAllTextAsync(file),Path.GetExtension(file),CurrentProject);
         if(!await Dialogs.ConfirmAsync(this,"导入词库",$"已校验 {terms.Count} 个词条，将按文件状态导入；相同范围的重名项会跳过。","导入"))return;
         int count=await controller.ImportTermsAsync(terms);StatusText.Text=$"已导入 {count} 个词条，重复项未覆盖。";
     });
     private async void TermExport_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>{var file=await PickSaveAsync("个人词库.json",".json");if(file!=null)await File.WriteAllTextAsync(file,TermExchange.Export(controller.Terms),new UTF8Encoding(false));});
-    private async void Extract_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>{EnsureIdle();await controller.ExtractAsync();});
+    private async void Extract_Click(object sender,RoutedEventArgs e)=>await Manage(async()=>{await controller.ExtractAsync();});
     private void ExtractCancel_Click(object sender,RoutedEventArgs e)=>controller.CancelExtraction();
     private async Task FillSettings()
     {
@@ -261,7 +272,7 @@ public partial class MainWindow : Window
         finally{savingSettings=false;}
     }
     private async void SettingsSave_Click(object sender,RoutedEventArgs e)=>await Safe(SaveSettings);
-    private async void RetrySave_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>{EnsureIdle();await controller.RetrySaveAsync();});
+    private async void RetrySave_Click(object sender,RoutedEventArgs e)=>await Manage(async()=>{await controller.RetrySaveAsync();});
     private async Task TestConnectionAsync(bool bailian)
     {
         await SaveSettings();testingConnection=true;
@@ -275,7 +286,7 @@ public partial class MainWindow : Window
     }
     private async void TestBailian_Click(object sender,RoutedEventArgs e)=>await Safe(()=>TestConnectionAsync(true));
     private async void TestDeepSeek_Click(object sender,RoutedEventArgs e)=>await Safe(()=>TestConnectionAsync(false));
-    private async void DeleteProject_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>{EnsureIdle();if(!await Dialogs.ConfirmAsync(this,"删除项目","删除当前项目及其全部记忆和项目词条？全局手动词条保留。","删除项目"))return;await controller.DeleteCurrentProjectAsync();ProjectsRefresh();});
+    private async void DeleteProject_Click(object sender,RoutedEventArgs e)=>await Manage(async()=>{if(!await Dialogs.ConfirmAsync(this,"删除项目","删除当前项目及其全部记忆和项目词条？全局手动词条保留。","删除项目"))return;await controller.DeleteCurrentProjectAsync();ProjectsRefresh();});
     private async void Usage_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>{var usage=await controller.Repository.UsageAsync();UsageBox.Text=usage.Count==0?"尚无用量记录。":string.Join("\n",usage.Select(u=>$"{u.At:yyyy-MM-dd} · {u.Purpose} · 输入 {u.InputTokens:N0} / 输出 {u.OutputTokens:N0} Token · ASR {u.AudioSeconds:F1} 秒"+(u.Unknown?" · 包含未知用量":"")))+"\n\nterm_budget 是预算占用，已知用量会结算，未知请求保留预留；不与 term_extraction / term_generation 相加作为账单。以服务商账单为准。";});
     private void PowerChanged(object sender,PowerModeChangedEventArgs e){if(e.Mode==PowerModes.Suspend){ptt?.Cancel("系统睡眠，自动输入已取消。");controller.Suspend();}}
     private void SessionChanged(object sender,SessionSwitchEventArgs e){if(e.Reason is SessionSwitchReason.SessionLock or SessionSwitchReason.SessionLogoff or SessionSwitchReason.ConsoleDisconnect or SessionSwitchReason.RemoteDisconnect){ptt?.Cancel("Windows 会话已锁定或断开，自动输入已取消。");controller.Suspend();}}

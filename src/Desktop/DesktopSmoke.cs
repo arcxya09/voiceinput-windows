@@ -136,6 +136,12 @@ public static class DesktopSmoke
             checks.Add("Repeated history snapshots preserve exact text and paragraphs across native line endings without resetting the user's selection");
             checks.Add("Version and dictation hotkey labels follow current production settings");
 
+            Stage("Verify the production management guard and dispatched final-preview event bridge");
+            await CheckManagementOperationGuardAsync(window);
+            await CheckPreviewEventBridgeAsync(window, controller);
+            checks.Add("Management operations block a new voice turn for their entire await and release the guard on failure");
+            checks.Add("Production controller snapshots and the real MainWindow event bridge preserve final-only and canceled text, reject old turns, and dismiss once");
+
             window.ShowPage(1);
             Stage("Invoke native history search");
             await LayoutAsync(window);
@@ -555,6 +561,82 @@ public static class DesktopSmoke
         byte[] png = new byte[checked((int)stream.Size)];
         reader.ReadBytes(png);
         await File.WriteAllBytesAsync(path, png);
+    }
+
+    private static async Task CheckManagementOperationGuardAsync(MainWindow window)
+    {
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var action = window.RunManagementOperationAsync(() => release.Task);
+        Require(!window.CanStartVoiceTurn(), "A management operation allowed a new voice turn while its await was pending.");
+        await Task.Delay(100);
+        Require(!Find<ComboBox>(window, "ProjectBox").IsEnabled, "Project selection remained enabled during a pending management operation.");
+        release.SetResult();
+        await action;
+        Require(window.CanStartVoiceTurn(), "The management guard was not released after completion.");
+        try { await window.RunManagementOperationAsync(() => throw new InvalidOperationException("Offline guard fixture")); }
+        catch (InvalidOperationException e) when (e.Message == "Offline guard fixture") { }
+        Require(window.CanStartVoiceTurn(), "The management guard remained held after a failed operation.");
+    }
+
+    private static async Task CheckPreviewEventBridgeAsync(MainWindow window, AppController controller)
+    {
+        var original = await controller.SnapshotAsync();
+        var source = new OfflinePreviewEvents();
+        window.ConnectPreviewEvents(source);
+        var overlay = window.RecognitionOverlay;
+        var preview = Find<TextBlock>(overlay, "OverlayPreview");
+        var status = Find<TextBlock>(overlay, "OverlayStatus");
+        var session = new SessionData { Title = "Final preview event fixture", ProjectId = controller.Settings.ProjectId };
+        var segment = new SegmentData { SessionId = session.Id, TaskId = "preview-smoke", TaskOrder = 1, SentenceId = 1,
+            RawText = "你好", FinalText = "你好", AsrState = AsrState.Confirmed, OutputState = OutputState.Published, SourceRevision = 1 };
+        try
+        {
+            await controller.Repository.SaveSegmentAsync(session, segment);
+            source.Start(session.Id);
+            // No partial preview is emitted. The latest controller snapshot is
+            // already terminal when the next 75 ms render consumes it.
+            await controller.LoadSessionAsync(session);
+            await controller.SetDeliveryAsync("Dictated", "听写完成", turnId: session.Id);
+            var completed = new VoiceTurnCompletion(session.Id, "听写完成", TranscriptText.Render(await controller.SnapshotAsync()));
+            source.Complete(completed);
+            await UntilAsync(() => preview.Text == "你好" && status.Text == "听写完成", "The production event bridge lost a final-only short utterance.");
+
+            await Task.Delay(1600);
+            source.Complete(completed);
+            source.Remind(new("上一段仍在整理", session.Id));
+            await controller.SetDeliveryAsync("Pending", "迟到的状态快照", turnId: session.Id);
+            await Task.Delay(1850);
+            Require(!overlay.AppWindow.IsVisible, "A duplicate completion, in-turn notice or late snapshot restarted the three-second hide timer.");
+
+            const string nextTurn = "next-preview-turn";
+            source.Start(nextTurn);
+            source.Complete(completed);
+            source.Remind(new("旧轮次提示", session.Id));
+            await UntilAsync(() => preview.Text == "说话时会在这里显示文字", "An older turn contaminated the next turn's empty preview.");
+            Require(status.Text == "准备麦克风…", "A late completion changed the next turn's status.");
+            source.Complete(new(nextTurn, "本轮已取消", "取消后保留最后一句"));
+            await UntilAsync(() => preview.Text == "取消后保留最后一句", "Cancellation lost its final confirmed words.");
+
+            source.Start("empty-preview-turn");
+            source.Complete(new("empty-preview-turn", "短按已取消", ""));
+            await UntilAsync(() => preview.Text == "本轮尚未识别到文字", "An empty canceled turn retained the preceding turn's words.");
+        }
+        finally
+        {
+            overlay.Clear();
+            await controller.DeleteSessionAsync(session);
+            if (original.Session != null) await controller.LoadSessionAsync(original.Session);
+        }
+    }
+
+    private sealed class OfflinePreviewEvents : IVoicePreviewEvents
+    {
+        public event Action<string>? TurnStarted;
+        public event Action<VoiceTurnCompletion>? TurnCompleted;
+        public event Action<VoiceInputNotice>? Notice;
+        public void Start(string id) => TurnStarted?.Invoke(id);
+        public void Complete(VoiceTurnCompletion result) => TurnCompleted?.Invoke(result);
+        public void Remind(VoiceInputNotice notice) => Notice?.Invoke(notice);
     }
 
     private static async Task CheckPreviewLifecycleAsync(VoiceOverlay overlay)
