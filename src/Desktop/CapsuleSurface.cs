@@ -43,7 +43,7 @@ internal sealed class CapsuleSurface : IDisposable
     internal bool BorderModeConfigured => acrylic.BorderModeConfigured;
     internal bool HasAntialiasedAcrylic => acrylic.IsConnected && acrylic.BorderModeConfigured;
     internal bool IsUsingAcrylic => material.Visibility == Visibility.Visible && acrylic.MaterialState == SystemBackdropState.Active;
-    internal string MaterialDiagnostics => $"Supported={AcrylicSupported}; SoftEdges={BorderModeConfigured}; Connected={acrylic.IsConnected}; State={acrylic.MaterialState?.ToString() ?? \"Solid\"}; EffectsAllowed={effectsAllowed}; Fallback={acrylic.FallbackReason}";
+    internal string MaterialDiagnostics => $"Supported={AcrylicSupported}; SoftEdges={BorderModeConfigured}; Connected={acrylic.IsConnected}; State={acrylic.MaterialState?.ToString() ?? "Solid"}; EffectsAllowed={effectsAllowed}; Fallback={acrylic.FallbackReason}";
 
     public CapsuleSurface(Window window, Grid transparentHost, Border capsule)
     {
