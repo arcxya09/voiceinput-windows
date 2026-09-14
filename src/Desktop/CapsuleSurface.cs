@@ -280,7 +280,7 @@ internal static class ExternalBackdropAntialiasing
         {
             unknown = MarshalInspectable<ICompositionSupportsSystemBackdrop>.FromManaged(target);
             var iid = InterfaceId;
-            if (Marshal.QueryInterface(unknown, ref iid, out link) < 0 || link == IntPtr.Zero) return false;
+            if (Marshal.QueryInterface(unknown, in iid, out link) < 0 || link == IntPtr.Zero) return false;
             var vtable = Marshal.ReadIntPtr(link);
             var setter = Marshal.GetDelegateForFunctionPointer<SetBorderMode>(Marshal.ReadIntPtr(vtable, 8 * IntPtr.Size));
             if (setter(link, (int)CompositionBorderMode.Soft) < 0) return false;

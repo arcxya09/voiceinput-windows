@@ -371,7 +371,7 @@ public static class DesktopSmoke
                 await LayoutAsync(overlay);
                 CheckCapsuleNativeFrame(hwnd, "overlay " + theme);
                 CheckCapsuleLayout(overlay);
-                Console.WriteLine("Capsule material: " + overlay.MaterialDiagnostics + "; desktop blur remains governed by system policy.");
+                checks.Add("Capsule material in " + theme + ": " + overlay.MaterialDiagnostics + "; desktop blur remains governed by system policy");
                 await CheckCapsuleSurfaceOnDesktopAsync(overlay, longText, desktopImages, report);
             }
             var preview = Find<TextBlock>(overlay, "OverlayPreview");
@@ -386,15 +386,15 @@ public static class DesktopSmoke
                 checks.Add("The tray retains its native DWM frame and opaque light/dark surfaces; the capsule uses an independent frame-free host with no hard-edged GDI region");
             checks.Add("Long live previews stay on one line and retain complete Unicode graphemes at the transcript tail");
 
-            var overlayImages = new List<Pixels> { await CaptureAsync((FrameworkElement)overlay.Content) };
+            var overlayImages = new List<Pixels> { CaptureDesktopWindow(hwnd) };
             overlay.SetMeter(0, false);
             overlay.Update("正在整理", "全文整理完成后将输入原位置");
             await LayoutAsync(overlay);
             Require(preview.Text == "全文整理完成后将输入原位置", "Long-to-short preview retained a stale measurement.");
-            overlayImages.Add(await CaptureAsync((FrameworkElement)overlay.Content));
+            overlayImages.Add(CaptureDesktopWindow(hwnd));
             overlay.Update("已完成", "识别结果已保留，可打开管理窗口复制。", dismiss: true);
             await LayoutAsync(overlay);
-            overlayImages.Add(await CaptureAsync((FrameworkElement)overlay.Content));
+            overlayImages.Add(CaptureDesktopWindow(hwnd));
             overlay.SetPersistentWarning("1 项保存失败，请打开管理窗口重试保存或复制正文。");
             await LayoutAsync(overlay);
             var warned = CheckOverlayBounds(overlay);
@@ -402,7 +402,7 @@ public static class DesktopSmoke
                 "A persistent save warning changed the compact overlay dimensions.");
             Require(Find<TextBlock>(overlay, "OverlayWarning").Visibility == Visibility.Visible, "The persistent save warning is hidden.");
             Require(foreground == IntPtr.Zero || GetForegroundWindow() == foreground, "An overlay state transition changed foreground focus.");
-            overlayImages.Add(await CaptureAsync((FrameworkElement)overlay.Content));
+            overlayImages.Add(CaptureDesktopWindow(hwnd));
             await SaveContactSheetAsync(EvidencePath(report, "overlay"), overlayImages, columns: 1);
             await Task.Delay(3450);
             Require(overlay.AppWindow.IsVisible && Find<TextBlock>(overlay, "OverlayWarning").Visibility == Visibility.Visible,
