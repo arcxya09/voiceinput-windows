@@ -447,6 +447,12 @@ await InputReviewRegression.Run(Test);
 await LexiconReviewRegression.Run(Test);
 await MemoryReviewRegression.Run(Test);
 await UiReviewRegression.Run(Test);
+await Review212PersistenceRegression.Run(Test);
+await Review212SessionRegression.Run(Test);
+await Review212StartupRegression.Run(Test);
+await Review212UnitsRegression.Run(Test);
+await Review212LexiconRegression.Run(Test);
+await Review212UiRegression.Run(Test);
 Console.WriteLine($"RESULT: {passed} passed; {failed} failed. Interactive desktop, microphone and paid cloud calls were not executed.");
 return failed==0?0:1;
 

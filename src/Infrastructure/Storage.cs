@@ -14,6 +14,8 @@ public sealed class WindowsProtector : IProtector
     public byte[] Unprotect(byte[] cipher) => OperatingSystem.IsWindows() ? ProtectedData.Unprotect(cipher, null, DataProtectionScope.CurrentUser) : throw new PlatformNotSupportedException("DPAPI requires Windows.");
 }
 
+public sealed record StartupSettings(AppSettings Settings, Credentials Credentials, string? Warning);
+
 public sealed class SettingsStore(string folder, IProtector protector)
 {
     private readonly object saveSync = new();
@@ -22,12 +24,62 @@ public sealed class SettingsStore(string folder, IProtector protector)
     {
         Directory.CreateDirectory(folder);
         if (!File.Exists(FilePath("settings.json"))) return new();
-        var loaded = JsonSerializer.Deserialize<AppSettings>(File.ReadAllBytes(FilePath("settings.json")), JsonCodec.Options) ?? new();
+        var loaded = JsonSerializer.Deserialize<AppSettings>(File.ReadAllBytes(FilePath("settings.json")), JsonCodec.Options)
+            ?? throw new InvalidDataException("设置文件未包含有效配置。");
         loaded=loaded.SchemaVersion < 3 ? loaded with { SchemaVersion=3, Hotkey="RightCtrl" } : loaded;
         if(loaded.SchemaVersion<4)loaded=loaded with{SchemaVersion=4,MaxHoldSeconds=loaded.MaxHoldSeconds==120?600:loaded.MaxHoldSeconds,SilenceMs=loaded.SilenceMs==800?2500:loaded.SilenceMs};
         return loaded with{PolishPrompt=PolishRules.ResolvePrompt(loaded.PolishPrompt)};
     }
-    public Credentials LoadCredentials() => !File.Exists(FilePath("credentials.dat")) ? new() : JsonSerializer.Deserialize<Credentials>(protector.Unprotect(File.ReadAllBytes(FilePath("credentials.dat"))), JsonCodec.Options) ?? new();
+    public Credentials LoadCredentials()
+    {
+        if (!File.Exists(FilePath("credentials.dat"))) return new();
+        var credentials = JsonSerializer.Deserialize<Credentials>(protector.Unprotect(File.ReadAllBytes(FilePath("credentials.dat"))), JsonCodec.Options)
+            ?? throw new InvalidDataException("凭据文件未包含有效 API Key。");
+        if (credentials.BailianKey == null || credentials.DeepSeekKey == null ||
+            credentials.BailianKey.Any(char.IsControl) || credentials.DeepSeekKey.Any(char.IsControl))
+            throw new InvalidDataException("凭据文件中的 API Key 格式无效。");
+        return credentials;
+    }
+
+    public StartupSettings LoadForStartup()
+    {
+        AppSettings settings;
+        Credentials credentials;
+        bool settingsFailed = false;
+        var warnings = new List<string>();
+        try
+        {
+            settings = Load();
+            if (settings.WorkspaceId == null || settings.DeviceId == null || settings.ProjectId == null)
+                throw new InvalidDataException("设置文件包含空的配置字段。");
+            settings.Validate();
+        }
+        catch (Exception e) when (RecoverableLoadFailure(e))
+        {
+            settingsFailed = true;
+            // An unreadable configuration cannot establish prior consent. Keep
+            // history readable without saving, learning, deleting or inserting
+            // new text automatically until the user reviews these settings.
+            settings = new AppSettings
+            {
+                SaveMemory = false, AllowLearning = false, LearnCorrections = false,
+                UseLexicon = false, DynamicLexicon = false, AutoExtract = false, AsrContext = false,
+                PreviousContext = false, PolishEnabled = false, DictationOnly = true,
+                RetentionDays = null
+            };
+            warnings.Add("设置文件无法读取，已临时关闭正文保存、学习和自动输入，并暂停自动清理历史。请检查设置后保存；原设置文件未改动。");
+        }
+        try { credentials = LoadCredentials(); }
+        catch (Exception e) when (RecoverableLoadFailure(e))
+        {
+            credentials = new();
+            warnings.Add("API Key 无法读取，请在设置中重新填写并保存。" + (settingsFailed ? "" : "原有偏好设置已保留。"));
+        }
+        return new(settings, credentials, warnings.Count == 0 ? null : string.Join("\n", warnings));
+    }
+
+    private static bool RecoverableLoadFailure(Exception error) => error is IOException or InvalidDataException or UnauthorizedAccessException or
+        System.Security.SecurityException or CryptographicException or JsonException or ArgumentException or InvalidOperationException or NotSupportedException;
     public void Save(AppSettings settings, Credentials credentials)
     {
         lock(saveSync)

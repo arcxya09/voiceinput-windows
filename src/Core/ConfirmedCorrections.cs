@@ -20,7 +20,25 @@ public static class ConfirmedCorrections
     private static readonly Regex Numbers = new(@"(?:(?:正|负|負|[+\-−±])[ \t]*)?(?:(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)(?:[eE][+\-−]?[0-9]+)?|[零〇一二三四五六七八九十百千万亿两]+(?:点[零〇一二三四五六七八九]+)?)", RegexOptions.Compiled, TimeSpan.FromMilliseconds(100));
     private static readonly Regex Relations = new(@"[不没无未非否]|n['’]t(?![A-Za-z])|(?<![A-Za-z])(?:cannot|not|no|never|without|neither|nor)(?![A-Za-z])", RegexOptions.Compiled | RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(100));
     private static readonly Regex Quantities = new(@"大于等于|小于等于|不小于|不大于|不少于|不多于|大于|小于|等于|至少|至多|超过|低于|高于|正比|反比|增加|减少|升高|降低|上升|下降|平方|立方|次方|乘以|除以|加上|减去|分之|[正负負+\-−±<>≤≥≠=≈≃≲≳×÷^→←↔]|(?<![A-Za-z])(?:less than|greater than|at least|at most|positive|negative|squared|cubed)(?![A-Za-z])", RegexOptions.Compiled | RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(100));
-    private static readonly Regex Units = new(@"摄氏度|华氏度|千米|厘米|毫米|微米|纳米|公斤|千克|毫克|微克|千瓦|兆瓦|毫瓦|千伏|毫伏|毫安|微安|毫秒|微秒|纳秒|小时|分钟|百分之|摄氏|华氏|欧姆|帕斯卡|电子伏|伏特|安培|瓦特|赫兹|开尔文|毫升|(?<=[零〇一二三四五六七八九十百千万亿两0-9０-９])[ \t]*(?:米|秒|度|伏|安|瓦|升|克|吨)|(?<![A-Za-z])(?:[pnumkMGTμµ]?(?:eV|Hz|Pa|Gy|Sv|W|V|A|K|J|s|m|g|b)|kg|mol|cd|rad|deg|rpm|cm|mm|km|ms|us|ns)(?![A-Za-z])|°[CF]|[%％℃℉Ω°]", RegexOptions.Compiled, TimeSpan.FromMilliseconds(100));
+    // Match prefixes together with the unit: matching only the "安培" in both
+    // "皮安培" and "飞安培" loses the change in magnitude. Symbols stay case-sensitive
+    // (mA != MA), while spelled-out English names accept ordinary capitalization.
+    // Keep short Chinese unit names contextual so unrelated words containing 米/安/巴
+    // are not treated as measurements. Full names and prefixed units are unambiguous.
+    private const string ChinesePrefixes = @"(?:昆它|容那|尧它|泽它|艾可萨|拍它|太拉|吉咖|阿托|仄普托|幺科托|柔托|亏科托|[昆容尧泽艾拍太吉兆千百十分厘毫微纳皮飞阿仄幺柔亏])";
+    private const string ChineseUnitNames = @"(?:电子伏特|电子伏|帕斯卡|开尔文|坎德拉|贝克勒尔|贝可勒尔|西门子|希沃特|特斯拉|勒克斯|摄氏度|华氏度|球面度|安培|摩尔|弧度|赫兹|牛顿|焦耳|瓦特|库仑|伏特|法拉|欧姆|韦伯|亨利|流明|戈瑞)";
+    private const string ChineseShortUnits = @"(?:米|克|秒|安|开|赫|牛|帕|焦|瓦|库|伏|法|欧|西|韦|特|亨|贝|戈|希|升|巴)";
+    private const string EnglishPrefixes = @"(?:quetta|ronna|yotta|zetta|exa|peta|tera|giga|mega|kilo|hecto|deca|deka|deci|centi|milli|micro|nano|pico|femto|atto|zepto|yocto|ronto|quecto)";
+    private const string EnglishUnitNames = @"(?:electron[ -]?volt|metre|meter|gramme|gram|second|ampere|amp|kelvin|mole|candela|steradian|radian|hertz|newton|pascal|joule|watt|coulomb|volt|farad|ohm|siemens|weber|tesla|henry|henries|lumen|lux|becquerel|gray|sievert|katal|litre|liter|barn|bar)s?";
+    private const string SymbolUnits = @"(?:(?:da|[QRYZEPTGMkhdcmunpfazyrqμµ])?(?:mol|kat|rad|eV|Hz|Pa|Wb|Bq|Gy|Sv|cd|sr|lm|lx|W|V|A|K|J|N|C|F|S|T|H|Ω|s|m|g|b|L|l)|deg|rpm)";
+    // Pairs are at most 32 Unicode scalars. Interpret this larger pattern: first-use
+    // JIT of a compiled runner can consume its 100 ms match budget before scanning.
+    private static readonly Regex Units = new(
+        ChinesePrefixes + @"[ \t]*(?:" + ChineseUnitNames + "|" + ChineseShortUnits + ")|" + ChineseUnitNames
+        + @"|公斤|小时|分钟|百分之|摄氏|华氏|(?<=[零〇一二三四五六七八九十百千万亿两0-9])[ \t]*(?:" + ChineseShortUnits + @"|度|吨)"
+        + @"|(?<![A-Za-z])(?i:(?:" + EnglishPrefixes + @"[ -]?)?" + EnglishUnitNames + @"|celsius|fahrenheit)(?![A-Za-z])"
+        + @"|(?<![A-Za-z])" + SymbolUnits + @"(?![A-Za-z])|°[CF]|[%％℃℉Ω°]",
+        RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(100));
 
     private static string[] Signature(Regex pattern, string text) => pattern.Matches(text).Select(m => m.Value).ToArray();
     public static bool IsSafePair(string original, string corrected)

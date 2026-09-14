@@ -16,9 +16,9 @@ public partial class MainWindow
     private string GenerationScopeName=>GenerationScope=="*"?"全局词库":controller.Projects.FirstOrDefault(p=>p.Id==CurrentProject)?.Name??"当前项目";
     private bool GeneratedExists(string word)=>controller.Terms.Any(t=>t.Scope==GenerationScope&&Lexicon.SameWord(t.Text,word));
 
-    private async void PromptSave_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>
+    private async void PromptSave_Click(object sender,RoutedEventArgs e)=>await Manage(async()=>
     {
-        EnsureIdle();await controller.SavePolishPromptAsync(PolishPromptBox.Text);PolishPromptBox.Text=controller.Settings.EffectivePolishPrompt;
+        await controller.SavePolishPromptAsync(PolishPromptBox.Text);PolishPromptBox.Text=controller.Settings.EffectivePolishPrompt;
         PromptTestStatus.Text="提示词已保存，将用于后续润色。";
     });
     private void PromptReset_Click(object sender,RoutedEventArgs e)

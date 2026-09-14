@@ -242,10 +242,7 @@ public sealed partial class TranscriptEngine
             if (s.FinalText == text && (s.OutputState == OutputState.Deleted) == deleted) return s;
             if (action is not "恢复原文" && JsonCodec.Count(text) > 20000) throw new ArgumentException("单段编辑超过 20,000 字。");
             var corrections = action == "编辑" && !deleted
-                ? (history[cursor].Corrections ?? []).Where(c => text.Contains(c.Corrected, StringComparison.Ordinal)).ToList() : [];
-            if (learnCorrections && action == "编辑" && s.OutputState != OutputState.Deleted)
-                corrections.AddRange(CorrectionRules.Detect(s.FinalText, text));
-            corrections = corrections.DistinctBy(c => (c.Original,c.Corrected)).TakeLast(32).ToList();
+                ? CorrectionRules.Update(s.FinalText, text, history[cursor].Corrections ?? [], learnCorrections && s.OutputState != OutputState.Deleted) : [];
             history = history.Take(cursor + 1).ToList(); history.Add(new(text, deleted, corrections)); cursor++;
         }
         if (action is not ("撤销" or "恢复原文") && JsonCodec.Count(text) > 20000) throw new ArgumentException("单段编辑超过 20,000 字。");

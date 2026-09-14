@@ -3,7 +3,13 @@ using System.Text.Json.Serialization;
 
 namespace RealtimeTranscription.Core;
 
-public record CorrectionChange(string Original, string Corrected, string BeforeContext, string AfterContext, DateTimeOffset At);
+public record CorrectionChange(string Original, string Corrected, string BeforeContext, string AfterContext, DateTimeOffset At)
+{
+    // UTF-16 offset in this edit state's text. Older saved histories have no position;
+    // they are resolved conservatively from their recorded before/after context.
+    public int CorrectedStart { get; init; } = -1;
+    [JsonIgnore] public int OriginalStart { get; init; } = -1;
+}
 public enum CorrectionState { Pending, Learned, Ignored }
 public record CorrectionEvidence(string SessionId, string SegmentId, long SourceRevision, long EditRevision, string BeforeContext, string AfterContext, DateTimeOffset At);
 public record CorrectionCandidate
@@ -44,16 +50,106 @@ public static class CorrectionRules
     private static bool HasLetter(string text)=>text.EnumerateRunes().Any(Rune.IsLetter);
     public static bool SamePair(CorrectionCandidate candidate,CorrectionChange change)=>string.Equals(candidate.Original,change.Original,StringComparison.Ordinal)&&candidate.Corrected==change.Corrected;
     public static IReadOnlyList<CorrectionChange> Active(SegmentData segment)=>segment.OutputState == OutputState.Published && segment.UndoHistory is { Count: > 0 } states
-        && segment.UndoPosition >= 0 && segment.UndoPosition < states.Count ? states[segment.UndoPosition].Corrections ?? [] : [];
+        && segment.UndoPosition >= 0 && segment.UndoPosition < states.Count ? ResolveOccurrences(segment.FinalText, states[segment.UndoPosition].Corrections ?? []) : [];
+
+    private static bool OccursAt(string text, string word, int start)
+    {
+        if (start < 0 || word.Length == 0 || start > text.Length - word.Length || !text.AsSpan(start, word.Length).SequenceEqual(word)) return false;
+        static bool AsciiWord(char c) => c is >= 'A' and <= 'Z' or >= 'a' and <= 'z' or >= '0' and <= '9' or '_';
+        return !word.Any(c => c is >= 'A' and <= 'Z' or >= 'a' and <= 'z')
+            || ((start == 0 || !AsciiWord(text[start - 1])) && (start + word.Length == text.Length || !AsciiWord(text[start + word.Length])));
+    }
+
+    private static string Context(string text, int start, int length) =>
+        string.Concat(text[..start].EnumerateRunes().TakeLast(24).Select(r => r.ToString()))
+        + text.Substring(start, length)
+        + string.Concat(text[(start + length)..].EnumerateRunes().Take(24).Select(r => r.ToString()));
+
+    private static List<CorrectionChange> ResolveOccurrences(string text, IEnumerable<CorrectionChange> changes)
+    {
+        var result = new List<CorrectionChange>();
+        foreach (var change in changes.Take(32))
+        {
+            if (change.CorrectedStart >= 0)
+            {
+                if (OccursAt(text, change.Corrected, change.CorrectedStart)) result.Add(change with { AfterContext = Context(text, change.CorrectedStart, change.Corrected.Length) });
+                continue;
+            }
+            // A legacy pair could represent several occurrences. Recover only positions
+            // demonstrated by the saved contextual diff, never an unrelated identical word.
+            var context = change.AfterContext;
+            int contextStart = context.Length == 0 ? -1 : text.IndexOf(context, StringComparison.Ordinal);
+            if (contextStart >= 0 && text.IndexOf(context, contextStart + 1, StringComparison.Ordinal) < 0)
+            {
+                foreach (var local in Detect(change.BeforeContext, context).Where(c => c.Original == change.Original && c.Corrected == change.Corrected))
+                {
+                    int start = contextStart + local.CorrectedStart;
+                    if (OccursAt(text, change.Corrected, start)) result.Add(change with { CorrectedStart = start, AfterContext = Context(text, start, change.Corrected.Length) });
+                }
+            }
+            // Old audit-only records without a usable context cannot establish which
+            // occurrence was corrected and must not authorize learning from another one.
+        }
+        return result.DistinctBy(c => (c.Original, c.Corrected, c.CorrectedStart)).TakeLast(32).ToList();
+    }
+
+    /// <summary>Moves existing correction occurrences through this edit and learns only its surviving net changes.</summary>
+    public static List<CorrectionChange> Update(string before, string after, IEnumerable<CorrectionChange> previous, bool detectNew)
+    {
+        var known = ResolveOccurrences(before, previous);
+        if (before == after) return known;
+        var a = before.EnumerateRunes().ToArray(); var b = after.EnumerateRunes().ToArray();
+        static int[] Offsets(Rune[] value)
+        {
+            var result = new int[value.Length + 1];
+            for (int i = 0; i < value.Length; i++) result[i + 1] = result[i] + value[i].Utf16SequenceLength;
+            return result;
+        }
+        var oldOffsets = Offsets(a); var newOffsets = Offsets(b);
+        var diff = Diff(a, b);
+        var edits = diff?.Select(h => new Hunk(oldOffsets[h.OldStart], oldOffsets[h.OldEnd], newOffsets[h.NewStart], newOffsets[h.NewEnd])).ToArray();
+        if (edits == null)
+        {
+            // A large rewrite exceeds the bounded diff budget. Only untouched prefix and
+            // suffix positions remain provable; do not guess among repeated middle words.
+            int prefix = 0, suffix = 0;
+            while (prefix < before.Length && prefix < after.Length && before[prefix] == after[prefix]) prefix++;
+            while (suffix < before.Length - prefix && suffix < after.Length - prefix && before[^(suffix + 1)] == after[^(suffix + 1)]) suffix++;
+            edits = [new(prefix, before.Length - suffix, prefix, after.Length - suffix)];
+        }
+        var result = new List<CorrectionChange>();
+        foreach (var change in known)
+        {
+            int start = change.CorrectedStart, end = start + change.Corrected.Length;
+            if (edits.Any(h => h.OldStart == h.OldEnd ? h.OldStart > start && h.OldStart < end : h.OldStart < end && h.OldEnd > start)) continue;
+            int next = start + edits.Where(h => h.OldEnd <= start).Sum(h => h.NewEnd - h.NewStart - (h.OldEnd - h.OldStart));
+            if (OccursAt(after, change.Corrected, next)) result.Add(change with { CorrectedStart = next, AfterContext = Context(after, next, change.Corrected.Length) });
+        }
+        foreach (var detected in detectNew ? Detect(before, after) : [])
+        {
+            int start = detected.OriginalStart, end = start + detected.Original.Length;
+            var overlaps = known.Where(c => c.CorrectedStart < end && c.CorrectedStart + c.Corrected.Length > start).ToArray();
+            // Preserve the original spelling through further edits of the same occurrence.
+            // Replacing it with its original text removes that correction instead of learning
+            // the inverse pair. A separate occurrence with the same spelling stays intact.
+            if (overlaps.Any(c => c.CorrectedStart < start || c.CorrectedStart + c.Corrected.Length > end)) continue;
+            string original = detected.Original;
+            foreach (var prior in overlaps.OrderByDescending(c => c.CorrectedStart))
+                original = original.Remove(prior.CorrectedStart - start, prior.Corrected.Length).Insert(prior.CorrectedStart - start, prior.Original);
+            if (!ConfirmedCorrections.IsSafePair(original, detected.Corrected)) continue;
+            result.Add(detected with { Original = original, BeforeContext = overlaps.Length == 1 && overlaps[0].CorrectedStart == start && overlaps[0].Corrected.Length == detected.Original.Length ? overlaps[0].BeforeContext : detected.BeforeContext });
+        }
+        return result.DistinctBy(c => (c.Original, c.Corrected, c.CorrectedStart)).TakeLast(32).ToList();
+    }
 
     public static List<CorrectionChange> Detect(string before,string after)
     {
         if(before==after||before.Length>40000||after.Length>40000)return [];
-        before=before.Normalize(NormalizationForm.FormC);after=after.Normalize(NormalizationForm.FormC);
+        if(before.Normalize(NormalizationForm.FormC)==after.Normalize(NormalizationForm.FormC))return [];
         var a=before.EnumerateRunes().ToArray();var b=after.EnumerateRunes().ToArray();
         if(a.Length>20000||b.Length>20000||a.Length==0||b.Length==0)return [];
         var hunks=new List<Hunk>();
-        foreach(var next in Diff(a,b))
+        foreach(var next in Diff(a,b) ?? [])
         {
             if(hunks.LastOrDefault() is {} prior && next.OldStart-prior.OldEnd==next.NewStart-prior.NewEnd
                 && Join(a,prior.OldEnd,next.OldStart).EnumerateRunes().All(LatinWord)
@@ -92,22 +188,28 @@ public static class CorrectionRules
             // Numerical corrections and changed logical/quantity relations are edits to the
             // statement, not reusable spelling rules. Share the execution-time guard so a
             // candidate cannot later turn a one-off value change into a global replacement.
-            if(!ConfirmedCorrections.IsSafePair(original,corrected))continue;
+            if(original.Normalize(NormalizationForm.FormC)==corrected.Normalize(NormalizationForm.FormC)||!ConfirmedCorrections.IsSafePair(original,corrected))continue;
             // Do not combine a second changed span into this suggestion through an expanded boundary.
             if(hunks.Any(x=>x!=h&&x.NewStart<h.NewEnd+right&&x.NewEnd>h.NewStart-left))continue;
             string contextBefore=Join(a,Math.Max(0,h.OldStart-left-24),Math.Min(a.Length,h.OldEnd+right+24));
             string contextAfter=Join(b,Math.Max(0,h.NewStart-left-24),Math.Min(b.Length,h.NewEnd+right+24));
-            result.Add(new(original,corrected,contextBefore,contextAfter,at));
-            if(result.Count>=8)break;
+            if(!result.Any(c=>c.Original==original&&c.Corrected==corrected)&&result.Select(c=>(c.Original,c.Corrected)).Distinct().Count()>=8)continue;
+            string oldSpan=Join(a,h.OldStart-left,h.OldEnd+right),newSpan=Join(b,h.NewStart-left,h.NewEnd+right);
+            result.Add(new(original,corrected,contextBefore,contextAfter,at)
+            {
+                OriginalStart=Join(a,0,h.OldStart-left).Length+oldSpan.Length-oldSpan.TrimStart().Length,
+                CorrectedStart=Join(b,0,h.NewStart-left).Length+newSpan.Length-newSpan.TrimStart().Length
+            });
+            if(result.Count>=32)break;
         }
-        return result.DistinctBy(c=>(c.Original,c.Corrected)).ToList();
+        return result.DistinctBy(c=>(c.Original,c.Corrected,c.CorrectedStart)).ToList();
     }
     public static bool ValidPair(string original,string corrected)=>original!=corrected&&JsonCodec.Count(original) is >=2 and <=32
         &&JsonCodec.Count(corrected) is >=2 and <=32&&HasLetter(original)&&HasLetter(corrected)
         &&!original.Any(char.IsControl)&&!corrected.Any(char.IsControl)&&!Ordinary.Contains(original)&&!Ordinary.Contains(corrected);
 
     // Myers diff with a fixed edit-distance budget; large rewrites are intentionally skipped.
-    private static List<Hunk> Diff(Rune[] a,Rune[] b)
+    private static List<Hunk>? Diff(Rune[] a,Rune[] b)
     {
         const int limit=128,offset=limit+1;var v=new int[2*limit+3];Array.Fill(v,-1);v[offset+1]=0;
         var trace=new List<int[]>();int distance=-1;
@@ -121,7 +223,7 @@ public static class CorrectionRules
                 v[index]=x;if(x>=a.Length&&y>=b.Length){distance=d;break;}
             }
         }
-        if(distance<0)return [];
+        if(distance<0)return null;
         int ax=a.Length,by=b.Length;var operations=new List<char>();
         for(int d=distance;d>=0;d--)
         {
