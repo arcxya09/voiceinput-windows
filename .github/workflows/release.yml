@@ -35,9 +35,11 @@ jobs:
           REFRESH_DEPENDENCY_LOCKS: ${{ inputs.refresh_dependency_locks }}
         run: ./build.ps1 -UpdateDependencyLocks:($env:REFRESH_DEPENDENCY_LOCKS -eq 'true') *>&1 | Tee-Object -FilePath build-output.log -Append
       - name: Exercise actual Windows executable without microphone or cloud
+        if: ${{ !cancelled() && hashFiles('artifacts/VoiceInput-Portable-x64-*.zip') != '' }}
         shell: pwsh
         run: ./scripts/WindowsSmoke.ps1 *>&1 | Tee-Object -FilePath build-output.log -Append
       - name: Install, launch and uninstall the actual Windows installer
+        if: ${{ !cancelled() && hashFiles('artifacts/VoiceInput-Setup-*.exe') != '' }}
         shell: pwsh
         run: ./scripts/TestInstaller.ps1 *>&1 | Tee-Object -FilePath build-output.log -Append
       - name: Prepare release assets
