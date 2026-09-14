@@ -39,8 +39,11 @@ internal sealed class CapsuleSurface : IDisposable
     private bool effectsAllowed;
     private bool geometryQueued;
 
-    internal bool HasAntialiasedAcrylic => acrylic.IsConnected;
-    internal bool IsUsingAcrylic => material.Visibility == Visibility.Visible && acrylic.IsConnected;
+    internal bool AcrylicSupported => acrylic.AcrylicSupported;
+    internal bool BorderModeConfigured => acrylic.BorderModeConfigured;
+    internal bool HasAntialiasedAcrylic => acrylic.IsConnected && acrylic.BorderModeConfigured;
+    internal bool IsUsingAcrylic => material.Visibility == Visibility.Visible && acrylic.MaterialState == SystemBackdropState.Active;
+    internal string MaterialDiagnostics => $"Supported={AcrylicSupported}; SoftEdges={BorderModeConfigured}; Connected={acrylic.IsConnected}; State={acrylic.MaterialState?.ToString() ?? \"Solid\"}; EffectsAllowed={effectsAllowed}; Fallback={acrylic.FallbackReason}";
 
     public CapsuleSurface(Window window, Grid transparentHost, Border capsule)
     {
@@ -182,6 +185,10 @@ internal sealed partial class CapsuleAcrylicBackdrop(Action availabilityChanged)
     private ICompositionSupportsSystemBackdrop? target;
     private bool dark, highContrast, disposed;
     internal bool IsConnected => controller != null;
+    internal bool AcrylicSupported { get; private set; }
+    internal bool BorderModeConfigured { get; private set; }
+    internal SystemBackdropState? MaterialState => controller?.State;
+    internal string FallbackReason { get; private set; } = "NotConnected";
 
     public void UpdateAppearance(bool dark, bool highContrast)
     {
@@ -196,12 +203,15 @@ internal sealed partial class CapsuleAcrylicBackdrop(Action availabilityChanged)
     protected override void OnTargetConnected(ICompositionSupportsSystemBackdrop connectedTarget, XamlRoot xamlRoot)
     {
         base.OnTargetConnected(connectedTarget, xamlRoot);
-        if (disposed || !DesktopAcrylicController.IsSupported()) return;
+        if (disposed) return;
+        AcrylicSupported = DesktopAcrylicController.IsSupported();
+        if (!AcrylicSupported) { FallbackReason = "Unsupported"; return; }
         // WinUI issue #11086: the external link defaults to hard edges. Its
         // documented ExternalBackdropBorderMode API is still absent from the
         // stable C# projection. Query the interface before calling that single
         // property; an unsupported runtime gets a smooth solid XAML capsule.
-        if (!ExternalBackdropAntialiasing.TryEnable(connectedTarget)) return;
+        BorderModeConfigured = ExternalBackdropAntialiasing.TryEnable(connectedTarget);
+        if (!BorderModeConfigured) { FallbackReason = "SoftBorderUnavailable"; return; }
         target = connectedTarget;
         configuration = new SystemBackdropConfiguration();
         UpdateAppearance(dark, highContrast);
@@ -213,12 +223,15 @@ internal sealed partial class CapsuleAcrylicBackdrop(Action availabilityChanged)
             {
                 controller.Dispose();
                 controller = null;
+                FallbackReason = "TargetRejected";
             }
+            else FallbackReason = "None";
         }
         catch (Exception ex) when (ex is COMException or NotSupportedException)
         {
             controller?.Dispose();
             controller = null;
+            FallbackReason = $"ControllerError:{ex.HResult:X8}";
         }
         availabilityChanged();
     }
@@ -257,6 +270,8 @@ internal static class ExternalBackdropAntialiasing
     private static readonly Guid InterfaceId = new("1054BF83-B35B-5FDE-8DD7-AC3BB3E6CE27");
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate int SetBorderMode(IntPtr instance, int mode);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int GetBorderMode(IntPtr instance, out int mode);
 
     public static bool TryEnable(ICompositionSupportsSystemBackdrop target)
     {
@@ -268,7 +283,9 @@ internal static class ExternalBackdropAntialiasing
             if (Marshal.QueryInterface(unknown, ref iid, out link) < 0 || link == IntPtr.Zero) return false;
             var vtable = Marshal.ReadIntPtr(link);
             var setter = Marshal.GetDelegateForFunctionPointer<SetBorderMode>(Marshal.ReadIntPtr(vtable, 8 * IntPtr.Size));
-            return setter(link, (int)CompositionBorderMode.Soft) >= 0;
+            if (setter(link, (int)CompositionBorderMode.Soft) < 0) return false;
+            var getter = Marshal.GetDelegateForFunctionPointer<GetBorderMode>(Marshal.ReadIntPtr(vtable, 7 * IntPtr.Size));
+            return getter(link, out int actual) >= 0 && actual == (int)CompositionBorderMode.Soft;
         }
         catch (Exception ex) when (ex is COMException or InvalidCastException) { return false; }
         finally

@@ -35,6 +35,7 @@ public sealed class VoiceOverlay : Window
 
     internal bool HasAntialiasedAcrylic => capsule.HasAntialiasedAcrylic;
     internal bool IsUsingAcrylic => capsule.IsUsingAcrylic;
+    internal string MaterialDiagnostics => capsule.MaterialDiagnostics;
 
     public VoiceOverlay()
     {

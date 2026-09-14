@@ -371,7 +371,7 @@ public static class DesktopSmoke
                 await LayoutAsync(overlay);
                 CheckCapsuleNativeFrame(hwnd, "overlay " + theme);
                 CheckCapsuleLayout(overlay);
-                Console.WriteLine($"Capsule material: antialiased target={overlay.HasAntialiasedAcrylic}, material enabled={overlay.IsUsingAcrylic}; desktop blur remains governed by system policy.");
+                Console.WriteLine("Capsule material: " + overlay.MaterialDiagnostics + "; desktop blur remains governed by system policy.");
                 await CheckCapsuleSurfaceOnDesktopAsync(overlay, longText, desktopImages, report);
             }
             var preview = Find<TextBlock>(overlay, "OverlayPreview");
