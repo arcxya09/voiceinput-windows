@@ -172,7 +172,13 @@ public record TermData
 }
 public record UsageData(string Purpose, long InputTokens, long OutputTokens, bool Unknown, DateTimeOffset At, double AudioSeconds = 0);
 public record AsrEvent(string Event, string TaskId, int SentenceId = 0, string Text = "", bool Final = false, bool Heartbeat = false, long BeginMs = 0, long? EndMs = null, double? Duration = null, string Error = "", bool BeginTimeKnown = true);
-public record TranscriptSnapshot(SessionData? Session, IReadOnlyList<SegmentData> Segments, CaptureState State, int Pending, int Unsaved, string Status);
+public record TranscriptSnapshot(SessionData? Session, IReadOnlyList<SegmentData> Segments, CaptureState State, int Pending, int Unsaved, string Status)
+{
+    // Local capture and remote recognition have independent readiness. Neither
+    // changes the business-state gates that require a confirmed ASR task.
+    public bool LocalAudioReady { get; init; }
+    public bool CaptureReleased { get; init; }
+}
 
 public static class TranscriptText
 {

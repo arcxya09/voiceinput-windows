@@ -54,12 +54,14 @@ public static class InputSafety
         => new[] { 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0x5b, 0x5c }.Any(key => key != trigger && down(key));
 
     // Every batch may require three bounded accessibility queries and two short retries.
-    // A slow, healthy provider must not consume a budget based only on typing speed.
+    // Include per-character yielding at Windows' coarse timer resolution, while
+    // retaining the overall cap for a slow or unresponsive target.
     public static long DeliveryBudgetMilliseconds(int characters)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(characters);
         long batches = ((long)characters + BatchCharacters - 1) / BatchCharacters;
-        return Math.Clamp(2000 + batches * 4000, 2000, 600000);
+        long pacing = Math.Max(0L, (long)characters - 1) * 16;
+        return Math.Clamp(2000 + batches * 4000 + pacing, 2000, 600000);
     }
 
     public static async Task<T?> RecoverInitialFocusAsync<T>(Func<(FocusObservation Observation, T? Target)> sample,

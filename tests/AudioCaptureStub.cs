@@ -1,7 +1,9 @@
+using RealtimeTranscription.Core;
+
 namespace RealtimeTranscription.Desktop;
 
 // Native capture is outside this portable review. No test may start a microphone.
-public sealed class AudioCapture : IAsyncDisposable
+public sealed class AudioCapture : IAudioCapture
 {
     public AudioCapture(string device, Func<byte[], CancellationToken, ValueTask> send, Action<string> fault, Action<float> level) => throw new NotSupportedException("Native audio is excluded from this review harness.");
     public string EndpointId => "review-stub";

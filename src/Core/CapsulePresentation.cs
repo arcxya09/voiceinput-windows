@@ -18,7 +18,7 @@ public static class CapsulePresentation
         completed && (state is "Empty" or "Cancelled") ? "本轮尚未识别到文字" : status switch
         {
             "正在听" => "正在聆听",
-            "准备 / 连接" => "正在连接…",
+            "准备麦克风" or "准备 / 连接" => "准备麦克风…",
             "尾句处理中" or "正在完成本轮" => "正在整理…",
             "" => completed ? "本轮尚未识别到文字" : "正在聆听",
             _ => UiPresentation.LatestText(status, 80)

@@ -9,7 +9,7 @@ using RealtimeTranscription.Infrastructure;
 namespace RealtimeTranscription.Desktop;
 
 public record AudioDevice(string Id, string Name);
-public sealed class AudioCapture : IAsyncDisposable
+public sealed class AudioCapture : IAudioCapture
 {
     private record Block(byte[] Buffer, int Count);
     private readonly NativeWasapiCapture capture;
