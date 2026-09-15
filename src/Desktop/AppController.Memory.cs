@@ -86,6 +86,8 @@ public sealed partial class AppController
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
     }
 
+    public Task RefreshMemoryAfterDeliveryAsync()=>RefreshMemoryBeforeRecognitionAsync();
+
     private async Task RefreshMemoryBeforeRecognitionAsync()
     {
         if (!MemoryAvailable) return;

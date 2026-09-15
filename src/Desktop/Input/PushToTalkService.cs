@@ -143,6 +143,7 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
             t.DeliveryDispatched=true;
             await controller.SetDeliveryAsync(result.State,result.Message,result.Accepted,t.Id);
             await CompletePreviewAsync(t,result.Message);
+            if(!t.DictationOnly)await controller.RefreshMemoryAfterDeliveryAsync();
         }
         catch(Exception e)
         {

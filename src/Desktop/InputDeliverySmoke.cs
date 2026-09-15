@@ -88,11 +88,21 @@ internal static class InputDeliverySmoke
         string? originalText = null;
         uint ownedClipboardSequence = 0;
         bool clipboardPrepared = false, copyAfterPaste=false;
-        string clipboardKind="rich";
+        string clipboardKind="rich",fixtureError="";
         void AfterTextChange(object? sender,EventArgs args)
         {
             if(copyAfterPaste&&probe.PasteDown>0)
-            {copyAfterPaste=false;Forms.Clipboard.SetText(NewCopy);ownedClipboardSequence=GetClipboardSequenceNumber();}
+            {
+                copyAfterPaste=false;
+                // TextChanged runs inside the native paste handler, which can
+                // still hold the clipboard open. Simulate the user's next copy
+                // after that handler returns, never re-enter it from the event.
+                form.BeginInvoke(new Action(()=>
+                {
+                    try{Forms.Clipboard.SetText(NewCopy);ownedClipboardSequence=GetClipboardSequenceNumber();}
+                    catch(Exception e){fixtureError="New-copy fixture: "+e.GetType().Name;}
+                }));
+            }
         }
         plain.TextChanged+=AfterTextChange;rich.TextChanged+=AfterTextChange;
         void PreserveClipboard()
@@ -136,6 +146,7 @@ internal static class InputDeliverySmoke
             {
                 if (request.Operation == "Prepare")
                 {
+                    fixtureError="";
                     if (!clipboardPrepared) PreserveClipboard();
                     var data=new Forms.DataObject();
                     data.SetData(Forms.DataFormats.UnicodeText,false,ClipboardSeed);
@@ -160,6 +171,7 @@ internal static class InputDeliverySmoke
                 }
                 else if (request.Operation == "Read")
                 {
+                    if(fixtureError.Length>0){Respond(new("Error",Text:fixtureError));return;}
                     uint beforeRead = GetClipboardSequenceNumber();
                     string clipboardText = Forms.Clipboard.GetText(Forms.TextDataFormat.UnicodeText);
                     uint afterRead = GetClipboardSequenceNumber();
@@ -278,7 +290,7 @@ internal static class InputDeliverySmoke
                     for (int i = 0; i < 50; i++)
                     {
                         readback = await Query(new("Read", Text: expectedClipboard));
-                        Require(readback.Code == "Ready", "The fixture read failed: " + mode + " / " + result.Diagnostic + " / " + readback.Text);
+                        Require(readback.Code == "Ready", "The fixture read failed: " + mode + " / delay=" + sample.Delayed + " newCopy=" + newCopy + " selection=" + sample.Length + " / " + result.Diagnostic + " / " + readback.Text);
                         if (Lines(readback.Text) == Lines(expected) && readback.PasteUp == 1) break;
                         await Task.Delay(20, token);
                     }
