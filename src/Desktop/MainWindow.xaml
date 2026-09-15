@@ -79,7 +79,7 @@
                             <Button x:Name="StartButton" Content="启用按住说话" Style="{StaticResource AccentButtonStyle}" Click="Start_Click"/>
                             <Button x:Name="PauseButton" Content="暂停快捷键" Click="Pause_Click"/>
                         </local:ResponsivePanel>
-                        <CheckBox x:Name="DictationOnlyBox" Content="仅听写，完成后手动复制" Checked="DictationMode_Changed" Unchecked="DictationMode_Changed"/>
+                        <CheckBox x:Name="DictationOnlyBox" Content="仅听写，完成后自动复制" Checked="DictationMode_Changed" Unchecked="DictationMode_Changed"/>
                     </StackPanel>
                     <Border Grid.Row="1" Style="{StaticResource Card}" Padding="0" MinHeight="120">
                         <Grid>

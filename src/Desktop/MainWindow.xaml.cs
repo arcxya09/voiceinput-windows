@@ -140,7 +140,7 @@ public partial class MainWindow : Window
         });
     }
     private async void NewProject_Click(object sender,RoutedEventArgs e)=>await Manage(async()=>{string? name=await Dialogs.AskAsync(this,"新建项目","项目名称");if(name!=null){await controller.CreateProjectAsync(name);ProjectsRefresh();}});
-    private void Start_Click(object sender,RoutedEventArgs e){if(ptt==null){StatusText.Text="快捷键未启动，请检查启动提示后重新打开程序。";return;}ptt.SetEnabled(true);StatusText.Text=controller.Settings.DictationOnly?"请按住说话键听写，完成后复制正文。":"请在其他应用的文本框中按住说话键。";}
+    private void Start_Click(object sender,RoutedEventArgs e){if(ptt==null){StatusText.Text="快捷键未启动，请检查启动提示后重新打开程序。";return;}ptt.SetEnabled(true);StatusText.Text=controller.Settings.DictationOnly?"请按住说话键听写，完成后自动复制正文。":"请在其他应用的文本框中按住说话键。";}
     private void Pause_Click(object sender,RoutedEventArgs e)=>ptt?.SetEnabled(false);
     private void Stop_Click(object sender,RoutedEventArgs e)=>ptt?.Cancel();
     private async void Paragraph_Click(object sender,RoutedEventArgs e)=>await Safe(()=>controller.ParagraphAsync());

@@ -106,7 +106,7 @@ public partial class MainWindow
         {
             Hide();
             tray?.ShowBalloonTip(2500, "语音输入法已就绪", controller.Settings.DictationOnly
-                ? $"按住 {UiPresentation.HotkeyName(controller.Settings.Hotkey)} 听写，完成后复制正文。"
+                ? $"按住 {UiPresentation.HotkeyName(controller.Settings.Hotkey)} 听写，完成后自动复制正文。"
                 : $"在文本框中按住 {UiPresentation.HotkeyName(controller.Settings.Hotkey)} 说话，松开输入。", Forms.ToolTipIcon.Info);
         }
     }

@@ -17,15 +17,21 @@ internal static class InputCompatibilityRegression
             Check(!other.Observe(FocusObservation.Changed,FocusObservation.Stable,0)&&other.ManualOnly);
             return Task.CompletedTask;
         });
-        await test("2.1.7 无文字取消和启动失败显示原因，手动复制提示传入实时浮窗",()=>
+        await test("2.1.8 复制成功与失败如实呈现，无焦点的完成后复制提示传入浮窗",()=>
         {
-            string reason="输入位置暂不可用，已继续听写；完成后请手动复制。";
+            string reason="输入位置暂不可用，已继续听写；完成后复制。";
             Check(CapsulePresentation.EmptyPreview("短按已取消。",true,"Cancelled")=="短按已取消。");
             Check(CapsulePresentation.EmptyPreview("麦克风不可用",true,"StartFailed")=="麦克风不可用");
             Check(CapsulePresentation.CompletionLabel("StartFailed")=="未开始");
+            Check(CapsulePresentation.CompletionLabel("Copied")=="已复制");
+            Check(CapsulePresentation.CompletionLabel("CopyFailed")=="待复制");
             var model=new VoicePreviewState();model.Begin("input");
             var snap=new TranscriptSnapshot(new(){Id="input",DeliveryState="Pending",DeliveryReason=reason},[],CaptureState.Recording,0,0,"正在听");
-            Check(model.Snapshot(snap,true,true,false)!.Status.Contains("手动复制"));
+            Check(model.Snapshot(snap,true,true,false)!.Status.Contains("完成后复制"));
+            var copying=snap with{State=CaptureState.Stopped,Session=snap.Session! with{DeliveryState="Copying"}};
+            Check(model.Snapshot(copying,true,true,true)?.Status=="正在复制");
+            var sending=copying with{Session=copying.Session! with{DeliveryState="Sending"}};
+            Check(model.Snapshot(sending,true,true,false)?.Status=="正在粘贴");
             return Task.CompletedTask;
         });
     }

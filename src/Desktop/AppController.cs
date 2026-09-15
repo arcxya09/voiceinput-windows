@@ -172,7 +172,7 @@ public sealed partial class AppController : IAsyncDisposable
         await InitializeMemoryAsync();
         await OnActor(()=>
         {
-            string readiness=Keys.BailianKey.Length==0?"请先在设置中填写百炼 Key。":!MemoryAvailable?MemoryStatus:$"准备就绪。按住 {HotkeyLabel} 说话，松开后{(Settings.DictationOnly?"查看并复制结果":"输入")}。";
+            string readiness=Keys.BailianKey.Length==0?"请先在设置中填写百炼 Key。":!MemoryAvailable?MemoryStatus:$"准备就绪。按住 {HotkeyLabel} 说话，松开后{(Settings.DictationOnly?"自动复制结果":"输入")}。";
             Status(StartupWarning is { } warning ? warning + (!MemoryAvailable ? "\n" + MemoryStatus : "") : readiness);
         });
     }
@@ -255,7 +255,7 @@ public sealed partial class AppController : IAsyncDisposable
             Interlocked.Exchange(ref attempt.AsrReadyAt,Environment.TickCount64);
             SetDiagnostic("Recognizing");
             await OnActor(()=>engine!.UpdateSession(engine.Session with{HotwordState=!Settings.UseLexicon?"Disabled":MemoryAvailable?"Sent":"Unavailable",Revision=engine.Session.Revision+1}));
-            await OnActor(()=>{state=captureReleased?CaptureState.Draining:CaptureState.Recording;Status(captureReleased?"录音已停止，正在收齐尾句…":Settings.DictationOnly?"正在听 · 松开后查看并复制，Esc 取消。":"正在听 · 松开快捷键后输入，Esc 取消。");});
+            await OnActor(()=>{state=captureReleased?CaptureState.Draining:CaptureState.Recording;Status(captureReleased?"录音已停止，正在收齐尾句…":Settings.DictationOnly?"正在听 · 松开后自动复制，Esc 取消。":"正在听 · 松开快捷键后输入，Esc 取消。");});
             return true;
         }
         catch(Exception e)
