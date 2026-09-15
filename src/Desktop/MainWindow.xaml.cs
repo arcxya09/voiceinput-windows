@@ -244,7 +244,16 @@ public partial class MainWindow : Window
         PolishBox.IsChecked=s.PolishEnabled;FastDeliveryBox.IsChecked=s.PreferFastDelivery;PreviousBox.IsChecked=s.PreviousContext;MemoryBox.IsChecked=s.SaveMemory;LearningBox.IsChecked=s.AllowLearning;CorrectionLearningBox.IsChecked=s.LearnCorrections;UseTermsBox.IsChecked=s.UseLexicon;DynamicTermsBox.IsChecked=s.DynamicLexicon;AutoExtractBox.IsChecked=s.AutoExtract;AsrContextBox.IsChecked=s.AsrContext;
         GenerationMaxThinkingBox.IsChecked=s.GenerationMaxThinking;ParagraphBox.IsChecked=s.AutoParagraph;TrayBox.IsChecked=s.CloseToTray;RetentionBox.Text=s.RetentionDays?.ToString()??"";BudgetBox.Text=s.DailyExtractionTokens.ToString();SilenceBox.Text=s.SilenceMs.ToString();HoldBox.Text=s.HoldMs.ToString();MaxHoldBox.Text=s.MaxHoldSeconds.ToString();HotkeyBox.SelectedIndex=s.Hotkey switch{"F8"=>1,"F9"=>2,_=>0};await DevicesRefresh();
     }
-    private async Task DevicesRefresh(){var list=await Task.Run(AudioCapture.Devices);DeviceBox.ItemsSource=list;DeviceBox.SelectedValue=list.Any(x=>x.Id==controller.Settings.DeviceId)?controller.Settings.DeviceId:"";}
+    private async Task DevicesRefresh()
+    {
+        var list=await Task.Run(AudioCapture.Devices);
+        string selected=controller.Settings.DeviceId;
+        // Keep the saved selection visible. Both the local test and real capture
+        // now resolve this same ID, including the explicit default fallback.
+        if(selected.Length>0&&!list.Any(x=>x.Id==selected))
+            list.Add(new(selected,"已保存的麦克风不可用（临时使用 Windows 默认通信麦克风）"));
+        DeviceBox.ItemsSource=list;DeviceBox.SelectedValue=selected;
+    }
     private async void Devices_Click(object sender,RoutedEventArgs e)=>await Safe(DevicesRefresh);
     private async void TestMicrophone_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>
     {

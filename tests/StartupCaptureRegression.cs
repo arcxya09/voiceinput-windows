@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
 using RealtimeTranscription.Core;
 using RealtimeTranscription.Desktop.Input;
 using RealtimeTranscription.Desktop;
@@ -200,10 +201,120 @@ static class StartupCaptureRegression
             var failed = await f.App.SnapshotAsync();
             Check(!failed.LocalAudioReady && capture.Disposed && failed.Status.Contains(reason), "启动失败的就绪状态未清除，或根因被通用收尾提示覆盖。");
             Check(f.App.Diagnostic.Contains(reason), "启动诊断丢失首个云端错误。");
+            Check(f.App.Diagnostic.Contains("失败阶段：ConnectingRecognition"), "云启动失败被误记为麦克风或配置阶段。");
             Check(turn.Socket.Actions.IsEmpty && turn.Socket.Pcm.IsEmpty, "认证失败后仍发出任务或 PCM。");
             f.Levels.Clear();
             capture.EmitLateLevel(.2f);
             Check(!(await f.App.SnapshotAsync()).LocalAudioReady && !f.Levels.Any(v => v > 0), "故障设备的迟到回调恢复了正在听。");
+        });
+
+        await test("2.1.9 打开麦克风失败保留阶段及HRESULT，空设备/权限/格式/占用有具体建议且可重试", async () =>
+        {
+            foreach (var sample in new[]
+            {
+                (Code: 0x80070490u, Advice: "虚拟机时先接入或映射麦克风"),
+                (Code: 0x80070002u, Advice: "未找到可用麦克风"),
+                (Code: 0x80070005u, Advice: "允许桌面应用访问麦克风"),
+                (Code: 0x88890004u, Advice: "重新连接或重新选择麦克风"),
+                (Code: 0x88890026u, Advice: "音频资源被撤销"),
+                (Code: 0x8889000Au, Advice: "独占"),
+                (Code: 0x88890008u, Advice: "音频格式不受支持"),
+                (Code: 0x88890010u, Advice: "Windows Audio"),
+                (Code: 0x8889000Fu, Advice: "音频端点")
+            })
+            {
+                var failed = new Turn { ConstructionFailure = new COMException("SECRET_KEY_AND_TRANSCRIPT", unchecked((int)sample.Code)) };
+                var retry = new Turn();
+                await using var f = await Fixture.Create(failed, retry);
+                Check(!await f.Start().WaitAsync(Budget), "设备构造失败仍报告启动成功。");
+                var snapshot = await f.App.SnapshotAsync();
+                string code = "0x" + sample.Code.ToString("X8");
+                Check(snapshot.Status.Contains(sample.Advice) && snapshot.Status.Contains(code), "设备错误缺少对应建议或 HRESULT：" + snapshot.Status);
+                Check(f.App.Diagnostic.Contains("失败阶段：OpeningMicrophone") && f.App.Diagnostic.Contains("COMException")
+                    && f.App.Diagnostic.Contains(code), "设备诊断缺少阶段、异常类型或 HRESULT。");
+                Check(!f.App.Diagnostic.Contains("SECRET_KEY_AND_TRANSCRIPT") && !snapshot.Status.Contains("SECRET_KEY_AND_TRANSCRIPT"), "设备异常消息泄漏到诊断或界面。");
+                Check(failed.Socket.Actions.IsEmpty && failed.Socket.Pcm.IsEmpty && !failed.ConnectionEntered.Task.IsCompleted
+                    && failed.Socket.State == System.Net.WebSockets.WebSocketState.Aborted && !failed.Capture.Task.IsCompleted,
+                    "构造失败后仍连接、上传，或识别客户端没有关闭。");
+                Check(await f.Start().WaitAsync(Budget), "设备构造失败后下一轮无法重试。");
+                await f.App.StopAsync(false).WaitAsync(Budget);
+                Check((await retry.Capture.Task.WaitAsync(Budget)).Disposed, "重试后的设备没有释放。");
+            }
+        });
+
+        await test("2.1.9 WASAPI启动失败及清理异常保留原始内层HRESULT，所有资源仍清理并可重试", async () =>
+        {
+            var failed = new Turn
+            {
+                StartFailure = new InvalidOperationException("SECRET_WRAPPER", new COMException("SECRET_DEVICE", unchecked((int)0x88890008))),
+                DisposeFailure = new COMException("SECRET_CLEANUP", unchecked((int)0x80004005)),
+                EmitStartFault = true
+            };
+            var retry = new Turn();
+            await using var f = await Fixture.Create(failed, retry);
+            Check(!await f.Start().WaitAsync(Budget), "WASAPI 启动失败仍返回成功。");
+            var capture = await failed.Capture.Task.WaitAsync(Budget);
+            var snapshot = await f.App.SnapshotAsync();
+            Check(snapshot.Status.Contains("0x88890008") && snapshot.Status.Contains("音频格式不受支持"), "早期采集故障通知或清理异常掩盖了具体启动错误。");
+            Check(f.App.Diagnostic.Contains("失败阶段：StartingMicrophone") && f.App.Diagnostic.Contains("InvalidOperationException")
+                && f.App.Diagnostic.Contains("内部异常[1]：System.Runtime.InteropServices.COMException")
+                && f.App.Diagnostic.Contains("0x88890008") && f.App.Diagnostic.Contains("清理阶段：DisposeMicrophone")
+                && f.App.Diagnostic.Contains("0x80004005") && !f.App.Diagnostic.Contains("SECRET_"), "原始异常链、清理元数据或脱敏不完整。");
+            Check(capture.Disposed && capture.StopRequested && capture.RecordingStarts == 0
+                && failed.Socket.State == System.Net.WebSockets.WebSocketState.Aborted
+                && failed.Socket.Actions.IsEmpty && failed.Socket.Pcm.IsEmpty, "启动故障清理遗漏资源或仍有上传。");
+            Check(await f.Start().WaitAsync(Budget), "WASAPI 故障清理后没有释放下一轮启动资格。");
+            await f.App.StopAsync(false).WaitAsync(Budget);
+        });
+
+        await test("2.1.9 未知音频错误指向诊断，非音频COM拒绝访问不误报麦克风权限", async () =>
+        {
+            var audioFailure = new Turn { ConstructionFailure = new COMException("SECRET_AUDIO", unchecked((int)0x80004005)) };
+            var targetFailure = new Turn();
+            var retry = new Turn();
+            await using var f = await Fixture.Create(audioFailure, targetFailure, retry);
+            Check(!await f.Start().WaitAsync(Budget), "未知音频错误仍完成启动。");
+            var snapshot = await f.App.SnapshotAsync();
+            Check(snapshot.Status.Contains("查看诊断信息") && snapshot.Status.Contains("0x80004005")
+                && !snapshot.Status.Contains("网络、设备或保存位置"), "未知音频错误仍给出无定位价值的通用提示。");
+            Check(!await f.Start(target: Task.FromException<bool>(new COMException("SECRET_TARGET", unchecked((int)0x80070005)))).WaitAsync(Budget), "目标校验异常仍完成启动。");
+            snapshot = await f.App.SnapshotAsync();
+            Check(snapshot.Status == "操作失败，请检查网络、设备或保存位置。" && !snapshot.Status.Contains("麦克风"), "非音频 COMException 被全局误归为麦克风权限。");
+            Check(f.App.Diagnostic.Contains("失败阶段：ValidatingTarget") && f.App.Diagnostic.Contains("0x80070005")
+                && !f.App.Diagnostic.Contains("SECRET_"), "目标错误诊断阶段、错误码或脱敏错误。");
+            Check(targetFailure.Socket.Actions.IsEmpty && targetFailure.Socket.Pcm.IsEmpty
+                && (await targetFailure.Capture.Task.WaitAsync(Budget)).Disposed, "非音频校验失败后仍上传或未释放设备。");
+            Check(await f.Start().WaitAsync(Budget), "连续启动错误后无法重试。");
+            await f.App.StopAsync(false).WaitAsync(Budget);
+        });
+
+        await test("2.1.9 配置阶段失败不打开设备，修正配置后可重试", async () =>
+        {
+            var turn = new Turn();
+            await using var f = await Fixture.Create(turn);
+            await f.App.SaveSettingsAsync(f.App.Settings, new("", ""));
+            Check(!await f.Start().WaitAsync(Budget), "空 Key 配置仍启动录音。");
+            Check(f.App.Diagnostic.Contains("失败阶段：Configuration") && f.App.Diagnostic.Contains("ArgumentException")
+                && !turn.ConstructionEntered.Task.IsCompleted && turn.Socket.Actions.IsEmpty && turn.Socket.Pcm.IsEmpty,
+                "配置失败阶段丢失，或配置未通过仍创建了设备/云任务。");
+            await f.App.SaveSettingsAsync(f.App.Settings, new("TEST_ONLY", ""));
+            Check(await f.Start().WaitAsync(Budget), "配置修正后不能启动。");
+            await f.App.StopAsync(false).WaitAsync(Budget);
+        });
+
+        await test("2.1.9 本地麦克风测试的无设备失败可查看诊断，无上传且释放启动资格", async () =>
+        {
+            var absent = new Turn { ConstructionFailure = new COMException("SECRET_TEST_DEVICE", unchecked((int)0x80070490)) };
+            var retry = new Turn();
+            await using var f = await Fixture.Create(absent, retry);
+            string result = await f.App.TestMicrophoneAsync("").WaitAsync(Budget);
+            Check(result.Contains("虚拟机时先接入或映射麦克风") && result.Contains("0x80070490"), "本地测试没有显示无设备建议和错误码。");
+            Check(f.App.Diagnostic.Contains("MicrophoneTestFailed") && f.App.Diagnostic.Contains("失败阶段：OpeningMicrophone")
+                && f.App.Diagnostic.Contains("COMException") && f.App.Diagnostic.Contains("0x80070490")
+                && !f.App.Diagnostic.Contains("SECRET_TEST_DEVICE"), "本地测试诊断遗漏根因或泄漏异常消息。");
+            Check(absent.Socket.Actions.IsEmpty && absent.Socket.Pcm.IsEmpty && !absent.ConnectionEntered.Task.IsCompleted, "本地测试意外建立云任务或上传。");
+            Check(await f.Start().WaitAsync(Budget), "本地测试失败后未释放录音启动资格。");
+            await f.App.StopAsync(false).WaitAsync(Budget);
         });
     }
 
@@ -337,6 +448,8 @@ static class StartupCaptureRegression
 
     private sealed class Turn
     {
+        internal Exception? ConstructionFailure, StartFailure, DisposeFailure;
+        internal bool EmitStartFault;
         internal readonly ScriptedSocket Socket = new();
         internal readonly TaskCompletionSource ConstructionEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource ConstructionRelease = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -356,7 +469,7 @@ static class StartupCaptureRegression
         }
     }
 
-    private sealed class ScriptedCapture(Func<byte[], CancellationToken, ValueTask> send, Action<float> level) : IAudioCapture
+    private sealed class ScriptedCapture(Func<byte[], CancellationToken, ValueTask> send, Action<float> level, Turn turn, Action<string> fault) : IAudioCapture
     {
         private int stopped, disposed, recordingStarts;
         private long samplesSent;
@@ -371,6 +484,8 @@ static class StartupCaptureRegression
         public long SamplesSent => Interlocked.Read(ref samplesSent);
         public void Start()
         {
+            if (turn.EmitStartFault) fault("麦克风采集已中断，请重新选择设备。");
+            if (turn.StartFailure is { } failure) throw failure;
             if (!StopRequested) Interlocked.Increment(ref recordingStarts);
             Started.TrySetResult();
         }
@@ -385,7 +500,12 @@ static class StartupCaptureRegression
         public void RequestStop() => Interlocked.Exchange(ref stopped, 1);
         public void Abort() => RequestStop();
         public Task StopAsync(CancellationToken token) { RequestStop(); return Task.CompletedTask; }
-        public ValueTask DisposeAsync() { RequestStop(); Interlocked.Exchange(ref disposed, 1); return ValueTask.CompletedTask; }
+        public ValueTask DisposeAsync()
+        {
+            RequestStop(); Interlocked.Exchange(ref disposed, 1);
+            if (turn.DisposeFailure is { } failure) throw failure;
+            return ValueTask.CompletedTask;
+        }
     }
 
     private sealed class Fixture : IAsyncDisposable
@@ -409,12 +529,14 @@ static class StartupCaptureRegression
             var pending = new Queue<Turn>(turns);
             Turn? constructing = null;
             f.App = new AppController(f.folder, protector, new RegressionHandler(http??((_, _) => throw new Exception("Unexpected HTTP request"))),
-                (_, send, _, level) =>
+                (_, send, fault, level) =>
                 {
-                    var turn = constructing ?? throw new Exception("Capture created without a client.");
+                    // Microphone testing creates a local source without an ASR client.
+                    var turn = constructing ?? pending.Dequeue();
                     turn.ConstructionEntered.TrySetResult();
                     turn.ConstructionRelease.Task.WaitAsync(Budget).GetAwaiter().GetResult();
-                    var capture = new ScriptedCapture(send, level);
+                    if (turn.ConstructionFailure is { } failure) throw failure;
+                    var capture = new ScriptedCapture(send, level, turn, fault);
                     turn.Capture.TrySetResult(capture);
                     return capture;
                 },

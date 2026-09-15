@@ -524,7 +524,7 @@
                                         <Button x:Name="TestMicrophoneButton" Content="本地麦克风测试（3 秒）" Click="TestMicrophone_Click"/>
                                         <Button Content="查看录音诊断" Click="Diagnostics_Click"/>
                                     </local:ResponsivePanel>
-                                    <TextBlock Text="麦克风测试不上传音频。诊断不包含 Key、录音或识别正文。" Style="{StaticResource SecondaryText}"/>
+                                    <TextBlock Text="已选设备断开或失效时，临时使用 Windows 默认通信麦克风。麦克风测试不上传音频。启动失败后请先查看录音诊断，再运行测试；诊断不包含 Key、录音或识别正文。" Style="{StaticResource SecondaryText}"/>
                                     <Grid ColumnSpacing="16" RowSpacing="12">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="*"/>

@@ -26,23 +26,22 @@ public sealed class AudioCapture : IAudioCapture
     private readonly object captureSync=new();
     private readonly PcmDecoder decoder;
     private readonly int maxQueuedBytes;
-    public string FormatDescription=>decoder.Format.ToString();
+    public string FormatDescription=>decoder.Format.ToString()+(UsedDefaultFallback?"；已选麦克风不可用，使用 Windows 默认通信麦克风":"");
     public string Diagnostic { get; private set; }="";
     public string? FailureMessage { get; private set; }
     public long SamplesSent { get; private set; }
     public string EndpointId { get; }
+    public bool UsedDefaultFallback { get; }
     public AudioCapture(string deviceId, Func<byte[],CancellationToken,ValueTask> send, Action<string> fault, Action<float> level)
     {
+        this.send=send;this.fault=fault;this.level=level;
         using var enumerator = new MMDeviceEnumerator();
-        device = string.IsNullOrEmpty(deviceId) ? enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Communications) : enumerator.GetDevice(deviceId);
-        EndpointId=device.ID;
+        var opened=AudioEndpointSelection.Open(deviceId,
+            id=>OpenEndpoint(enumerator,id),()=>OpenEndpoint(enumerator,""),out bool fallback);
+        device=opened.Device;capture=opened.Capture;UsedDefaultFallback=fallback;
         try
         {
-            capture = new NativeWasapiCapture(device,Data,e=>
-            {
-                if(e!=null&&!abort.IsCancellationRequested)Fail(e is AudioCaptureIntegrityException?e.Message:"麦克风采集已中断，请重新选择设备。",e,"Capture");
-                queue.Writer.TryComplete();stopped.TrySetResult();
-            });
+            EndpointId=device.ID;
             var format=capture.Format;
             var encoding=format.Encoding;
             if(format is WaveFormatExtensible x)
@@ -55,7 +54,22 @@ public sealed class AudioCapture : IAudioCapture
             maxQueuedBytes=checked(format.SampleRate*format.BlockAlign*2);
         }
         catch{if(capture!=null)capture.DisposeAsync().AsTask().GetAwaiter().GetResult();device.Dispose();throw;}
-        this.send=send;this.fault=fault;this.level=level;
+    }
+    private (MMDevice Device,NativeWasapiCapture Capture) OpenEndpoint(MMDeviceEnumerator enumerator,string id)
+    {
+        var endpoint=string.IsNullOrEmpty(id)
+            ?enumerator.GetDefaultAudioEndpoint(DataFlow.Capture,Role.Communications):enumerator.GetDevice(id);
+        try
+        {
+            if(endpoint.State!=DeviceState.Active)throw new AudioEndpointUnavailableException();
+            var native=new NativeWasapiCapture(endpoint,Data,e=>
+            {
+                if(e!=null&&!abort.IsCancellationRequested)Fail(e is AudioCaptureIntegrityException?e.Message:"麦克风采集已中断，请重新选择设备。",e,"Capture");
+                queue.Writer.TryComplete();stopped.TrySetResult();
+            });
+            return(endpoint,native);
+        }
+        catch{endpoint.Dispose();throw;}
     }
     public static List<AudioDevice> Devices()
     {
@@ -83,7 +97,7 @@ public sealed class AudioCapture : IAudioCapture
         int total=Interlocked.Add(ref queuedBytes,bytes);
         if(total>maxQueuedBytes){Interlocked.Add(ref queuedBytes,-bytes);Fail("音频处理积压超过 2 秒，已暂停。中断区间不计为完整识别。");return;}
         byte[] copy=ArrayPool<byte>.Shared.Rent(bytes);
-        try{if(silent)Array.Clear(copy,0,bytes);else Marshal.Copy(pointer,copy,0,bytes);}
+        try{if(silent)decoder.FillSilence(copy.AsSpan(0,bytes));else Marshal.Copy(pointer,copy,0,bytes);}
         catch{Interlocked.Add(ref queuedBytes,-bytes);ArrayPool<byte>.Shared.Return(copy,true);throw;}
         if(!queue.Writer.TryWrite(new(copy,bytes))){Interlocked.Add(ref queuedBytes,-bytes);ArrayPool<byte>.Shared.Return(copy,true);Fail("音频处理队列已满，录音已暂停。");}
     }
