@@ -208,15 +208,16 @@ public static class TextDelivery
         // Confirmation is after dispatch; never delay insertion with a fixed sleep.
         // Cleanup ignores turn cancellation, but restoration is guarded by clipboard
         // ownership and actual document readback, not by an elapsed timer.
+        bool mayHavePasted=result.State=="Unknown"||result.Accepted>=2;
         string restoration="ClipboardUnconfirmed";
         long confirmationDeadline=Environment.TickCount64+1500;
         do
         {
-            var reply=await Query(new("FinishPaste",CaptureId:target.CaptureId,PasteSubmitted:result.Accepted>=2),
+            var reply=await Query(new("FinishPaste",CaptureId:target.CaptureId,PasteSubmitted:mayHavePasted),
                 CancellationToken.None,target.WorkerId,timeoutMs:500);
             restoration=reply?.Reply.Code??"ClipboardUnconfirmed";
             if(restoration is not ("ClipboardUnconfirmed" or "ClipboardRestoreBusy"))break;
-            if(result.Accepted<2||Environment.TickCount64>=confirmationDeadline)break;
+            if(!mayHavePasted||Environment.TickCount64>=confirmationDeadline)break;
             await Task.Delay(40);
         }while(true);
         diagnostic+="/"+restoration;
@@ -230,7 +231,7 @@ public static class TextDelivery
                 _=>"已发起整段粘贴；未确认完成或暂无法恢复，正文保留在剪贴板。"
             },result.Accepted),
             "Unknown"=>new("Unknown","粘贴结果需要核对，请检查目标内容。不会自动重发。",result.Accepted),
-            _=>new("Blocked","未发起粘贴：剪贴板暂不可用、内容不受支持，或输入位置及按键状态已变化。文字已保留，可手动复制。",result.Accepted)
+            _=>new("Blocked",diagnostic.StartsWith("ClipboardBackupUnsupported",StringComparison.Ordinal)?"原剪贴板格式或大小无法安全备份，未自动粘贴。原剪贴板未更改，识别正文可在程序内手动复制。":"未发起粘贴：剪贴板暂不可用、内容不受支持，或输入位置及按键状态已变化。文字已保留，可手动复制。",result.Accepted)
         };
         return delivery with{Diagnostic=diagnostic};
     }

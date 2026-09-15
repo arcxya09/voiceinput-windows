@@ -39,6 +39,15 @@ internal static class NativeClipboard
                 if(Marshal.GetLastPInvokeError()!=0){Forget();return false;}
                 haveSnapshot=true; return true;
             }
+            // These are OLE transport bookkeeping, not transferable payloads.
+            // Replaying the old marshalled IDataObject identity makes OleGetClipboard
+            // contact a disconnected owner instead of reconstructing our frozen formats.
+            if(format>=0xc000)
+            {
+                var name=new StringBuilder(256);
+                if(GetClipboardFormatName(format,name,name.Capacity)==0){Forget();return false;}
+                if(name.ToString() is "DataObject" or "Ole Private Data" or "Ole Source Window")continue;
+            }
             // Owner-display, private handles, palettes and metafiles cannot be
             // safely frozen by this implementation. Leave their clipboard intact.
             if(saved.Count>=128 || format is 3 or 9 or 14 || (format>=0x80&&format<0xc000))
@@ -74,11 +83,11 @@ internal static class NativeClipboard
                 if(Win32.GetClipboardSequenceNumber()!=sequence)return "ClipboardNewCopyPreserved";
                 if(!EmptyClipboard())return "ClipboardRestoreUnavailable";
                 bool complete=true;
-                for(int i=saved.Count-1;i>=0;i--)
+                for(int i=0;i<saved.Count;)
                 {
                     var item=saved[i];
                     if(SetClipboardData(item.Format,item.Handle)!=IntPtr.Zero)saved.RemoveAt(i);
-                    else complete=false;
+                    else {complete=false;i++;}
                 }
                 return complete?"ClipboardRestored":"ClipboardRestoreIncomplete";
             }
@@ -166,6 +175,7 @@ internal static class NativeClipboard
                     if (!Safe(target) || Win32.GetClipboardSequenceNumber() != expectedSequence) return false;
                     diagnostic = "ClipboardBackupUnsupported";
                     if(!Snapshot())return false;
+                    if(!Safe(target)){diagnostic="ClipboardTargetChangedDuringBackup";return false;}
                     diagnostic = "ClipboardEmptyFailed";
                     if (!EmptyClipboard()) return false;
                     diagnostic = "ClipboardSetFailed";
@@ -199,6 +209,7 @@ internal static class NativeClipboard
     [StructLayout(LayoutKind.Sequential)] private struct BitmapInfo
     { public int Type,Width,Height,WidthBytes; public ushort Planes,BitsPixel; public IntPtr Bits; }
     [DllImport("user32.dll",SetLastError=true)] private static extern uint EnumClipboardFormats(uint format);
+    [DllImport("user32.dll",CharSet=CharSet.Unicode)] private static extern int GetClipboardFormatName(uint format,StringBuilder name,int count);
     [DllImport("ole32.dll")] private static extern IntPtr OleDuplicateData(IntPtr data,ushort format,uint flags);
     [DllImport("gdi32.dll")] private static extern bool DeleteObject(IntPtr value);
     [DllImport("gdi32.dll",EntryPoint="GetObjectW")] private static extern int GetObject(IntPtr value,int size,out BitmapInfo bitmap);

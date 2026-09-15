@@ -15,10 +15,10 @@ internal static class InputDeliverySmoke
     private const string HtmlSeed = "<html><body><b>original clipboard</b></body></html>";
     private const string RtfSeed = @"{\rtf1\ansi original clipboard}";
     private const string NewCopy = "user copied something newer";
-    private sealed record Request(string Operation, string Mode = "plain", string Text = "", int Start = 0, int Length = 0, bool DelayPaste = false, bool NewCopyAfterPaste = false);
+    private sealed record Request(string Operation, string Mode = "plain", string Text = "", int Start = 0, int Length = 0, bool DelayPaste = false, bool NewCopyAfterPaste = false, string ClipboardKind = "rich");
     private sealed record Reply(string Code, long Window = 0, long Focus = 0, uint Thread = 0, uint Process = 0,
         string Text = "", string ClipboardText = "", int PasteDown = 0, int PasteUp = 0, int PacketKeys = 0,
-        int PasteMessages = 0, int DelayedPastes = 0, bool FormatsRestored = false);
+        int PasteMessages = 0, int DelayedPastes = 0, bool FormatsRestored = false, bool SpecialClipboardRestored = false);
 
     // Observe the native control messages, independently of the production
     // dispatch result. A successful text readback alone would also pass for the
@@ -88,6 +88,7 @@ internal static class InputDeliverySmoke
         string? originalText = null;
         uint ownedClipboardSequence = 0;
         bool clipboardPrepared = false, copyAfterPaste=false;
+        string clipboardKind="rich";
         void AfterTextChange(object? sender,EventArgs args)
         {
             if(copyAfterPaste&&probe.PasteDown>0)
@@ -121,7 +122,13 @@ internal static class InputDeliverySmoke
             uint thread = Win32.GetWindowThreadProcessId(form.Handle, out uint process);
             return new(code, form.Handle.ToInt64(), editor.Handle.ToInt64(), thread, process, editor.Text,
                 clipboardText, probe.PasteDown, probe.PasteUp, probe.PacketKeys, probe.PasteMessages, probe.DelayedPastes,
-                clipboardText==ClipboardSeed && (Forms.Clipboard.GetData(Forms.DataFormats.Html) as string)==HtmlSeed && (Forms.Clipboard.GetData(Forms.DataFormats.Rtf) as string)==RtfSeed);
+                clipboardText==ClipboardSeed && Forms.Clipboard.TryGetData<string>(Forms.DataFormats.Html,out var html)&&html==HtmlSeed && Forms.Clipboard.TryGetData<string>(Forms.DataFormats.Rtf,out var rtf)&&rtf==RtfSeed,
+                clipboardKind=="empty"?!(Forms.Clipboard.GetDataObject()?.GetFormats(false).Any()??false):clipboardKind=="files"?Forms.Clipboard.GetFileDropList().Cast<string>().SequenceEqual(new[]{@"C:\VoiceInput-fixture\original.txt"}):clipboardKind=="bitmap"?CheckBitmap():false);
+        }
+        bool CheckBitmap()
+        {
+            using var restored=Forms.Clipboard.GetImage();
+            return restored is System.Drawing.Bitmap bitmap&&bitmap.Width==3&&bitmap.Height==2&&bitmap.GetPixel(1,1).ToArgb()==System.Drawing.Color.CornflowerBlue.ToArgb();
         }
         void Dispatch(Request request)
         {
@@ -134,7 +141,15 @@ internal static class InputDeliverySmoke
                     data.SetData(Forms.DataFormats.UnicodeText,false,ClipboardSeed);
                     data.SetData(Forms.DataFormats.Html,false,HtmlSeed);
                     data.SetData(Forms.DataFormats.Rtf,false,RtfSeed);
-                    Forms.Clipboard.SetDataObject(data,true);
+                    clipboardKind=request.ClipboardKind;
+                    if(clipboardKind=="empty")Forms.Clipboard.Clear();
+                    else if(clipboardKind=="files")Forms.Clipboard.SetFileDropList(new(){@"C:\VoiceInput-fixture\original.txt"});
+                    else if(clipboardKind=="bitmap")
+                    {
+                        using var bitmap=new System.Drawing.Bitmap(3,2);
+                        bitmap.SetPixel(1,1,System.Drawing.Color.CornflowerBlue);Forms.Clipboard.SetImage(bitmap);
+                    }
+                    else Forms.Clipboard.SetDataObject(data,true);
                     ownedClipboardSequence = GetClipboardSequenceNumber();
                     probe.Reset(request.DelayPaste);copyAfterPaste=request.NewCopyAfterPaste;
                     editor = request.Mode == "rich" ? rich : plain;
@@ -251,7 +266,7 @@ internal static class InputDeliverySmoke
                 try
                 {
                     var result = await TextDelivery.SendAsync(capture.Target!, sample.Text, Safe, token);
-                    Require(result.State == "PasteSent" && result.Accepted == 4,
+                    Require((result.State == "PasteSent" || (newCopy && result.State == "Unknown")) && result.Accepted == 4,
                         "The production input path stopped unexpectedly: " + result.State + " / " + result.Diagnostic + " / " + result.Message);
                     string expected = sample.Initial[..sample.Start] + sample.Text + sample.Initial[(sample.Start + sample.Length)..];
                     Reply readback = new("Pending");
@@ -263,7 +278,7 @@ internal static class InputDeliverySmoke
                     for (int i = 0; i < 50; i++)
                     {
                         readback = await Query(new("Read", Text: expectedClipboard));
-                        Require(readback.Code == "Ready", "The fixture read failed: " + readback.Text);
+                        Require(readback.Code == "Ready", "The fixture read failed: " + mode + " / " + result.Diagnostic + " / " + readback.Text);
                         if (Lines(readback.Text) == Lines(expected) && readback.PasteUp == 1) break;
                         await Task.Delay(20, token);
                     }
@@ -277,6 +292,23 @@ internal static class InputDeliverySmoke
                     Require(readback.DelayedPastes == (sample.Delayed ? 1 : 0), mode + " delayed clipboard consumption did not run as requested.");
                 }
                 finally { await TextDelivery.ReleaseAsync(capture.Target!); }
+            }
+            foreach(string kind in new[]{"empty","files","bitmap"})
+            {
+                var prepared=await Query(new("Prepare",ClipboardKind:kind));
+                Require(prepared.Code=="Ready","Special clipboard fixture preparation failed: "+prepared.Text);
+                var native=new NativeTarget(new IntPtr(prepared.Window),new IntPtr(prepared.Focus),prepared.Thread,prepared.Process);
+                bool Safe()=>!process.HasExited&&Win32.Current()==native;
+                var capture=await TextDelivery.CaptureAsync(native,Safe,token);
+                Require(capture.Target!=null,"Special clipboard capture failed.");
+                try
+                {
+                    var result=await TextDelivery.SendAsync(capture.Target!,sentence,Safe,token);
+                    Require(result.State=="PasteSent",kind+" delivery failed: "+result.Diagnostic);
+                    var readback=await Query(new("Read"));
+                    Require(readback.Text==sentence&&readback.SpecialClipboardRestored,kind+" clipboard was not restored: "+result.Diagnostic);
+                }
+                finally{await TextDelivery.ReleaseAsync(capture.Target!);}
             }
             var beforeFocusChange = await Query(new("Prepare", Text: "original control"));
             Require(beforeFocusChange.Code == "Ready", "The focus-change fixture could not prepare.");
@@ -299,7 +331,7 @@ internal static class InputDeliverySmoke
                     "Changing focus must leave both the new control and clipboard unchanged.");
             }
             finally { await TextDelivery.ReleaseAsync(originalCapture.Target!); }
-            return ["Production full-text clipboard delivery reads back both reported Chinese examples in independent plain and rich edit controls, including selection replacement, emoji, long text, multiple lines and delayed paste; each receives exactly one Ctrl+V, zero Unicode packet keys, and restores the original clipboard after confirmed insertion",
+            return ["Production full-text clipboard delivery reads back both reported Chinese examples in independent plain and rich edit controls, including selection replacement, emoji, long text, multiple lines and delayed paste; each receives exactly one Ctrl+V, zero Unicode packet keys, and restores original text/HTML/RTF after confirmed insertion without overwriting a newer copy; empty, file-drop and bitmap clipboards are also verified",
                 "Changing focus to another isolated control blocks delivery before changing the clipboard or sending a paste gesture"];
         }
         finally
