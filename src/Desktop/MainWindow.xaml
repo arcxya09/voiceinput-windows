@@ -486,6 +486,8 @@
                                     <TextBlock Text="DeepSeek · 松开后统一整理全文，保护原意、数字与专业词条。" Style="{StaticResource SecondaryText}"/>
                                     <PasswordBox x:Name="DeepSeekKeyBox" Header="API Key" PasswordRevealMode="Peek"/>
                                     <CheckBox x:Name="PolishBox" Content="启用轻量润色"/>
+                                    <CheckBox x:Name="FastDeliveryBox" Content="优先快速上屏"/>
+                                    <TextBlock Text="自动上屏最多等待润色 3 秒，超时使用完整识别正文及已确认纠错；关闭后等待完整润色。松手后回车加速、Esc 取消。" Style="{StaticResource SecondaryText}"/>
                                     <CheckBox x:Name="PreviousBox" Visibility="Collapsed" Content="旧版分片上下文设置"/>
                                     <Button x:Name="TestDeepSeekButton" Content="保存设置并测试 DeepSeek" Click="TestDeepSeek_Click"/>
                                     <TextBlock Text="连接测试会发起少量 API 调用。deepseek-flash 使用非思考模式，仅返回整理后的正文。" Style="{StaticResource SecondaryText}"/>

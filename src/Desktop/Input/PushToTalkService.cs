@@ -14,6 +14,9 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
         public readonly long ActivityVersion=activityVersion;
         public readonly FocusContinuity Focus=new();
         public readonly CancellationTokenSource Cancel=new();
+        public readonly CancellationTokenSource Expedite=new();
+        public volatile bool PhysicalReleased,DeliveryDispatched;
+        public void ExpediteInput(){try{Expedite.Cancel();}catch(ObjectDisposedException){}}
         public readonly TaskCompletionSource Released=new(TaskCreationOptions.RunContinuationsAsynchronously);
         public Task? Stop;
         public volatile bool Invalid;
@@ -41,11 +44,14 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
     {
         this.controller=controller;controller.InputInterrupted+=Cancel;hook=new PhysicalHook(s=>
         {
+            var current=Volatile.Read(ref active);
+            if(s.Kind=="up"&&current!=null&&s.At-current.PressedAt>=controller.Settings.HoldMs)current.PhysicalReleased=true;
+            if(s.Kind=="expedite"){current?.ExpediteInput();return;}
             // Invalidate before queuing, so SendInput cannot race the channel consumer.
             if(s.Kind is "activity" or "escape" or "cancel")activity.Advance();
             s=s with{ActivityVersion=activity.Current};
             if(!signals.Writer.TryWrite(s)){activity.Advance();controller.RequestStopCapture();}
-        });
+        },()=>Volatile.Read(ref active) is {PhysicalReleased:true,DeliveryDispatched:false,Invalid:false,DictationOnly:false});
         loop=Task.Run(Loop);watchdog=Task.Run(Watchdog);
     }
     public async Task InitializeAsync(){await hook.Ready;Configure();await TextDelivery.InitializeAsync();}
@@ -122,7 +128,7 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
             if(!started){t.Invalid=true;if(t.Reason.Length==0)t.Reason=(await controller.SnapshotAsync()).Status;t.Released.TrySetResult();}
             await t.Released.Task.WaitAsync(TimeSpan.FromSeconds(controller.Settings.MaxHoldSeconds+2));
             t.Stop??=controller.StopAsync(false);await t.Stop;
-            await controller.FinishCurrentAsync(t.Id,!t.Invalid,t.Cancel.Token);
+            await controller.FinishCurrentAsync(t.Id,!t.Invalid,t.Cancel.Token,forDelivery:!t.DictationOnly,expedite:t.Expedite.Token);
             var snapshot=await controller.SnapshotAsync();if(snapshot.Session?.Id!=t.Id){await CompletePreviewAsync(t,t.Reason.Length>0?t.Reason:snapshot.Status);return;}string text=TranscriptText.Render(snapshot);
             DeliveryResult result;
             if(t.Invalid||t.Cancel.IsCancellationRequested||!activity.Matches(t.ActivityVersion))result=new("Cancelled",t.Reason.Length>0?t.Reason:"本轮输入已取消，结果已保留。");
@@ -132,8 +138,9 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
             else
             {
                 await controller.SetDeliveryAsync("Sending","正在粘贴…",turnId:t.Id);
-                result=await TextDelivery.SendAsync(target!,text,()=>!t.Invalid&&activity.Matches(t.ActivityVersion)&&ReferenceEquals(active,t),t.Cancel.Token);
+                result=await TextDelivery.SendAsync(target!,text,()=>!t.Invalid&&activity.Matches(t.ActivityVersion)&&ReferenceEquals(active,t),t.Cancel.Token,()=>t.DeliveryDispatched=true);
             }
+            t.DeliveryDispatched=true;
             await controller.SetDeliveryAsync(result.State,result.Message,result.Accepted,t.Id);
             await CompletePreviewAsync(t,result.Message);
         }
@@ -143,7 +150,7 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
             try { await controller.StopAsync(false);await controller.SetDeliveryAsync("Blocked",reason,turnId:t.Id); }
             finally { await CompletePreviewAsync(t,reason); }
         }
-        finally{if(capturedTarget!=null)await TextDelivery.ReleaseAsync(capturedTarget);Listening?.Invoke(false);Interlocked.CompareExchange(ref active,null,t);t.Cancel.Dispose();}
+        finally{if(capturedTarget!=null)await TextDelivery.ReleaseAsync(capturedTarget);Listening?.Invoke(false);Interlocked.CompareExchange(ref active,null,t);t.Cancel.Dispose();t.Expedite.Dispose();}
     }
     private void PublishNotice(string message)
         => Notice?.Invoke(new(message, Volatile.Read(ref active)?.Id));
