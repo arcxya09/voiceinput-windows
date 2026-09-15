@@ -404,7 +404,7 @@ public sealed partial class AppController : IAsyncDisposable
             if(before!=engine.Pending)Notify();
         });}catch(OperationCanceledException){}
     }
-    public async Task FinishCurrentAsync(string? turnId=null,bool allowPolish=true,CancellationToken token=default)
+    public async Task FinishCurrentAsync(string? turnId=null,bool allowPolish=true,CancellationToken token=default,bool forDelivery=false,CancellationToken expedite=default)
     {
         var prepared=await OnActor(()=>
         {
@@ -413,7 +413,7 @@ public sealed partial class AppController : IAsyncDisposable
             if(allowPolish&&!token.IsCancellationRequested&&Settings.UseLexicon)engine.ApplyConfirmedCorrections(approvedCorrections);
             var protectedTerms=Settings.UseLexicon?Lexicon.Matches(TranscriptText.Render(engine.Segments),terms,engine.Session.ProjectId):[];
             engine.UpdateSession(engine.Session with{ProtectedTermCount=protectedTerms.Length,Revision=engine.Session.Revision+1});
-            var work=engine.Segments.Count==0?null:engine.BeginWholePolish(allowPolish&&!token.IsCancellationRequested&&Settings.PolishEnabled&&!polishCircuit&&Keys.DeepSeekKey.Length>0,protectedTerms);
+            var work=engine.Segments.Count==0?null:engine.BeginWholePolish(allowPolish&&!token.IsCancellationRequested&&!expedite.IsCancellationRequested&&Settings.PolishEnabled&&!polishCircuit&&Keys.DeepSeekKey.Length>0,protectedTerms);
             if(work!=null){Interlocked.Increment(ref activePolish);Status("正在统一润色本次完整输入…");}else Notify();
             return (Source:(TranscriptEngine?)engine,Work:work,Key:Keys.DeepSeekKey,Prompt:Settings.EffectivePolishPrompt);
         });
@@ -421,9 +421,10 @@ public sealed partial class AppController : IAsyncDisposable
         if(prepared.Work is {} work)
         {
             string? result=null,error=null;
-            using var cancelled=CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token,token);
+            using var cancelled=CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token,token,expedite);
+            if(forDelivery&&Settings.PreferFastDelivery)cancelled.CancelAfter(TimeSpan.FromSeconds(3));
             try{result=await deepseek.PolishWholeAsync(work,prepared.Key,prepared.Prompt,cancelled.Token);}
-            catch(Exception e){error=SafeError(e);}
+            catch(Exception e){error=cancelled.IsCancellationRequested&&!token.IsCancellationRequested&&!lifetime.IsCancellationRequested?"已优先上屏，保留完整识别正文及已确认纠错。":SafeError(e);}
             finally
             {
                 await OnActor(()=>{prepared.Source.CompleteWholePolish(work,cancelled.IsCancellationRequested?null:result,error);if(ReferenceEquals(engine,prepared.Source))Status(prepared.Source.Session.WholePolishReason);});
@@ -432,7 +433,9 @@ public sealed partial class AppController : IAsyncDisposable
         }
         var saved=await OnActor(()=>prepared.Source.Session);
         if(CanSaveMemory)await SaveSessionSafe(saved);
-        await RefreshMemoryBeforeRecognitionAsync();
+        // Next StartAsync awaits the repository barrier and refreshes memory.
+        // Do not put a redundant vocabulary reload ahead of automatic delivery.
+        if(!forDelivery)await RefreshMemoryBeforeRecognitionAsync();
         if(MemoryAvailable&&Settings.AutoExtract&&!token.IsCancellationRequested&&allowPolish)_=AutoExtractWhenReady();
     }
     public Task ParagraphAsync()=>OnActor(()=>{engine?.Paragraph();Status("将在下一个识别片段开始时换段。");});

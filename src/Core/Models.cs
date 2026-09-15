@@ -22,6 +22,7 @@ public record AppSettings
     public string DeviceId { get; init; } = "";
     public string ProjectId { get; init; } = "default";
     public bool PolishEnabled { get; init; } = true;
+    public bool PreferFastDelivery { get; init; } = true;
     public string PolishPrompt { get; init; } = PolishRules.SystemPrompt;
     [JsonIgnore] public string EffectivePolishPrompt => PolishRules.ResolvePrompt(PolishPrompt);
     public string GenerationRequirement { get; init; } = "HR 领域，覆盖招聘、绩效、薪酬、培训及员工关系。采用常用的简体中文术语，可包含常见英文缩写。";
