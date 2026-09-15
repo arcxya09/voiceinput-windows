@@ -7,7 +7,7 @@ using RealtimeTranscription.Core;
 namespace RealtimeTranscription.Desktop.Input;
 
 internal record UiaRequest(string Operation, long Window = 0, long Focus = 0, uint Thread = 0,
-    uint Process = 0, string CaptureId = "", bool CheckSelection = true, string? Text = null, uint ClipboardSequence = 0, bool PasteSubmitted = true);
+    uint Process = 0, string CaptureId = "", bool CheckSelection = true, string? Text = null, uint ClipboardSequence = 0);
 internal record UiaResponse(string Code, string Message = "", string CaptureId = "", uint? ClipboardSequence = null);
 
 // The same executable hosts one hidden worker. Only target metadata and the final
@@ -20,43 +20,6 @@ public static class UiaWorker
     private sealed record Captured(string Id, NativeTarget Native, int[] RuntimeId,
         AutomationElement Element, TextPatternRange? Selection);
     private static Captured? captured;
-    private static string? expectedDocument;
-    private const int ConfirmationLimit=65536;
-    private static string Normalize(string text)=>text.Replace("\r\n","\n",StringComparison.Ordinal).Replace('\r','\n');
-    private static void PrepareConfirmation(Captured target,string text)
-    {
-        expectedDocument=null;
-        try
-        {
-            if(target.Selection==null||!target.Element.TryGetCurrentPattern(TextPattern.Pattern,out var value))return;
-            var document=((TextPattern)value).DocumentRange;
-            string before=Normalize(document.GetText(ConfirmationLimit+1));
-            if(before.Length>ConfirmationLimit)return;
-            var prefix=document.Clone();prefix.MoveEndpointByRange(TextPatternRangeEndpoint.End,target.Selection,TextPatternRangeEndpoint.Start);
-            var suffix=document.Clone();suffix.MoveEndpointByRange(TextPatternRangeEndpoint.Start,target.Selection,TextPatternRangeEndpoint.End);
-            string left=Normalize(prefix.GetText(ConfirmationLimit+1)),right=Normalize(suffix.GetText(ConfirmationLimit+1));
-            string selected=Normalize(target.Selection.GetText(ConfirmationLimit+1));
-            string expected=left+Normalize(text)+right;
-            // Unchanged replacement cannot prove that Ctrl+V was processed.
-            if(left+selected+right==before&&expected!=before&&expected.Length<=ConfirmationLimit)expectedDocument=expected;
-        }
-        catch{expectedDocument=null;}
-    }
-    private static UiaResponse FinishPaste(UiaRequest request)
-    {
-        if(captured is not {} target||target.Id!=request.CaptureId)return new("ClipboardNotOwned");
-        if(request.PasteSubmitted)
-        {
-            if(expectedDocument==null)return new("ClipboardUnconfirmed");
-            try
-            {
-                if(!target.Element.TryGetCurrentPattern(TextPattern.Pattern,out var value))return new("ClipboardUnconfirmed");
-                if(Normalize(((TextPattern)value).DocumentRange.GetText(ConfirmationLimit+1))!=expectedDocument)return new("ClipboardUnconfirmed");
-            }
-            catch{return new("ClipboardUnconfirmed");}
-        }
-        return new(NativeClipboard.Restore());
-    }
     public static bool IsWorker(string[] args)
     {
         if (args.Length != 2 || args[0] != Argument || !int.TryParse(args[1], out int id) || id <= 0) return false;
@@ -91,11 +54,10 @@ public static class UiaWorker
     private static UiaResponse Handle(UiaRequest request)
     {
         if (request.Operation == "Ping") return new("Ready");
-        if (request.Operation == "Release") { captured = null; expectedDocument=null; NativeClipboard.Forget(); return new("Ready"); }
-        if (request.Operation == "FinishPaste") return FinishPaste(request);
+        if (request.Operation == "Release") { captured = null; return new("Ready"); }
         if (request.Operation == "Capture")
         {
-            captured = null; expectedDocument=null; NativeClipboard.Forget();
+            captured = null;
             return Capture(new(new IntPtr(request.Window), new IntPtr(request.Focus), request.Thread, request.Process));
         }
         if (request.Operation == "Validate" && captured is { } target && target.Id == request.CaptureId)
@@ -105,7 +67,6 @@ public static class UiaWorker
             if (request.Text is null || !ClipboardPaste.IsSupportedText(request.Text)) return new("ClipboardUnavailable");
             var validation = Validate(pasteTarget, true);
             if (validation.Code != "Ready") return validation;
-            PrepareConfirmation(pasteTarget,request.Text);
             uint? sequence = NativeClipboard.Prepare(request.Text, pasteTarget.Native, request.ClipboardSequence, out string diagnostic);
             return sequence is null ? new(diagnostic) : new("Ready", ClipboardSequence: sequence);
         }

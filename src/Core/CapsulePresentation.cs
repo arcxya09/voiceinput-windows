@@ -9,6 +9,7 @@ public static class CapsulePresentation
         "PasteSent" => "已发起粘贴",
         "Dictated" or "Blocked" => "待复制",
         "Cancelled" => "已取消",
+        "StartFailed" => "未开始",
         "Partial" => "部分输入",
         "Unknown" => "请核对",
         "Empty" => "无文字",
@@ -16,7 +17,7 @@ public static class CapsulePresentation
     };
 
     public static string EmptyPreview(string status, bool completed, string? state) =>
-        completed && (state is "Empty" or "Cancelled") ? "本轮尚未识别到文字" : status switch
+        completed && state == "Empty" ? "本轮尚未识别到文字" : status switch
         {
             "正在听" => "正在聆听",
             "准备麦克风" or "准备 / 连接" => "准备麦克风…",

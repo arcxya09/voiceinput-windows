@@ -29,7 +29,7 @@ internal static class CapsuleRegression
             Check(model.Complete(new("first", "已输入", "迟到内容") { DeliveryState = "Sent" }) == null);
             var frame = model.Complete(new("second", "已取消", "") { DeliveryState = "Cancelled" })!;
             Check(frame.Text.Length == 0 && CapsulePresentation.CompletionLabel(frame.DeliveryState) == "已取消");
-            Check(CapsulePresentation.EmptyPreview(frame.Status, true, frame.DeliveryState) == "本轮尚未识别到文字");
+            Check(CapsulePresentation.EmptyPreview(frame.Status, true, frame.DeliveryState) == "已取消");
             return Task.CompletedTask;
         });
         await test("单行胶囊无识别文字时显示真实阶段，错误原因仍可见", () =>

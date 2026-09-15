@@ -12,7 +12,10 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
         public volatile NativeTarget? Native=native;
         public readonly bool DictationOnly=dictationOnly;
         public readonly long ActivityVersion=activityVersion;
-        public readonly FocusContinuity Focus=new();
+        public readonly RecordingFocusContinuity Focus=new();
+        public volatile bool TargetCaptured,ManualDelivery;
+        public string ManualReason="",EndState="Cancelled";
+        public void UseManualDelivery(string reason){ManualReason=reason;ManualDelivery=true;}
         public readonly CancellationTokenSource Cancel=new();
         public readonly CancellationTokenSource Expedite=new();
         public volatile bool PhysicalReleased,DeliveryDispatched;
@@ -73,9 +76,8 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
                     if(!Enabled||CanStart?.Invoke()==false)continue;
                     if(active!=null){PublishNotice("上一段仍在整理，请稍后再按。");continue;}
                     var native=s.Target;bool dictationOnly=DictationOnly;
-                    if(!dictationOnly&&native==null){PublishNotice("暂时无法确认外部输入窗口，请重新按住说话；也可开启“只听写，不自动输入”。");continue;}
                     if(InputSafety.HasOtherModifier(hook.Trigger,Win32.Down)){PublishNotice("检测到组合键，本次不启动语音。");continue;}
-                    if(!activity.Matches(s.ActivityVersion)||(!dictationOnly&&Win32.Observe(native!)==FocusObservation.Changed)){PublishNotice("按键后输入位置或操作已改变，请重新按住说话。");continue;}
+                    if(!activity.Matches(s.ActivityVersion)){PublishNotice("按键后输入位置或操作已改变，请重新按住说话。");continue;}
                     var t=new Turn(s.At,native,s.ActivityVersion,dictationOnly);active=t;TurnStarted?.Invoke(t.Id);Listening?.Invoke(true);running=Run(t);
                 }
                 else if(active is {} t)
@@ -101,19 +103,29 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
     private async Task<TargetCapture> CaptureTarget(Turn t)
     {
         if(t.DictationOnly)return new(null,"Dictation","");
-        var anchor=t.Native!;
+        TargetCapture Manual(string reason)
+        {
+            t.UseManualDelivery(reason);
+            return new(null,"DictationFallback",reason);
+        }
+        if(t.Native is not {} anchor)return Manual("未检测到可靠的输入焦点，已继续听写；完成后请手动复制。");
         var native=await InputSafety.RecoverInitialFocusAsync(() =>
         {
-            if(Win32.Observe(anchor)==FocusObservation.Changed)return (FocusObservation.Changed,(NativeTarget?)null);
+            if(Win32.ObserveWindow(anchor)==FocusObservation.Changed)return (FocusObservation.Changed,(NativeTarget?)null);
             var current=Win32.Current();
             if(current==null)return (FocusObservation.Unavailable,(NativeTarget?)null);
-            if(current.Window!=anchor.Window||current.Thread!=anchor.Thread||current.Process!=anchor.Process||(anchor.Focus!=IntPtr.Zero&&current.Focus!=anchor.Focus))
+            if(current.Window!=anchor.Window||current.Thread!=anchor.Thread||current.Process!=anchor.Process)
                 return (FocusObservation.Changed,(NativeTarget?)null);
+            if(anchor.Focus!=IntPtr.Zero&&current.Focus!=anchor.Focus)return (FocusObservation.Unavailable,(NativeTarget?)null);
             return (FocusObservation.Stable,(NativeTarget?)current);
-        },()=>activity.Matches(t.ActivityVersion)&&!t.Invalid,t.Cancel.Token);
-        if(native==null)return new(null,"FocusUnavailable","无法持续确认原输入焦点，未上传语音。请重新按住说话，或开启“只听写，不自动输入”。");
+        },()=>activity.Matches(t.ActivityVersion)&&!t.Invalid,t.Cancel.Token,1000);
+        if(native==null)return Manual("输入位置暂不可用，已继续听写；完成后请手动复制。");
         t.Native=native;
-        return await TextDelivery.CaptureAsync(native,()=>activity.Matches(t.ActivityVersion)&&!t.Invalid,t.Cancel.Token);
+        var result=await TextDelivery.CaptureAsync(native,()=>activity.Matches(t.ActivityVersion)&&!t.Invalid,t.Cancel.Token);
+        if(result.Target!=null){t.TargetCaptured=true;return result;}
+        if(result.Code=="Password")return result;
+        t.Cancel.Token.ThrowIfCancellationRequested();
+        return Manual("当前软件未提供可靠的编辑控件信息，已继续听写；完成后请手动复制。");
     }
     private async Task Run(Turn t)
     {
@@ -121,24 +133,26 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
         try
         {
             var targetTask=CaptureTarget(t);
-            var readyTask=targetTask.ContinueWith(x=>x.Status==TaskStatus.RanToCompletion&&(t.DictationOnly||x.Result.Target!=null)&&activity.Matches(t.ActivityVersion)&&!t.Invalid,TaskScheduler.Default);
+            var readyTask=targetTask.ContinueWith(x=>x.Status==TaskStatus.RanToCompletion&&(t.DictationOnly||x.Result.Target!=null||x.Result.Code=="DictationFallback")&&activity.Matches(t.ActivityVersion)&&!t.Invalid,TaskScheduler.Default);
             bool started=await controller.StartAsync(t.PressedAt,t.Cancel.Token,readyTask,t.Id);
             var capture=await targetTask;var target=capture.Target;capturedTarget=target;
-            if(target==null&&!t.DictationOnly){t.Invalid=true;if(t.Reason.Length==0)t.Reason=capture.Message;t.CancelInput();t.Released.TrySetResult();}
-            if(!started){t.Invalid=true;if(t.Reason.Length==0)t.Reason=(await controller.SnapshotAsync()).Status;t.Released.TrySetResult();}
+            if(target==null&&!t.DictationOnly&&!t.ManualDelivery){if(!t.Invalid)t.EndState="StartFailed";t.Invalid=true;if(t.Reason.Length==0)t.Reason=capture.Message;t.CancelInput();t.Released.TrySetResult();}
+            if(!started){if(!t.Invalid)t.EndState="StartFailed";t.Invalid=true;if(t.Reason.Length==0)t.Reason=(await controller.SnapshotAsync()).Status;t.Released.TrySetResult();}
+            if(started&&t.ManualDelivery)await controller.SetDeliveryAsync("Pending",t.ManualReason,turnId:t.Id);
             await t.Released.Task.WaitAsync(TimeSpan.FromSeconds(controller.Settings.MaxHoldSeconds+2));
             t.Stop??=controller.StopAsync(false);await t.Stop;
             await controller.FinishCurrentAsync(t.Id,!t.Invalid,t.Cancel.Token,forDelivery:!t.DictationOnly,expedite:t.Expedite.Token);
             var snapshot=await controller.SnapshotAsync();if(snapshot.Session?.Id!=t.Id){await CompletePreviewAsync(t,t.Reason.Length>0?t.Reason:snapshot.Status);return;}string text=TranscriptText.Render(snapshot);
             DeliveryResult result;
-            if(t.Invalid||t.Cancel.IsCancellationRequested||!activity.Matches(t.ActivityVersion))result=new("Cancelled",t.Reason.Length>0?t.Reason:"本轮输入已取消，结果已保留。");
-            else if((!t.DictationOnly&&target==null)||snapshot.State==CaptureState.Faulted||snapshot.Session?.Gaps.Count>0||snapshot.Segments.Any(s=>s.AsrState==AsrState.Unresolved))result=new("Blocked","识别未完整结束，确认文字可手动复制。");
+            if(t.Invalid||t.Cancel.IsCancellationRequested||!activity.Matches(t.ActivityVersion))result=new(t.EndState,t.Reason.Length>0?t.Reason:"本轮输入已取消，结果已保留。");
+            else if(snapshot.State==CaptureState.Faulted||snapshot.Session?.Gaps.Count>0||snapshot.Segments.Any(s=>s.AsrState==AsrState.Unresolved))result=new("Blocked","识别未完整结束，确认文字可手动复制。");
             else if(text.Length==0)result=new("Empty","没有需要输入的文字。");
+            else if(t.ManualDelivery)result=new("Dictated",t.ManualReason);
             else if(t.DictationOnly)result=new("Dictated","听写完成，文字已保留，可复制。");
             else
             {
                 await controller.SetDeliveryAsync("Sending","正在粘贴…",turnId:t.Id);
-                result=await TextDelivery.SendAsync(target!,text,()=>!t.Invalid&&activity.Matches(t.ActivityVersion)&&ReferenceEquals(active,t),t.Cancel.Token,()=>t.DeliveryDispatched=true);
+                result=await TextDelivery.SendAsync(target!,text,()=>!t.Invalid&&!t.ManualDelivery&&activity.Matches(t.ActivityVersion)&&ReferenceEquals(active,t),t.Cancel.Token,()=>t.DeliveryDispatched=true);
             }
             t.DeliveryDispatched=true;
             await controller.SetDeliveryAsync(result.State,result.Message,result.Accepted,t.Id);
@@ -159,14 +173,14 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
     private async Task CompletePreviewAsync(Turn turn, string status)
     {
         string text = "";
-        string? deliveryState = null;
+        string? deliveryState = turn.Invalid?turn.EndState:null;
         try
         {
             var snapshot = await controller.SnapshotAsync();
             if (snapshot.Session?.Id == turn.Id)
             {
                 text = TranscriptText.Render(snapshot);
-                deliveryState = snapshot.Session.DeliveryState;
+                deliveryState = turn.Invalid&&snapshot.Session.DeliveryState=="Pending"?turn.EndState:snapshot.Session.DeliveryState;
             }
         }
         catch { /* A controller being disposed cannot supply another snapshot. */ }
@@ -180,13 +194,18 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
             using var timer=new PeriodicTimer(TimeSpan.FromMilliseconds(100));
             while(await timer.WaitForNextTickAsync(lifetime.Token))
             {
-                var t=Volatile.Read(ref active);if(t==null||t.Invalid)continue;
-                var observation=t.Native is {} native&&!t.DictationOnly?Win32.Observe(native):FocusObservation.Stable;
+                var t=Volatile.Read(ref active);if(t==null||t.Invalid||t.DeliveryDispatched)continue;
                 if(!activity.Matches(t.ActivityVersion)){Cancel("检测到其他操作，本轮改为手动复制。");continue;}
-                if(!t.Focus.Observe(observation,Environment.TickCount64))
-                {Cancel(observation==FocusObservation.Changed?"输入窗口或控件已改变，确认文字可手动复制。":"持续无法读取输入焦点，确认文字可手动复制。");continue;}
+                if(t.TargetCaptured&&!t.ManualDelivery&&!t.DictationOnly&&t.Native is {} native&&
+                    !t.Focus.Observe(Win32.ObserveWindow(native),Win32.Observe(native),Environment.TickCount64))
+                {
+                    t.UseManualDelivery("输入焦点已变化，已继续听写；完成后请手动复制。");
+                    await controller.SetDeliveryAsync("Pending",t.ManualReason,turnId:t.Id);
+                }
                 if(t.ReleasedAt==0&&Environment.TickCount64-t.PressedAt>controller.Settings.MaxHoldSeconds*1000L)Cancel("已达到最长录音时间，确认文字可手动复制。");
-                else if(t.ReleasedAt==0&&Environment.TickCount64-t.PressedAt>300&&!Win32.Down(hook.Trigger))Cancel("按键释放事件未完整到达，已停止录音，结果可手动复制。");
+                // GetAsyncKeyState can be false while another application's hook
+                // consumes Ctrl. Only the observed physical key-up ends a normal hold.
+                // The maximum-duration and explicit-cancel guards remain in force.
             }
         }
         catch(OperationCanceledException){}
