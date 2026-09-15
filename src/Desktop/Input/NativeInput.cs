@@ -58,6 +58,16 @@ internal static class Win32
         if(GetForegroundWindow()!=hwnd)return null;
         return hasFocus?new(hwnd,gui.Focus,thread,process):allowMissingFocus?new(hwnd,IntPtr.Zero,thread,process):null;
     }
+    // Foreground identity only: child-focus churn is handled separately while recording.
+    public static FocusObservation ObserveWindow(NativeTarget target)
+    {
+        var foreground=GetForegroundWindow();
+        if(foreground==IntPtr.Zero)return FocusObservation.Unavailable;
+        if(foreground!=target.Window||!IsWindow(target.Window)||!IsWindowEnabled(target.Window))return FocusObservation.Changed;
+        uint thread=GetWindowThreadProcessId(foreground,out uint process);
+        return thread==target.Thread&&process==target.Process&&GetForegroundWindow()==foreground
+            ?FocusObservation.Stable:FocusObservation.Changed;
+    }
     public static FocusObservation Observe(NativeTarget target)
     {
         var foreground=GetForegroundWindow();
@@ -92,12 +102,13 @@ public sealed class PhysicalHook : IDisposable
     private volatile bool enabled=true;
     public Task Ready=>ready.Task;
     public int Trigger=>Volatile.Read(ref trigger);
+    public bool IsHeld=>held;
     public PhysicalHook(Action<PhysicalSignal> signal,Func<bool>? awaitingDelivery=null)
     {
         this.signal=signal;this.awaitingDelivery=awaitingDelivery??(()=>false);keyboard=Key;mouse=Mouse;
         thread=new Thread(Run){IsBackground=true,Name="Voice input physical key hook"};thread.Start();
     }
-    public void Configure(string key){int next=key=="F8"?0x77:key=="F9"?0x78:0xA3;if(Win32.Down(Trigger)||Win32.Down(next))throw new InvalidOperationException("请松开说话键后再修改设置。");held=false;Volatile.Write(ref trigger,next);}
+    public void Configure(string key){int next=key=="F8"?0x77:key=="F9"?0x78:0xA3;if(held||Win32.Down(Trigger)||Win32.Down(next))throw new InvalidOperationException("请松开说话键后再修改设置。");held=false;Volatile.Write(ref trigger,next);}
     public void Enable(bool value){enabled=value;if(!value)signal(new("cancel",At:Environment.TickCount64));}
     private void Run()
     {
@@ -169,8 +180,12 @@ public static class TextDelivery
         for(int attempt=0;attempt<3;attempt++)
         {
             token.ThrowIfCancellationRequested();
-            if(!valid()||Win32.Observe(native)==FocusObservation.Changed)
-                return new(null,"TargetChanged","输入窗口或按键状态已改变，未上传语音。");
+            var recovered=await InputSafety.RecoverInitialFocusAsync(() =>
+            {
+                if(Win32.ObserveWindow(native)==FocusObservation.Changed)return(FocusObservation.Changed,(NativeTarget?)null);
+                return Win32.Observe(native)==FocusObservation.Stable?(FocusObservation.Stable,(NativeTarget?)native):(FocusObservation.Unavailable,(NativeTarget?)null);
+            },valid,token,1000);
+            if(recovered==null)return new(null,"TargetChanged","暂时无法确认原输入位置。");
             var result=await Query(new("Capture",native.Window.ToInt64(),native.Focus.ToInt64(),native.Thread,native.Process),token,timeoutMs:2500);
             if(result is {} response&&response.Reply.Code!="Unavailable")
                 return new(response.Reply.Code=="Ready"?new(native,response.Worker,response.Reply.CaptureId):null,response.Reply.Code,response.Reply.Message);
@@ -205,33 +220,11 @@ public static class TextDelivery
             },
             ()=>Uninterrupted()&&!Modified()&&!Win32.Composing(target.Native.Focus),
             ()=>{int accepted=SendPasteShortcut();if(accepted>=2)dispatched?.Invoke();return accepted;},token,Uninterrupted);
-        // Confirmation is after dispatch; never delay insertion with a fixed sleep.
-        // Cleanup ignores turn cancellation, but restoration is guarded by clipboard
-        // ownership and actual document readback, not by an elapsed timer.
-        bool mayHavePasted=result.State=="Unknown"||result.Accepted>=2;
-        string restoration="ClipboardUnconfirmed";
-        long confirmationDeadline=Environment.TickCount64+1500;
-        do
-        {
-            var reply=await Query(new("FinishPaste",CaptureId:target.CaptureId,PasteSubmitted:mayHavePasted),
-                CancellationToken.None,target.WorkerId,timeoutMs:500);
-            restoration=reply?.Reply.Code??"ClipboardUnconfirmed";
-            if(restoration is not ("ClipboardUnconfirmed" or "ClipboardRestoreBusy"))break;
-            if(!mayHavePasted||Environment.TickCount64>=confirmationDeadline)break;
-            await Task.Delay(40);
-        }while(true);
-        diagnostic+="/"+restoration;
         DeliveryResult delivery=result.State switch
         {
-            "Sent"=>new("PasteSent",restoration switch
-            {
-                "ClipboardRestored"=>"正文已上屏，已恢复原剪贴板。",
-                "ClipboardNewCopyPreserved"=>"已发起整段粘贴，保留了您新复制的内容。",
-                "ClipboardRestoreIncomplete"=>"正文已上屏，但原剪贴板未能完整恢复。",
-                _=>"已发起整段粘贴；未确认完成或暂无法恢复，正文保留在剪贴板。"
-            },result.Accepted),
+            "Sent"=>new("PasteSent","已发起整段粘贴，正文保留在剪贴板。",result.Accepted),
             "Unknown"=>new("Unknown","粘贴结果需要核对，请检查目标内容。不会自动重发。",result.Accepted),
-            _=>new("Blocked",diagnostic.StartsWith("ClipboardBackupUnsupported",StringComparison.Ordinal)?"原剪贴板格式或大小无法安全备份，未自动粘贴。原剪贴板未更改，识别正文可在程序内手动复制。":"未发起粘贴：剪贴板暂不可用、内容不受支持，或输入位置及按键状态已变化。文字已保留，可手动复制。",result.Accepted)
+            _=>new("Blocked","未发起粘贴：剪贴板暂不可用、内容不受支持，或输入位置及按键状态已变化。文字已保留，可手动复制。",result.Accepted)
         };
         return delivery with{Diagnostic=diagnostic};
     }

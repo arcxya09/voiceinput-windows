@@ -37,7 +37,7 @@ public sealed class VoicePreviewState
         if (!busy || IsCompleted || snapshot.Session is not { } session || session.Id != TurnId || TurnId == null
             || session.DeliveryState is not ("Pending" or "Sending")) return null;
         string partial = string.Join(" ", snapshot.Segments.Where(s => s.AsrState == AsrState.Partial).Select(s => s.PartialText));
-        return new(UiPresentation.Phase(snapshot, busy, enabled, dictationOnly),
+        return new(UiPresentation.Phase(snapshot, busy, enabled, dictationOnly)+(session.DeliveryState=="Pending"&&session.DeliveryReason.Length>0?" · 手动复制":""),
             partial.Length > 0 ? partial : TranscriptText.Render(snapshot), false);
     }
 

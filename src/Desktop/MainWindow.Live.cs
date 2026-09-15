@@ -31,7 +31,7 @@ public partial class MainWindow
         ToolTipService.SetToolTip(VocabularyTab,controller.MemoryAvailable ? null : controller.MemoryStatus);
         var version = typeof(MainWindow).Assembly.GetName().Version;
         VersionInfo.Text = $"版本 {version?.ToString(3) ?? "未知"} · Windows x64 · Key 和本地文本通过当前 Windows 用户加密保存。";
-        UsageHelp.Text = $"1. 在设置中填写百炼 Key；需要全文润色时填写 DeepSeek Key。\n2. { (dictation ? "仅听写模式：可在任意窗口" : "在其他应用的文本框中") }按住 {key}，麦克风就绪后说话。松开即停止录音。\n3. { (dictation ? "结果保留在本程序，使用“复制正文”或托盘“复制最近结果”。" : "整理完成后整段粘贴到原位置，不自动按回车。确认正文已上屏后恢复原剪贴板；无法确认时保留正文。目标改变时停止粘贴。") }\n4. 在“对照与编辑”中保存手动修订，到词库确认有用的纠错候选。\n5. Esc 取消本轮。松手等待上屏时，普通回车跳过剩余润色（不会转发回车发送消息）。其他按键或鼠标操作仍会取消投递；上一轮仍在整理时请稍后再按。";
+        UsageHelp.Text = $"1. 在设置中填写百炼 Key；需要全文润色时填写 DeepSeek Key。\n2. { (dictation ? "仅听写模式：可在任意窗口" : "在其他应用的文本框中") }按住 {key}，麦克风就绪后说话。松开即停止录音。\n3. { (dictation ? "结果保留在本程序，使用“复制正文”或托盘“复制最近结果”。" : "整理完成后整段粘贴到原位置，不自动按回车。正文留在剪贴板。没有可靠光标或软件改变焦点时继续听写，完成后手动复制。") }\n4. 在“对照与编辑”中保存手动修订，到词库确认有用的纠错候选。\n5. Esc 取消本轮。松手等待上屏时，普通回车跳过剩余润色（不会转发回车发送消息）。其他按键或鼠标操作仍会取消投递；上一轮仍在整理时请稍后再按。";
         bool captureActive = busy && lastSnapshot?.State is CaptureState.Recording or CaptureState.Connecting;
         MicLevel.Value = captureActive || microphoneTesting ? Volatile.Read(ref level) : 0;
         overlay.SetMeter(Volatile.Read(ref level), captureActive);

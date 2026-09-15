@@ -228,7 +228,7 @@ public sealed class VoiceOverlay : Window
         {
             "Sent" or "PasteSent" or "Dictated" => "\uE73E",
             "Cancelled" => "\uE711",
-            "Blocked" or "Partial" or "Unknown" => "\uE7BA",
+            "StartFailed" or "Blocked" or "Partial" or "Unknown" => "\uE7BA",
             _ => "\uE946"
         };
         AutomationProperties.SetName(completion, currentStatus);

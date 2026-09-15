@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using RealtimeTranscription.Core;
+using RealtimeTranscription.Desktop.Input;
 using RealtimeTranscription.Desktop;
 using RealtimeTranscription.Infrastructure;
 
@@ -203,6 +204,56 @@ static class StartupCaptureRegression
             f.Levels.Clear();
             capture.EmitLateLevel(.2f);
             Check(!(await f.App.SnapshotAsync()).LocalAudioReady && !f.Levels.Any(v => v > 0), "故障设备的迟到回调恢复了正在听。");
+        });
+    }
+
+    public static async Task RunInputCompatibility(Func<string,Func<Task>,Task> test)
+    {
+        foreach(string scenario in new[]{"consumed-ctrl","no-focus","unavailable-provider","not-editable","focus-blip","focus-lost","window-changed","escape","password"})
+        await test("2.1.7 生产按住说话："+scenario,async()=>
+        {
+            TextDelivery.Reset();
+            if(scenario=="no-focus")Win32.Target=null;
+            if(scenario=="unavailable-provider")TextDelivery.CaptureCode="Unavailable";
+            if(scenario=="not-editable")TextDelivery.CaptureCode="NotEditable";
+            if(scenario=="password")TextDelivery.CaptureCode="Password";
+            var turn=new Turn();
+            await using var fixture=await Fixture.Create(turn);
+            await fixture.App.SaveSettingsAsync(fixture.App.Settings with{DictationOnly=false},fixture.App.Keys);
+            await using var ptt=new PushToTalkService(fixture.App);
+            var completed=new TaskCompletionSource<VoiceTurnCompletion>(TaskCreationOptions.RunContinuationsAsynchronously);
+            ptt.TurnCompleted+=c=>completed.TrySetResult(c);
+            await ptt.InitializeAsync();PhysicalHook.Latest!.Emit("down");
+            if(scenario=="password")
+            {
+                var denied=await completed.Task.WaitAsync(Budget);
+                Check(denied.DeliveryState=="StartFailed"&&denied.Status.Contains("密码"),"密码拒绝原因被取消/无文字掩盖。");
+                Check(turn.Socket.Actions.IsEmpty&&turn.Socket.Pcm.IsEmpty&&TextDelivery.Sends==0,"密码目标仍上传或投递。");
+                return;
+            }
+            var capture=await turn.StartedCapture();await capture.EmitFrame(.04f);
+            await turn.Socket.FirstPcm.Task.WaitAsync(Budget);
+            if(scenario is "focus-blip" or "focus-lost")Win32.Focus=FocusObservation.Changed;
+            if(scenario=="window-changed")Win32.Window=FocusObservation.Changed;
+            if(scenario=="focus-blip")
+            {
+                await Task.Delay(350);Win32.Focus=FocusObservation.Stable;
+            }
+            await Task.Delay(scenario=="focus-lost"?1300:700);
+            Check(!completed.Task.IsCompleted&&ptt.Busy&&!capture.StopRequested,"未收到真实松键或取消就中断录音。");
+            bool manual=scenario is "no-focus" or "unavailable-provider" or "not-editable" or "focus-lost" or "window-changed";
+            if(manual)
+            {
+                var snapshot=await fixture.App.SnapshotAsync();
+                Check(snapshot.Session!.DeliveryReason.Contains("手动复制"),"兼容降级未给出手动复制提示。");
+                // Returning later must not re-enable automatic insertion.
+                Win32.Focus=Win32.Window=FocusObservation.Stable;
+            }
+            PhysicalHook.Latest.Emit(scenario=="escape"?"escape":"up");
+            var result=await completed.Task.WaitAsync(Budget);
+            Check(result.Text=="完整结果。","收尾正文丢失。");
+            Check(result.DeliveryState==(scenario=="escape"?"Cancelled":manual?"Dictated":"PasteSent"),"终态错误："+result.DeliveryState+" / "+result.Status);
+            Check(TextDelivery.Sends==(manual||scenario=="escape"?0:1),"兼容降级后误投递或重复投递。");
         });
     }
 
