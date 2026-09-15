@@ -22,6 +22,13 @@ public sealed class PcmDecoder
 {
     public PcmInputFormat Format { get; }
     public PcmDecoder(PcmInputFormat format){format.Validate();Format=format;}
+    public void FillSilence(Span<byte> bytes)
+    {
+        if(bytes.Length%Format.BlockAlign!=0)throw new ArgumentException("音频块没有按样本对齐。");
+        // PCM8 is unsigned: its zero amplitude is 0x80. All supported signed
+        // integer and IEEE float formats encode silence with zero bytes.
+        bytes.Fill(Format.Encoding==PcmEncoding.Integer&&Format.BitsPerSample==8?(byte)0x80:(byte)0);
+    }
     public float[] Decode(ReadOnlySpan<byte> bytes,out float rms)
     {
         if(bytes.Length%Format.BlockAlign!=0)throw new ArgumentException("音频块没有按样本对齐。");

@@ -22,8 +22,7 @@ internal sealed class NativeWasapiCapture : IAsyncDisposable
     public NativeWasapiCapture(MMDevice device, Action<IntPtr, int, bool> data, Action<Exception?> completed)
     {
         this.data = data; this.completed = completed;
-        client = device.AudioClient;
-        try { Format = client.MixFormat; }
+        try { client = device.AudioClient; Format = client.MixFormat; }
         catch { Cleanup(); throw; }
     }
     private static long QpcNow() => (long)(Stopwatch.GetTimestamp() * (double)AudioPacketTimeline.TicksPerSecond / Stopwatch.Frequency);
@@ -48,9 +47,11 @@ internal sealed class NativeWasapiCapture : IAsyncDisposable
         try
         {
             if (Volatile.Read(ref aborted) != 0 || Interlocked.Read(ref stopAt) != 0) { ready.TrySetResult(); return; }
+            // Shared, event-driven streams let the audio engine choose the buffer
+            // duration. Both time parameters must be zero for this WASAPI mode.
             client.Initialize(AudioClientShareMode.Shared,
                 AudioClientStreamFlags.EventCallback | AudioClientStreamFlags.AutoConvertPcm | AudioClientStreamFlags.SrcDefaultQuality,
-                1_000_000, 0, Format, Guid.Empty);
+                0, 0, Format, Guid.Empty);
             client.SetEventHandle(packetReady.SafeWaitHandle.DangerousGetHandle());
             var capture = client.AudioCaptureClient;
             var timeline = new AudioPacketTimeline(Format.SampleRate);
@@ -92,14 +93,17 @@ internal sealed class NativeWasapiCapture : IAsyncDisposable
         {
             if (running) try { client.Stop(); } catch (Exception e) { error ??= e; }
             Cleanup();
-            try { completed(Volatile.Read(ref aborted) == 0 ? error : null); }
+            // Before Start succeeds, ready/Start() owns the failure. A second
+            // fault callback could otherwise replace its actionable diagnostic
+            // with a generic interruption message. Completion still drains the queue.
+            try { completed(running && Volatile.Read(ref aborted) == 0 ? error : null); }
             finally { stopped.TrySetResult(); }
         }
     }
     private void Cleanup()
     {
         if (Interlocked.Exchange(ref cleaned, 1) != 0) return;
-        try { client.Dispose(); } catch { }
+        try { client?.Dispose(); } catch { }
         packetReady.Dispose(); wake.Dispose();
     }
     public async ValueTask DisposeAsync()

@@ -413,6 +413,9 @@ public static class DesktopSmoke
             checks.Add("Listening, processing, completion and save warnings keep the same capsule footprint and focus; save warnings stay visible until cleared");
             checks.Add("Terminal badges distinguish sent, dictation-only, blocked, canceled, partial, unknown and empty results without inferring success from status text");
             overlay.Clear();
+            Stage("Verify recognition capsule remains above competing native windows");
+            await CheckOverlayTopmostAsync(overlay);
+            checks.Add("Actual capsule Z order recovers from another topmost window and native demotion without taking focus; completion remains topmost, hides on time, stops maintenance and can show again");
             Stage("Verify production whole-text paste against isolated external controls");
             checks.AddRange(await InputDeliverySmoke.CheckAsync());
             Stage("Desktop UI verification completed");
@@ -838,6 +841,7 @@ public static class DesktopSmoke
             $"The {name} transparent host exposes a system caption, resize frame or window control (style {style:X}).");
         Require((extended & (0x08000000L | 0x80L | 0x20L)) == (0x08000000L | 0x80L | 0x20L),
             $"The {name} is missing tool-window, no-activation or pointer pass-through flags (extended {extended:X}).");
+        Require((extended & 0x8L) != 0, $"The {name} native HWND is not topmost (extended {extended:X}).");
         Require(GetWindowRect(hwnd, out var bounds), "The transparent capsule's outer bounds could not be measured.");
         Require(GetClientRect(hwnd, out var client), "The transparent capsule's client bounds could not be measured.");
         var origin = new Point();
@@ -854,6 +858,86 @@ public static class DesktopSmoke
             SendMessage(hwnd, 0x0021, IntPtr.Zero, IntPtr.Zero).ToInt64() == 3,
             "The capsule exposes a pointer target or mouse-activation path.");
         Console.WriteLine($"Capsule host {name}: DPI={GetDpiForWindow(hwnd)}, frame=none, region=none, pointer=transparent, activation=disabled.");
+    }
+
+    private static async Task CheckOverlayTopmostAsync(VoiceOverlay overlay)
+    {
+        // Exercise real native Z order, independently of presenter properties and
+        // ASR snapshots. No Update/Position call is allowed while awaiting repair.
+        var competitor = new Window { Content = new Grid { Background = new SolidColorBrush(Microsoft.UI.Colors.SteelBlue) } };
+        try
+        {
+            overlay.BeginTurn();
+            await LayoutAsync(overlay);
+            IntPtr hwnd = WinRT.Interop.WindowNative.GetWindowHandle(overlay);
+            IntPtr other = WinRT.Interop.WindowNative.GetWindowHandle(competitor);
+            var bounds = CheckOverlayBounds(overlay);
+            var presenter = Microsoft.UI.Windowing.OverlappedPresenter.Create();
+            presenter.IsAlwaysOnTop = true;
+            presenter.IsResizable = presenter.IsMinimizable = presenter.IsMaximizable = false;
+            presenter.SetBorderAndTitleBar(false, false);
+            competitor.AppWindow.SetPresenter(presenter);
+            competitor.AppWindow.IsShownInSwitchers = false;
+            competitor.AppWindow.MoveAndResize(new RectInt32(bounds.Left, bounds.Top,
+                bounds.Right - bounds.Left, bounds.Bottom - bounds.Top));
+            competitor.Activate();
+            await LayoutAsync(competitor);
+            Require(GetForegroundWindow() == other, "The topmost regression could not activate its isolated competing window.");
+
+            void CoverCapsule()
+            {
+                Require(SetWindowPos(other, new IntPtr(-1), 0, 0, 0, 0, 0x0213) && IsWindowAbove(other, hwnd),
+                    "The regression did not place a real topmost window above the capsule.");
+            }
+            async Task RequireRecovery(string phase)
+            {
+                await UntilAsync(() => overlay.AppWindow.IsVisible &&
+                    (GetWindowLongPtr(hwnd, -20).ToInt64() & 0x8L) != 0 && IsWindowAbove(hwnd, other),
+                    "The capsule failed to recover actual native Z order during " + phase + ".");
+                Require(GetForegroundWindow() == other, "Topmost recovery stole foreground focus during " + phase + ".");
+            }
+
+            CoverCapsule();
+            await RequireRecovery("recording without new snapshots");
+            Require(SetWindowPos(hwnd, new IntPtr(-2), 0, 0, 0, 0, 0x0213) &&
+                (GetWindowLongPtr(hwnd, -20).ToInt64() & 0x8L) == 0,
+                "The regression did not demote the capsule's actual native HWND.");
+            await RequireRecovery("native TOPMOST demotion");
+
+            overlay.Update("已完成", "置顶回归完成", dismiss: true, deliveryState: "PasteSent");
+            CoverCapsule();
+            await RequireRecovery("the completion hold");
+            await UntilAsync(() => !overlay.AppWindow.IsVisible, "Topmost maintenance restarted the completion hide timer.");
+            Require(!overlay.IsTopmostMaintenanceRunning, "The hidden capsule retained its topmost maintenance timer.");
+            Require(SetWindowPos(other, new IntPtr(-1), 0, 0, 0, 0, 0x0213), "The hidden-window regression could not reorder its competitor.");
+            await Task.Delay(550);
+            Require(!overlay.AppWindow.IsVisible && !overlay.IsTopmostMaintenanceRunning,
+                "A competing window revived the hidden capsule or restarted background maintenance.");
+
+            overlay.BeginTurn();
+            await RequireRecovery("hide then show");
+            CoverCapsule();
+            await RequireRecovery("competition after showing again");
+            overlay.Clear();
+            Require(!overlay.AppWindow.IsVisible && !overlay.IsTopmostMaintenanceRunning,
+                "Clearing a turn left its capsule or maintenance running.");
+        }
+        finally
+        {
+            overlay.Clear();
+            competitor.Close();
+        }
+    }
+
+    private static bool IsWindowAbove(IntPtr expectedAbove, IntPtr expectedBelow)
+    {
+        IntPtr candidate = GetWindow(expectedBelow, 3); // GW_HWNDPREV
+        for (int visited = 0; candidate != IntPtr.Zero && candidate != expectedBelow && visited < 256; visited++)
+        {
+            if (candidate == expectedAbove) return true;
+            candidate = GetWindow(candidate, 3);
+        }
+        return false;
     }
 
     private static void CheckMainWindowFrame(IntPtr hwnd)
@@ -1091,6 +1175,7 @@ public static class DesktopSmoke
     }
     [StructLayout(LayoutKind.Sequential)] private struct MonitorInfo { public int Size; public Rect Monitor, Work; public uint Flags; }
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr window, uint command);
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] private static extern IntPtr GetWindowLongPtr(IntPtr window, int index);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetWindowRect(IntPtr window, out Rect rectangle);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetClientRect(IntPtr window, out Rect rectangle);

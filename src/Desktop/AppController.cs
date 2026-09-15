@@ -40,7 +40,7 @@ public sealed partial class AppController : IAsyncDisposable
     public string Diagnostic {get{lock(diagnosticSync)return diagnostic+(captureAttempt is {} attempt?"\n"+attempt.Timing:"");}}
     private void SetDiagnostic(string stage,Exception? error=null,string? detail=null)
     {
-        lock(diagnosticSync)diagnostic=$"VoiceInput {typeof(AppController).Assembly.GetName().Version?.ToString(3)}\n时间：{DateTimeOffset.Now:O}\n阶段：{stage}\n{detail??audio?.FormatDescription??"音频格式尚未读取"}\n异常类型：{error?.GetType().Name??"None"}\nHRESULT：0x{error?.HResult??0:X8}";
+        lock(diagnosticSync)diagnostic=$"VoiceInput {typeof(AppController).Assembly.GetName().Version?.ToString(3)}\n时间：{DateTimeOffset.Now:O}\n阶段：{stage}（{StageLabel(stage)}）\n{detail??audio?.FormatDescription??"音频格式尚未读取"}\n{ExceptionMetadata(error)}";
     }
     private void FailCapture(string text)
     {
@@ -216,41 +216,51 @@ public sealed partial class AppController : IAsyncDisposable
         captureReleased=false;
         await captureGate.WaitAsync(cancelled);
         Task<IReadOnlyList<TermData>>? preparation=null;
+        string startStage="Configuration";
+        void Stage(string value){startStage=value;SetDiagnostic(value);}
         try
         {
             var allowed=await OnActor(()=>state is not (CaptureState.Recording or CaptureState.Connecting or CaptureState.Draining or CaptureState.Closing));
             if(!allowed)return false;
+            var attempt=new CaptureAttempt(turnId,pressedAt);
+            await OnActor(()=>{captureAttempt=attempt;captureFailure=null;});
+            Stage("Configuration");
             Settings.AsrUri();if(Keys.BailianKey.Length==0)throw new ArgumentException("请先在设置页填写百炼 API Key。");
             startup=CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token,cancelled);startup.CancelAfter(15000);
             var startupToken=startup.Token;
-            var attempt=new CaptureAttempt(turnId,pressedAt);
             // Start local capture before database work; pending observations are reconciled
             // while audio is safely buffered, before the request vocabulary is selected.
+            Stage("PreparingSession");
             await OnActor(()=>engine?.FinishAll());
             startup.Token.ThrowIfCancellationRequested();
             await OnActor(()=>
             {
                 CancelToken(extraction);NewEngine(new SessionData{Id=turnId,ProjectId=Settings.ProjectId,AllowLearning=Settings.AllowLearning});
-                captureAttempt=attempt;captureFailure=null;SetDiagnostic("Preparing");state=CaptureState.Connecting;
+                state=CaptureState.Connecting;
                 lastResponse=lastVoice=lastProgress=Environment.TickCount64;voiceSeen=false;billedSeconds=0;
                 Status("正在准备麦克风…");
             });
+            Stage("CreatingRecognitionClient");
             var client=clientFactory(ReceiveAsync);asr=client;
             // Local capture precedes database refresh and the cloud handshake. Startup PCM
             // is bounded to the same fifteen seconds as the overall startup deadline.
+            Stage("OpeningMicrophone");
             var capture=await Task.Run(()=>captureFactory(Settings.DeviceId,client.AudioAsync,text=>AudioFault(client.TaskId,text),value=>AudioLevel(attempt,client.TaskId,value)),startupToken);audio=capture;
             // A release can arrive while the device is being constructed and audio
             // is still null. Forward it before Start so no post-release PCM is read.
+            Stage("StartingMicrophone");
             if(captureReleased)capture.RequestStop();
-            startupToken.ThrowIfCancellationRequested();capture.Start();SetDiagnostic("MicrophoneStarted");
+            startupToken.ThrowIfCancellationRequested();capture.Start();Stage("PreparingRecognition");
             await OnActor(()=>{if(captureFailure==null)Status(captureReleased?"录音已停止，正在准备识别…":"麦克风已启动，正在连接识别服务；音频暂存本地。");});
             // Vocabulary reconciliation starts immediately, but need not delay
             // the transport once the hold and target checks permit a cloud turn.
             preparation=PrepareRecognitionAsync(client,turnId,startupToken);
+            Stage("ValidatingTarget");
             int delay=(int)Math.Max(0,Settings.HoldMs-(Environment.TickCount64-pressedAt));
             if(delay>0)await Task.Delay(delay,startup.Token);
             startup.Token.ThrowIfCancellationRequested();
             if(!await targetReady.WaitAsync(startup.Token))throw new InvalidOperationException("无法确认可编辑的输入位置，未上传语音。");
+            Stage("ConnectingRecognition");
             await client.StartPreparedAsync(Settings,Keys.BailianKey,preparation,startupToken);
             Interlocked.Exchange(ref attempt.AsrReadyAt,Environment.TickCount64);
             SetDiagnostic("Recognizing");
@@ -260,11 +270,21 @@ public sealed partial class AppController : IAsyncDisposable
         }
         catch(Exception e)
         {
-            string error=asr?.FailureMessage??SafeError(e);
+            // The preparation runs alongside the transport. Attribute its own
+            // exception to preparation, without mislabelling a transport failure.
+            if(preparation?.Exception is {} preparationError&&ExceptionChain(preparationError).Any(x=>ReferenceEquals(x,e)))
+                startStage="PreparingRecognition";
+            string error=IsMicrophoneStage(startStage)?MicrophoneError(e,startStage):asr?.FailureMessage??SafeError(e);
+            string audioDetail=audio?.Diagnostic.Length>0?audio.Diagnostic:audio?.FormatDescription??"音频格式尚未读取";
             CancelToken(startup);
-            SetDiagnostic("StartFailed",e,$"{(audio?.Diagnostic.Length>0?audio.Diagnostic:audio?.FormatDescription)}\n错误：{error}");
-            audio?.Abort();asr?.Abort();if(audio!=null){await audio.DisposeAsync();audio=null;}if(asr!=null){var id=asr.TaskId;await asr.DisposeAsync();asr=null;await OnActor(()=>engine?.SealTask(id,"启动未完成"));}
-            await OnActor(()=>{if(engine?.Session.HotwordState=="Prepared")engine.UpdateSession(engine.Session with{HotwordState="Failed",Revision=engine.Session.Revision+1});state=e is OperationCanceledException?CaptureState.Stopped:CaptureState.Faulted;Status(captureFailure??error);});
+            string cleanup=await CleanupFailedStartAsync();
+            SetDiagnostic("StartFailed",e,$"失败阶段：{startStage}（{StageLabel(startStage)}）\n{audioDetail}\n错误：{error}{cleanup}");
+            await OnActor(()=>
+            {
+                if(IsMicrophoneStage(startStage)&&e is not OperationCanceledException)captureFailure=error;
+                if(engine?.Session.HotwordState=="Prepared")engine.UpdateSession(engine.Session with{HotwordState="Failed",Revision=engine.Session.Revision+1});
+                state=e is OperationCanceledException?CaptureState.Stopped:CaptureState.Faulted;Status(captureFailure??error);
+            });
             return false;
         }
         finally
@@ -587,20 +607,57 @@ public sealed partial class AppController : IAsyncDisposable
     {
         using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(8));
         await captureGate.WaitAsync(timeout.Token);
+        string testStage="Configuration",result="";
+        IAudioCapture? mic=null;
+        bool hadFailure=false;
+        void Stage(string value){testStage=value;SetDiagnostic(value);}
         try
         {
             var current=await SnapshotAsync();
             if(current.State is CaptureState.Recording or CaptureState.Connecting or CaptureState.Draining)throw new InvalidOperationException("请先结束当前录音。");
             float peak=0;
-            await using var mic=await Task.Run(()=>new AudioCapture(deviceId,(_,_)=>ValueTask.CompletedTask,_=>{},v=>{peak=Math.Max(peak,v);Level?.Invoke(Math.Min(1,v*5));}),timeout.Token);
-            mic.Start();await Task.Delay(3000,timeout.Token);await mic.StopAsync(timeout.Token);
-            if(mic.FailureMessage is {} fault){SetDiagnostic("MicrophoneTestFailed",detail:mic.Diagnostic);return fault;}
-            SetDiagnostic("MicrophoneTest",detail:$"{mic.FormatDescription}; pcm_samples={mic.SamplesSent}; peak={peak:F4}");
-            if(mic.SamplesSent==0)return "没有收到麦克风音频。请检查设备、Windows 麦克风权限与静音开关。";
-            return $"本地麦克风测试通过：{mic.FormatDescription}，已转换 {mic.SamplesSent/16000.0:F1} 秒。"+(peak<.006f?"电平很低，请检查静音或输入音量。":"");
+            Stage("OpeningMicrophone");
+            mic=await Task.Run(()=>captureFactory(deviceId,(_,_)=>ValueTask.CompletedTask,_=>{},v=>{peak=Math.Max(peak,v);Level?.Invoke(Math.Min(1,v*5));}),timeout.Token);
+            Stage("StartingMicrophone");mic.Start();
+            Stage("ReadingMicrophone");await Task.Delay(3000,timeout.Token);
+            Stage("StoppingMicrophone");await mic.StopAsync(timeout.Token);
+            if(mic.FailureMessage is {} fault)
+            {
+                hadFailure=true;
+                SetDiagnostic("MicrophoneTestFailed",detail:$"失败阶段：ReadingMicrophone（读取麦克风音频）\n{mic.Diagnostic}");
+                result=fault+" 可在设置中查看诊断信息。";
+            }
+            else
+            {
+                SetDiagnostic("MicrophoneTest",detail:$"{mic.FormatDescription}; pcm_samples={mic.SamplesSent}; peak={peak:F4}");
+                result=mic.SamplesSent==0?"没有收到麦克风音频。请检查设备、Windows 麦克风权限与静音开关。":
+                    $"本地麦克风测试通过：{mic.FormatDescription}，已转换 {mic.SamplesSent/16000.0:F1} 秒。"+(peak<.006f?"电平很低，请检查静音或输入音量。":"");
+            }
         }
-        catch(Exception e){SetDiagnostic("MicrophoneTestFailed",e);throw;}
-        finally{Level?.Invoke(0);captureGate.Release();}
+        catch(Exception e)
+        {
+            hadFailure=true;
+            SetDiagnostic("MicrophoneTestFailed",e,$"失败阶段：{testStage}（{StageLabel(testStage)}）\n{mic?.Diagnostic??"音频格式尚未读取"}");
+            if(!IsMicrophoneStage(testStage))throw;
+            result=MicrophoneError(e,testStage);
+        }
+        finally
+        {
+            try
+            {
+                if(mic!=null)try{await mic.DisposeAsync();}catch(Exception e)
+                {
+                    if(!hadFailure)
+                    {
+                        SetDiagnostic("MicrophoneTestFailed",e,"失败阶段：StoppingMicrophone（释放麦克风设备）");
+                        result=MicrophoneError(e,"StoppingMicrophone");
+                    }
+                    else lock(diagnosticSync)diagnostic+="\n清理阶段：DisposeMicrophone\n"+ExceptionMetadata(e);
+                }
+            }
+            finally{Level?.Invoke(0);captureGate.Release();}
+        }
+        return result;
     }
     public async Task TestBailianAsync(){await using var c=new BailianClient(_=>Task.CompletedTask);using var token=new CancellationTokenSource(15000);await c.StartAsync(Settings,Keys.BailianKey,[],token.Token);await c.AudioAsync(new byte[3200],token.Token);await c.FinishAsync(token.Token);}
     public static string SafeError(Exception e)=>e is ProviderException?e.Message:e is OperationCanceledException or TimeoutException?"操作超时或已取消，确认文字已保留。":e is ArgumentException or InvalidOperationException or NotSupportedException?e.Message:"操作失败，请检查网络、设备或保存位置。";

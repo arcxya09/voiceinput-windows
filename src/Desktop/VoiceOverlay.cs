@@ -19,6 +19,7 @@ public sealed class VoiceOverlay : Window
     private readonly Border root;
     private readonly Grid surface, row;
     private readonly CapsuleSurface capsule;
+    private readonly OverlayTopmostGuard topmost;
     private readonly UISettings uiSettings = new();
     private readonly AccessibilitySettings accessibility = new();
     private readonly Border[] levels = new Border[5];
@@ -36,6 +37,7 @@ public sealed class VoiceOverlay : Window
     internal bool HasAntialiasedAcrylic => capsule.HasAntialiasedAcrylic;
     internal bool IsUsingAcrylic => capsule.IsUsingAcrylic;
     internal string MaterialDiagnostics => capsule.MaterialDiagnostics;
+    internal bool IsTopmostMaintenanceRunning => topmost.IsRunning;
 
     public VoiceOverlay()
     {
@@ -102,6 +104,7 @@ public sealed class VoiceOverlay : Window
         AppWindow.SetPresenter(presenter);
         AppWindow.IsShownInSwitchers = false;
         capsule = new CapsuleSurface(this, surface, root);
+        topmost = new OverlayTopmostGuard(hwnd);
         ApplyAccessibility();
         root.ActualThemeChanged += (_, _) => { if (!closed) ApplyAccessibility(); };
         windowProc = WindowProc;
@@ -114,6 +117,7 @@ public sealed class VoiceOverlay : Window
         {
             closed = true;
             hide.Stop();
+            topmost.Dispose();
             CancelFade();
             RemoveWindowSubclass(hwnd, windowProc, 1);
             capsule.Dispose();
@@ -172,6 +176,7 @@ public sealed class VoiceOverlay : Window
         Position();
         if (!AppWindow.IsVisible) AppWindow.Show(false);
         Position();
+        topmost.Start();
         if (dismiss && persistentWarning.Length == 0) hide.Start();
     }
 
@@ -203,7 +208,7 @@ public sealed class VoiceOverlay : Window
         previewSource = "";
         SetMeter(0, false);
         if (persistentWarning.Length > 0) Update("有内容尚未保存", "请在主窗口重试保存", dismiss: true);
-        else AppWindow.Hide();
+        else HideOverlay();
     }
 
     private void UpdatePreview()
@@ -241,7 +246,7 @@ public sealed class VoiceOverlay : Window
         if (closed || persistentWarning.Length > 0 || !dismissPending) return;
         if (!uiSettings.AnimationsEnabled || accessibility.HighContrast)
         {
-            AppWindow.Hide();
+            HideOverlay();
             return;
         }
         CancelFade();
@@ -256,7 +261,7 @@ public sealed class VoiceOverlay : Window
             // A new turn or save warning can cancel a fade before this callback runs.
             if (closed || !ReferenceEquals(fade, storyboard)) return;
             fade = null;
-            AppWindow.Hide();
+            HideOverlay();
             storyboard.Stop();
             surface.Opacity = 1;
         };
@@ -269,6 +274,12 @@ public sealed class VoiceOverlay : Window
         fade = null;
         old?.Stop();
         surface.Opacity = 1;
+    }
+
+    private void HideOverlay()
+    {
+        topmost.Stop();
+        AppWindow.Hide();
     }
 
     private void SystemAppearanceChanged(UISettings sender, object args) => QueueAppearanceUpdate();

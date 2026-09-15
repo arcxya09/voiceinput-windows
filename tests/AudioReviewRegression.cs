@@ -1,4 +1,6 @@
 using RealtimeTranscription.Core;
+using RealtimeTranscription.Desktop;
+using System.Runtime.InteropServices;
 
 internal static class AudioReviewRegression
 {
@@ -11,6 +13,93 @@ internal static class AudioReviewRegression
             try { action(); } catch (AudioCaptureIntegrityException) { return; }
             throw new Exception("Incomplete native audio was accepted as continuous");
         }
+        await test("静音设备包经PCM解码与16kHz转换后仍为零电平", () => Sync(() =>
+        {
+            foreach (var format in new[]
+            {
+                new PcmInputFormat(48000,2,8,2,PcmEncoding.Integer),
+                new PcmInputFormat(48000,2,16,4,PcmEncoding.Integer),
+                new PcmInputFormat(48000,2,24,6,PcmEncoding.Integer),
+                new PcmInputFormat(48000,2,32,8,PcmEncoding.Integer),
+                new PcmInputFormat(48000,2,32,8,PcmEncoding.Float),
+                new PcmInputFormat(48000,2,64,16,PcmEncoding.Float)
+            })
+            {
+                var decoder = new PcmDecoder(format);
+                int bytes = 480 * format.BlockAlign;
+                var storage = Enumerable.Repeat((byte)0x5a, bytes + 2).ToArray();
+                decoder.FillSilence(storage.AsSpan(1, bytes));
+                var decoded = decoder.Decode(storage.AsSpan(1, bytes), out float rms);
+                Check(decoded.Length == 480 && decoded.All(sample => sample == 0) && rms == 0,
+                    $"{format}: silent capture became a voice signal");
+                var pcm16 = new PcmResampler(format.SampleRate).Add(decoded, true);
+                Check(pcm16.Length == 160 && pcm16.All(sample => sample == 0),
+                    $"{format}: silent capture sent nonzero PCM to ASR");
+                Check(storage[0] == 0x5a && storage[^1] == 0x5a, "Wrote beyond the native packet's rented buffer slice");
+            }
+        }));
+        await test("可用的已选设备保持选择，默认模式只打开默认通信设备", () => Sync(() =>
+        {
+            var selected = new object(); var defaultDevice = new object();
+            int selectedCalls = 0, defaultCalls = 0;
+            object OpenSelected(string id) { Check(id == "saved-device", "Selected endpoint changed"); selectedCalls++; return selected; }
+            object OpenDefault() { defaultCalls++; return defaultDevice; }
+            Check(ReferenceEquals(AudioEndpointSelection.Open("saved-device", OpenSelected, OpenDefault, out bool fallback), selected)
+                && !fallback && selectedCalls == 1 && defaultCalls == 0, "An available selected microphone was substituted");
+            Check(ReferenceEquals(AudioEndpointSelection.Open("", OpenSelected, OpenDefault, out fallback), defaultDevice)
+                && !fallback && selectedCalls == 1 && defaultCalls == 1, "Default mode tried a stored endpoint");
+        }));
+        await test("仅已断开、禁用或明确失效的选定麦克风回退默认一次", () => Sync(() =>
+        {
+            foreach (Exception unavailable in new Exception[]
+            {
+                new AudioEndpointUnavailableException(),
+                new COMException("Endpoint no longer exists", unchecked((int)0x80070490)),
+                new COMException("Endpoint invalidated during activation", unchecked((int)0x88890004))
+            })
+            {
+                int selectedCalls = 0, defaultCalls = 0; var defaultDevice = new object();
+                object OpenSelected(string id) { selectedCalls++; throw unavailable; }
+                object OpenDefault() { defaultCalls++; return defaultDevice; }
+                var result = AudioEndpointSelection.Open("saved-device", OpenSelected, OpenDefault, out bool fallback);
+                Check(ReferenceEquals(result, defaultDevice) && fallback && selectedCalls == 1 && defaultCalls == 1,
+                    "An unavailable selected endpoint did not fall back exactly once");
+            }
+        }));
+        await test("麦克风权限、占用、格式和未知故障保留原异常且不切换设备", () => Sync(() =>
+        {
+            foreach (Exception failure in new Exception[]
+            {
+                new COMException("Access denied", unchecked((int)0x80070005)),
+                new COMException("Device busy", unchecked((int)0x8889000a)),
+                new COMException("Unsupported format", unchecked((int)0x88890008)),
+                new COMException("Audio service stopped", unchecked((int)0x88890010)),
+                new COMException("Invalid argument", unchecked((int)0x80070057)),
+                new ExternalException("Unrelated subsystem", unchecked((int)0x80070490)),
+                new IOException("Unrelated I/O failure")
+            })
+            {
+                int selectedCalls = 0, defaultCalls = 0; Exception? observed = null;
+                object OpenSelected(string id) { selectedCalls++; throw failure; }
+                object OpenDefault() { defaultCalls++; return new object(); }
+                try { AudioEndpointSelection.Open("saved-device", OpenSelected, OpenDefault, out _); }
+                catch (Exception error) { observed = error; }
+                Check(ReferenceEquals(observed, failure) && selectedCalls == 1 && defaultCalls == 0,
+                    "A failed microphone was silently replaced or its original error was lost");
+            }
+        }));
+        await test("回退默认麦克风失败不会重试，也不丢失默认设备的原异常", () => Sync(() =>
+        {
+            int defaultCalls = 0;
+            var unavailable = new COMException("Selected endpoint missing", unchecked((int)0x80070490));
+            var defaultError = new COMException("No default endpoint", unchecked((int)0x80070490));
+            object OpenSelected(string id) => throw unavailable;
+            object OpenDefault() { defaultCalls++; throw defaultError; }
+            Exception? observed = null;
+            try { AudioEndpointSelection.Open("saved-device", OpenSelected, OpenDefault, out _); }
+            catch (Exception error) { observed = error; }
+            Check(ReferenceEquals(observed, defaultError) && defaultCalls == 1, "Default microphone failure was retried or replaced");
+        }));
         await test("原生采样首包标记兼容，后续位置连续才能接受", () => Sync(() =>
         {
             var timeline = new AudioPacketTimeline(48000);
