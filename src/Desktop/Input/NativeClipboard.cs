@@ -11,6 +11,14 @@ internal static class NativeClipboard
     private const uint UnicodeText = 13;
 
     internal static uint? Prepare(string text, NativeTarget target, uint expectedSequence, out string diagnostic)
+        => WriteAndVerify(text, target, expectedSequence, out diagnostic);
+
+    // Copying the finished result is independent of the current input target,
+    // keyboard modifiers and accessibility support. Only a later paste needs them.
+    internal static uint? Copy(string text, uint expectedSequence, out string diagnostic)
+        => WriteAndVerify(text, null, expectedSequence, out diagnostic);
+
+    private static uint? WriteAndVerify(string text, NativeTarget? target, uint expectedSequence, out string diagnostic)
     {
         diagnostic = "ClipboardTextUnsupported";
         if (!ClipboardPaste.IsSupportedText(text) || text.Length == 0) return null;
@@ -56,7 +64,7 @@ internal static class NativeClipboard
         return null;
     }
 
-    private static bool Write(byte[] bytes, NativeTarget target, uint expectedSequence, out string diagnostic)
+    private static bool Write(byte[] bytes, NativeTarget? target, uint expectedSequence, out string diagnostic)
     {
         diagnostic = "ClipboardAllocationFailed";
         IntPtr memory = GlobalAlloc(2, (UIntPtr)bytes.Length);
@@ -106,8 +114,9 @@ internal static class NativeClipboard
         }
     }
 
-    private static bool Safe(NativeTarget target) => Win32.Observe(target) == FocusObservation.Stable
-        && !Win32.Composing(target.Focus) && !new[] { 0x10, 0x11, 0x12, 0x5b, 0x5c }.Any(Win32.Down);
+    private static bool Safe(NativeTarget? target) => target == null ||
+        (Win32.Observe(target) == FocusObservation.Stable && !Win32.Composing(target.Focus)
+        && !new[] { 0x10, 0x11, 0x12, 0x5b, 0x5c }.Any(Win32.Down));
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr CreateWindowEx(uint extendedStyle, string className, string title,

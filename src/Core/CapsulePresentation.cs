@@ -7,7 +7,8 @@ public static class CapsulePresentation
     {
         "Sent" => "已输入",
         "PasteSent" => "已发起粘贴",
-        "Dictated" or "Blocked" => "待复制",
+        "Copied" => "已复制",
+        "CopyFailed" or "Dictated" or "Blocked" => "待复制",
         "Cancelled" => "已取消",
         "StartFailed" => "未开始",
         "Partial" => "部分输入",

@@ -55,13 +55,13 @@ public sealed class TrayMenuWindow : Window, IDisposable
         dictationButton = new ToggleButton
         {
             Name = "TrayDictationMode", Tag = TrayMenuCommand.ToggleDictation,
-            Content = ContentRow("仅听写，完成后手动复制", "\uE8D4"),
+            Content = ContentRow("仅听写，完成后自动复制", "\uE8D4"),
             HorizontalAlignment = HorizontalAlignment.Stretch,
             HorizontalContentAlignment = HorizontalAlignment.Stretch,
             MinHeight = 36, Padding = new Thickness(12, 6, 12, 6), BorderThickness = new Thickness(0)
         };
-        AutomationProperties.SetName(dictationButton, "仅听写，完成后手动复制");
-        ToolTipService.SetToolTip(dictationButton, "仅听写，完成后手动复制");
+        AutomationProperties.SetName(dictationButton, "仅听写，完成后自动复制");
+        ToolTipService.SetToolTip(dictationButton, "仅听写，完成后自动复制");
         dictationButton.Click += Command_Click;
         buttons.Add(dictationButton); stack.Children.Add(dictationButton);
         AddButton(stack, "TrayCopy", "复制最近结果", "\uE8C8", TrayMenuCommand.Copy);

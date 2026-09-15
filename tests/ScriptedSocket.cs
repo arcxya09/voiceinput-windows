@@ -10,6 +10,8 @@ sealed class ScriptedSocket : WebSocket
     private WebSocketState state=WebSocketState.Open;
     private string taskId="";
     public string? RejectCode;
+    public string FinalText="完整结果。";
+    public bool IncompleteTail;
     public readonly ConcurrentQueue<byte[]> Pcm=[];
     public readonly ConcurrentQueue<string> Actions=[];
     public readonly TaskCompletionSource FirstPcm=new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -43,7 +45,8 @@ sealed class ScriptedSocket : WebSocket
             if(action=="run-task")Emit(RejectCode==null?"task-started":"task-failed",new{},RejectCode);
             if(action=="finish-task")
             {
-                Emit("result-generated",new{output=new{sentence=new{sentence_id=1,text="完整结果。",sentence_end=true,begin_time=0,end_time=850}},usage=new{duration=1}});
+                Emit("result-generated",new{output=new{sentence=new{sentence_id=1,text=FinalText,sentence_end=true,begin_time=0,end_time=850}},usage=new{duration=1}});
+                if(IncompleteTail)Emit("result-generated",new{output=new{sentence=new{sentence_id=2,text="尚未确认的尾句",sentence_end=false,begin_time=900,end_time=(long?)null}},usage=(object?)null});
                 Emit("task-finished",new{usage=(object?)null});
             }
         }

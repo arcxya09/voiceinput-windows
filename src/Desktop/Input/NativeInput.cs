@@ -10,6 +10,7 @@ public record DeliveryResult(string State,string Message,int Accepted=0)
 {
     // Stage codes only; never include clipboard or target document contents.
     public string Diagnostic { get; init; } = "";
+    public uint? ClipboardSequence { get; init; }
 }
 public record PhysicalSignal(string Kind,int Key=0,long At=0,NativeTarget? Target=null,long ActivityVersion=0);
 public record TargetCapture(InputTarget? Target,string Code,string Message);
@@ -172,28 +173,64 @@ public static class TextDelivery
         catch{return null;}
     }
     public static async Task ReleaseAsync(InputTarget target)
-    { _ = await Query(new("Release"),CancellationToken.None,target.WorkerId); }
+    {
+        if(target.WorkerId.Length>0)_ = await Query(new("Release"),CancellationToken.None,target.WorkerId);
+    }
 
     public static async Task<TargetCapture> CaptureAsync(NativeTarget native,Func<bool> valid,CancellationToken token)
     {
-        // Retry a transient provider/focus read only while the original input remains untouched.
-        for(int attempt=0;attempt<3;attempt++)
+        token.ThrowIfCancellationRequested();
+        var recovered=await InputSafety.RecoverInitialFocusAsync(() =>
         {
-            token.ThrowIfCancellationRequested();
-            var recovered=await InputSafety.RecoverInitialFocusAsync(() =>
-            {
-                if(Win32.ObserveWindow(native)==FocusObservation.Changed)return(FocusObservation.Changed,(NativeTarget?)null);
-                return Win32.Observe(native)==FocusObservation.Stable?(FocusObservation.Stable,(NativeTarget?)native):(FocusObservation.Unavailable,(NativeTarget?)null);
-            },valid,token,1000);
-            if(recovered==null)return new(null,"TargetChanged","暂时无法确认原输入位置。");
-            var result=await Query(new("Capture",native.Window.ToInt64(),native.Focus.ToInt64(),native.Thread,native.Process),token,timeoutMs:2500);
-            if(result is {} response&&response.Reply.Code!="Unavailable")
-                return new(response.Reply.Code=="Ready"?new(native,response.Worker,response.Reply.CaptureId):null,response.Reply.Code,response.Reply.Message);
-            if(attempt<2)await Task.Delay(80,token);
+            if(Win32.ObserveWindow(native)==FocusObservation.Changed)return(FocusObservation.Changed,(NativeTarget?)null);
+            return Win32.Observe(native)==FocusObservation.Stable?(FocusObservation.Stable,(NativeTarget?)native):(FocusObservation.Unavailable,(NativeTarget?)null);
+        },valid,token,1000);
+        if(recovered==null)return new(null,"TargetChanged","暂时无法确认原输入位置。");
+        // UIA adds password/editability and selection information when available.
+        // One bounded attempt keeps a slow or unsupported provider off the normal
+        // recognition path; stable native focus can still accept ordinary Ctrl+V.
+        var result=await Query(new("Capture",native.Window.ToInt64(),native.Focus.ToInt64(),native.Thread,native.Process),token,timeoutMs:400);
+        token.ThrowIfCancellationRequested();
+        // Preserve a positive refusal even if the application moves focus while
+        // the response is returning. In particular, never turn a known password
+        // field into the unknown-target dictation fallback.
+        if(result is {} denied&&denied.Reply.Code is "Password" or "Disabled" or "ReadOnly")
+            return new(null,denied.Reply.Code,denied.Reply.Message);
+        if(!valid()||Win32.Observe(native)!=FocusObservation.Stable)
+            return new(null,"TargetChanged","输入位置已变化，完成后将复制识别文字。");
+        if(result is {} response)
+        {
+            if(response.Reply.Code=="Ready")return new(new(native,response.Worker,response.Reply.CaptureId),"Ready",response.Reply.Message);
+            if(response.Reply.Code is not ("Unavailable" or "NotEditable"))
+                return new(null,response.Reply.Code,response.Reply.Message);
         }
-        return new(null,"ProviderUnavailable","输入框的辅助功能接口暂时无响应，未上传语音。请稍后重试。");
+        if(Win32.Composing(native.Focus))return new(null,"Composing","请先确认或取消输入法候选词，再按住说话。");
+        return new(new(native,"",""),"Ready","当前软件使用原生焦点粘贴。");
     }
-    public static async Task<DeliveryResult> SendAsync(InputTarget target,string text,Func<bool> valid,CancellationToken token,Action? dispatched=null)
+
+    public static async Task<DeliveryResult> CopyAsync(string text,Func<bool> valid,CancellationToken token)
+    {
+        DeliveryResult Failed(string diagnostic)=>new("CopyFailed","未能确认正文已复制，识别文字已保留在程序中，可手动复制。") {Diagnostic=diagnostic};
+        if(!ClipboardPaste.IsSupportedText(text))return Failed("ClipboardTextUnsupported");
+        try
+        {
+            if(token.IsCancellationRequested||!valid())return Failed("CopyCancelledBeforeWrite");
+            uint previous=Win32.GetClipboardSequenceNumber();
+            // Copy never uses an expected worker generation: the clipboard is
+            // independent of UIA targets, and survives a retired capture worker.
+            var result=await Query(new("Copy",Text:text,ClipboardSequence:previous),token,timeoutMs:3000);
+            if(result is not {} response||response.Reply.Code!="Ready"||response.Reply.ClipboardSequence is not uint sequence)
+                return Failed(result?.Reply.Code??"CopyWorkerUnavailable");
+            // Cancellation can race the native clipboard commit. Do not retry or
+            // claim that no write occurred when its completion cannot be confirmed.
+            if(token.IsCancellationRequested||!valid())return Failed("CopyInterruptedAfterWrite");
+            if(Win32.GetClipboardSequenceNumber()!=sequence)return Failed("ClipboardChangedAfterCopy");
+            return new("Copied","正文已复制，可在输入框中按 Ctrl+V 粘贴。") {ClipboardSequence=sequence,Diagnostic="ClipboardCopied"};
+        }
+        catch {return Failed("CopyNotConfirmed");}
+    }
+
+    public static async Task<DeliveryResult> SendAsync(InputTarget target,string text,Func<bool> valid,CancellationToken token,Action? dispatched=null,uint? preparedSequence=null)
     {
         if(text.Length==0)return new("Empty","没有需要输入的文字。");
         long end=Environment.TickCount64+200;
@@ -203,12 +240,32 @@ public static class TextDelivery
         if(!valid()||token.IsCancellationRequested)return new("Blocked","检测到其他操作，文字已保留，可手动复制。");
         if(Win32.Composing(target.Native.Focus))return new("Blocked","输入法仍有未确认的候选词，文字已保留，可手动复制。");
         string diagnostic="PasteNotPrepared";
+        bool nativeOnly=target.WorkerId.Length==0&&target.CaptureId.Length==0;
         bool Uninterrupted()=>valid()&&Win32.Current()==target.Native;
         var result=await ClipboardPaste.SendAsync(text,async(body,cancellation)=>
             {
+                if(preparedSequence is uint existing)
+                {
+                    // The finished result was already copied. Validate the old
+                    // target without rewriting the clipboard or adopting a newer copy.
+                    if(Win32.GetClipboardSequenceNumber()!=existing)
+                    {diagnostic="ClipboardChangedAfterCopy";return null;}
+                    if(!nativeOnly)
+                    {
+                        var validation=await Query(new("Validate",CaptureId:target.CaptureId,CheckSelection:true),
+                            cancellation,target.WorkerId,timeoutMs:1200);
+                        diagnostic=validation?.Reply.Code??"PasteWorkerUnavailable";
+                        if(validation?.Reply.Code!="Ready")return null;
+                    }
+                    diagnostic="CopiedTextReady";
+                    return existing;
+                }
                 uint previous=Win32.GetClipboardSequenceNumber();
-                var prepared=await Query(new("PreparePaste",CaptureId:target.CaptureId,Text:body,ClipboardSequence:previous),
-                    cancellation,target.WorkerId,timeoutMs:3000);
+                UiaRequest request=nativeOnly
+                    ?new("PrepareNativePaste",target.Native.Window.ToInt64(),target.Native.Focus.ToInt64(),target.Native.Thread,target.Native.Process,
+                        Text:body,ClipboardSequence:previous)
+                    :new("PreparePaste",CaptureId:target.CaptureId,Text:body,ClipboardSequence:previous);
+                var prepared=await Query(request,cancellation,nativeOnly?null:target.WorkerId,timeoutMs:3000);
                 diagnostic=prepared?.Reply.Code??"PasteWorkerUnavailable";
                 return prepared is {} response&&response.Reply.Code=="Ready"?response.Reply.ClipboardSequence:null;
             },

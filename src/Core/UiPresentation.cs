@@ -20,7 +20,7 @@ public static class UiPresentation
             return snapshot.CaptureReleased ? "尾句处理中" : snapshot.LocalAudioReady ? "正在听" : "准备麦克风";
         if (snapshot?.State == CaptureState.Recording) return snapshot.CaptureReleased ? "尾句处理中" : "正在听";
         if (snapshot?.State == CaptureState.Draining) return "尾句处理中";
-        if (busy) return snapshot?.Session?.WholePolishState == "Waiting" ? "全文润色中" : snapshot?.Session?.DeliveryState == "Sending" ? "正在粘贴" : "正在完成本轮";
+        if (busy) return snapshot?.Session?.WholePolishState == "Waiting" ? "全文润色中" : snapshot?.Session?.DeliveryState switch { "Copying" => "正在复制", "Sending" => "正在粘贴", _ => "正在完成本轮" };
         if (!enabled) return "快捷键已暂停";
         if (snapshot?.State == CaptureState.Faulted) return "本轮未完成";
         return dictationOnly ? "仅听写已就绪" : "按住说话已就绪";

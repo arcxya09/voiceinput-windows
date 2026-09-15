@@ -55,6 +55,20 @@ public static class UiaWorker
     {
         if (request.Operation == "Ping") return new("Ready");
         if (request.Operation == "Release") { captured = null; return new("Ready"); }
+        // Neither operation depends on UIA objects or on a previous Capture.
+        // Copy deliberately has no focus guard; PrepareNativePaste keeps the
+        // original direct-SendAsync contract of validating before changing data.
+        if (request.Operation is "Copy" or "PrepareNativePaste")
+        {
+            if (request.Text is null || !ClipboardPaste.IsSupportedText(request.Text)) return new("ClipboardTextUnsupported");
+            string diagnostic;
+            uint? sequence = request.Operation == "Copy"
+                ? NativeClipboard.Copy(request.Text, request.ClipboardSequence, out diagnostic)
+                : NativeClipboard.Prepare(request.Text,
+                    new(new IntPtr(request.Window), new IntPtr(request.Focus), request.Thread, request.Process),
+                    request.ClipboardSequence, out diagnostic);
+            return sequence is null ? new(diagnostic) : new("Ready", ClipboardSequence: sequence);
+        }
         if (request.Operation == "Capture")
         {
             captured = null;
@@ -79,20 +93,48 @@ public static class UiaWorker
         var element = AutomationElement.FocusedElement;
         if (element == null) return new("Unavailable");
         if (element.Current.IsPassword) return new("Password", "密码输入框不支持自动语音输入，未上传语音。");
-        if (!element.Current.IsEnabled) return new("Disabled", "当前输入框不可用，未上传语音。");
+        if (!element.Current.IsEnabled) return new("Disabled", "当前输入框不可用，完成后将复制识别文字。");
         if (!BelongsToTarget(element, native)) return new("Unavailable");
-        bool editable = false; TextPatternRange? selection = null;
-        if (element.TryGetCurrentPattern(ValuePattern.Pattern, out var value)) editable = !((ValuePattern)value).Current.IsReadOnly;
-        if (element.TryGetCurrentPattern(TextPattern.Pattern, out var text))
+        bool? editable = Editability(element, out var pattern);
+        if (editable == false) return new("ReadOnly", "当前输入区域只读，完成后将复制识别文字。");
+        if (editable == null) return new("NotEditable", "当前控件未提供编辑能力信息。");
+        TextPatternRange? selection = null;
+        if (pattern != null)
         {
-            var pattern = (TextPattern)text;
-            editable |= pattern.DocumentRange.GetAttributeValue(TextPattern.IsReadOnlyAttribute) is bool readOnly && !readOnly;
             var ranges = pattern.GetSelection(); if (ranges.Length == 1) selection = ranges[0].Clone();
         }
-        if (!editable) return new("NotEditable", "当前控件无法验证为可编辑区域。可在管理窗口开启“只听写，不自动输入”后重新录音。");
         if (Win32.Observe(native) != FocusObservation.Stable) return new("Unavailable");
         captured = new(Guid.NewGuid().ToString("N"), native, element.GetRuntimeId(), element, selection);
         return new("Ready", CaptureId: captured.Id);
+    }
+    // Unknown capability is not proof that ordinary Ctrl+V is unsupported.
+    // A writable ValuePattern also wins over a read-only TextPattern: some
+    // providers expose both patterns for different views of the same editor.
+    private static bool? Editability(AutomationElement element, out TextPattern? textPattern)
+    {
+        bool? valueWritable = null, textWritable = null;
+        textPattern = null;
+        // Some providers implement only one pattern correctly. A broken
+        // secondary pattern must not erase a known read-only result from the first.
+        try
+        {
+            if (element.TryGetCurrentPattern(ValuePattern.Pattern, out var value))
+                valueWritable = !((ValuePattern)value).Current.IsReadOnly;
+        }
+        catch { }
+        try
+        {
+            if (element.TryGetCurrentPattern(TextPattern.Pattern, out var text))
+            {
+                textPattern = (TextPattern)text;
+                if (textPattern.DocumentRange.GetAttributeValue(TextPattern.IsReadOnlyAttribute) is bool readOnly)
+                    textWritable = !readOnly;
+            }
+        }
+        catch { textPattern = null; }
+        if (valueWritable == true || textWritable == true) return true;
+        if (valueWritable == false || textWritable == false) return false;
+        return null;
     }
     private static bool BelongsToTarget(AutomationElement element, NativeTarget native)
     {
@@ -112,11 +154,10 @@ public static class UiaWorker
         var current = AutomationElement.FocusedElement;
         if (current == null) return new("Unavailable");
         if (current.Current.IsPassword || !current.Current.IsEnabled || !current.GetRuntimeId().SequenceEqual(target.RuntimeId)) return new("Changed");
-        if (current.TryGetCurrentPattern(ValuePattern.Pattern, out var value) && ((ValuePattern)value).Current.IsReadOnly) return new("ReadOnly");
-        if (current.TryGetCurrentPattern(TextPattern.Pattern, out var text))
+        bool? editable = Editability(current, out var pattern);
+        if (editable == false) return new("ReadOnly");
+        if (pattern != null)
         {
-            var pattern = (TextPattern)text;
-            if (pattern.DocumentRange.GetAttributeValue(TextPattern.IsReadOnlyAttribute) is bool readOnly && readOnly) return new("ReadOnly");
             if (checkSelection && target.Selection != null)
             {
                 var ranges = pattern.GetSelection();
