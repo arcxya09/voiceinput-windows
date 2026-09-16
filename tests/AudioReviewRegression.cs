@@ -107,21 +107,55 @@ internal static class AudioReviewRegression
             Check(timeline.Inspect(480, 480, 1_100_000, false, false).FramesToKeep == 480, "Continuous packet");
             Check(timeline.Covers(1_200_000) && !timeline.Covers(1_200_001), "Observed native endpoint");
         }));
-        await test("原生掉帧、重叠与非首包中断标记阻止完整输入", () => Sync(() =>
+        await test("原生位置跳跃或中断保留PCM并降级收尾，仅正向缺口提示核对", () => Sync(() =>
         {
             foreach (var next in new[] { (Position: 960L, Flag: false), (Position: 240L, Flag: false), (Position: 480L, Flag: true) })
             {
                 var timeline = new AudioPacketTimeline(48000);
                 timeline.Inspect(480, 0, 1_000_000, false, false);
-                Incomplete(() => timeline.Inspect(480, next.Position, 1_100_000, next.Flag, false));
+                var packet=timeline.Inspect(480,next.Position,1_100_000,next.Flag,false,1_150_000);
+                Check(packet.FramesToKeep==480&&!packet.ReachedStop&&timeline.RequiresDeviceStop,"Metadata must not discard PCM");
+                Check(timeline.ReportedGapFrames==(next.Position==960?480:0),"Positive gap accounting");
             }
         }));
-        await test("无效或倒退的原生时钟不能用于收尾边界", () => Sync(() =>
+        await test("无效、相同或倒退的原生时钟保留PCM，不能用于裁剪边界", () => Sync(() =>
         {
-            Incomplete(() => new AudioPacketTimeline(48000).Inspect(480, 0, 1_000_000, false, true));
-            var timeline = new AudioPacketTimeline(48000);
-            timeline.Inspect(480, 0, 1_000_000, false, false);
-            Incomplete(() => timeline.Inspect(480, 480, 900_000, false, false));
+            foreach(long timestamp in new[]{-1L,900_000L,1_000_000L,1_100_000L})
+            {
+                var timeline=new AudioPacketTimeline(48000);
+                timeline.Inspect(480,0,1_000_000,false,false);
+                var packet=timeline.Inspect(480,480,timestamp,false,timestamp==1_100_000,1_050_000);
+                Check(packet.FramesToKeep==480&&!packet.ReachedStop&&timeline.RequiresDeviceStop&&!timeline.Covers(1_050_000),"Bad clock used for clipping");
+            }
+        }));
+        await test("重复批次位置累积样本，恢复位置后不虚报缺口", () => Sync(() =>
+        {
+            var timeline=new AudioPacketTimeline(48000);
+            timeline.Inspect(480,0,1_000_000,false,false);
+            var repeated=timeline.Inspect(480,0,1_100_000,false,false);
+            timeline.Inspect(480,960,1_200_000,false,false);
+            Check(repeated.Anomaly.HasFlag(AudioPacketAnomaly.RepeatedPosition)&&timeline.ReportedGapFrames==0,"Repeated batch position treated as lost PCM");
+            Check(timeline.RequiresDeviceStop,"Fallback must remain stable for the turn");
+        }));
+        await test("异常首包时钟和位置溢出不裁掉有效音频，空包长度仍拒绝", () => Sync(() =>
+        {
+            foreach(var input in new[]{(Position:0L,Time:9_000_000L),(Position:0L,Time:1L),(Position:long.MaxValue,Time:8_000_000L),(Position:-1L,Time:8_000_000L)})
+            {
+                var timeline=new AudioPacketTimeline(48000);
+                var packet=timeline.Inspect(480,input.Position,input.Time,false,false,8_050_000,observedAt:20_000_000);
+                Check(packet.FramesToKeep==480&&!packet.ReachedStop&&timeline.RequiresDeviceStop,"Untrusted first timestamp clipped audio");
+            }
+            var future=new AudioPacketTimeline(48000);
+            Check(future.Inspect(480,0,30_000_000,false,false,20_000_000,20_000_000).FramesToKeep==480&&future.RequiresDeviceStop,"Future clock claims stop coverage");
+            Incomplete(()=>new AudioPacketTimeline(48000).Inspect(0,0,0,false,false));
+        }));
+        await test("尾包超时可切换停止设备后排空，不抛采样完整性异常", () => Sync(() =>
+        {
+            var timeline=new AudioPacketTimeline(48000);
+            timeline.Inspect(480,0,1_000_000,false,false);
+            timeline.UseDeviceStop();
+            var packet=timeline.Inspect(480,480,1_100_000,false,false,1_150_000);
+            Check(packet.FramesToKeep==480&&!packet.ReachedStop&&!timeline.Covers(1_150_000),"Fallback tail must be retained");
         }));
         await test("松键后读取覆盖边界的设备尾包，排除松键后样本", () => Sync(() =>
         {
@@ -145,7 +179,8 @@ internal static class AudioReviewRegression
         {
             var timeline = new AudioPacketTimeline(48000);
             timeline.Inspect(480, 0, 1_000_000, false, false);
-            Incomplete(() => timeline.Inspect(480, 960, 1_200_000, false, false, 1_150_000));
+            var packet=timeline.Inspect(480,960,1_200_000,false,false,1_150_000);
+            Check(packet.FramesToKeep==480&&timeline.ReportedGapFrames==480&&timeline.RequiresDeviceStop,"Tail gap should preserve text and request review");
         }));
         await test("44.1至384kHz降采样保持语音频段并抑制混叠", () => Sync(() =>
         {

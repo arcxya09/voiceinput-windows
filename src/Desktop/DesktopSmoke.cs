@@ -146,6 +146,10 @@ public static class DesktopSmoke
             checks.Add("The real Settings export button is enabled and invokable while preparation is blocked; production export completes without waiting for capture or management guards");
             checks.Add("Exported JSONL preserves ordered controller/audio events and an earlier microphone HRESULT, with no credentials, transcript, or lexicon fixture strings");
 
+            Stage("Verify production WASAPI loop with anomalous Win10-style packet metadata");
+            await AudioCompatibilitySmoke.RunAsync(controller.Log);
+            checks.Add("Production capture loop preserves PCM for repeated positions, discontinuities and invalid clocks; stop-and-drain releases leases on its owner thread and preserves real HRESULT failures");
+
             Stage("Verify the production management guard and dispatched final-preview event bridge");
             await CheckManagementOperationGuardAsync(window);
             await CheckPreviewEventBridgeAsync(window, controller);

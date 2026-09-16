@@ -52,7 +52,7 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
     }
     public PushToTalkService(AppController controller)
     {
-        this.controller=controller;controller.InputInterrupted+=Cancel;hook=new PhysicalHook(s=>
+        this.controller=controller;controller.InputInterrupted+=CaptureInterrupted;hook=new PhysicalHook(s=>
         {
             var current=Volatile.Read(ref active);
             if(s.Kind=="up"&&current!=null&&s.At-current.PressedAt>=controller.Settings.HoldMs)current.PhysicalReleased=true;
@@ -74,6 +74,17 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
     public void SetEnabled(bool value){Enabled=value;hook.Enable(value);PublishNotice(value?"按住说话已启用。":"按住说话已暂停。");}
     public void Cancel(string reason="本轮输入已取消，确认文字已保留。")
         =>QueueCancel(reason,"ExternalCancellation");
+    private void CaptureInterrupted(string reason)
+    {
+        var turn=Volatile.Read(ref active);
+        if(turn==null||turn.Invalid||turn.DeliveryDispatched)return;
+        // Publish the root cause before canceling startup/target discovery.
+        // Queuing the reason used to race their cancellation continuations.
+        turn.Reason=reason;turn.EndState="Failed";turn.Invalid=true;
+        LogTurn("CaptureInterrupted",turn,fields:[("Reason","CaptureOrRecognitionFailure")]);
+        activity.Advance();turn.CancelInput();turn.Released.TrySetResult();
+        controller.RequestStopCapture();Listening?.Invoke(false);
+    }
     private void QueueCancel(string reason,string category)
     {
         if(Volatile.Read(ref active) is {} turn)turn.CancellationCategory=category;
@@ -102,7 +113,7 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
                         if(t.ReleasedAt!=0)continue;
                         t.ReleasedAt=s.At;controller.RequestStopCapture();Listening?.Invoke(false);
                         LogTurn("Released",t,fields:[("HeldMs",Math.Max(0,s.At-t.PressedAt))]);
-                        if(s.At-t.PressedAt<controller.Settings.HoldMs){LogTurn("Cancelled",t,fields:[("Reason","ShortPress")]);t.Invalid=true;t.Reason="短按已取消。";t.CancelInput();}
+                        if(!t.Invalid&&s.At-t.PressedAt<controller.Settings.HoldMs){LogTurn("Cancelled",t,fields:[("Reason","ShortPress")]);t.Invalid=true;t.Reason="短按已取消。";t.CancelInput();}
                         t.Stop=controller.StopAsync(false);t.Released.TrySetResult();
                     }
                     else if(s.Kind is "activity" or "escape" or "cancel"||s.Kind.StartsWith("cancel:"))
@@ -161,6 +172,8 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
             t.Stop??=controller.StopAsync(false);await t.Stop;
             await controller.FinishCurrentAsync(t.Id,!t.Invalid,t.Cancel.Token,forDelivery:true,expedite:t.Expedite.Token);
             var snapshot=await controller.SnapshotAsync();if(snapshot.Session?.Id!=t.Id){await CompletePreviewAsync(t,t.Reason.Length>0?t.Reason:snapshot.Status);return;}string text=TranscriptText.Render(snapshot);
+            string? captureWarning=await controller.CaptureWarningAsync(t.Id);
+            if(captureWarning!=null)UseManualDelivery(t,captureWarning,"AudioPositionGap");
             DeliveryResult result;
             if(t.Invalid||t.Cancel.IsCancellationRequested||!activity.Matches(t.ActivityVersion))result=new(t.EndState,t.Reason.Length>0?t.Reason:"本轮输入已取消，结果已保留。");
             else if(snapshot.State==CaptureState.Faulted||snapshot.Session?.Gaps.Count>0||snapshot.Segments.Any(s=>s.AsrState==AsrState.Unresolved))result=new("Blocked","识别未完整结束，确认文字可手动复制。");
@@ -172,6 +185,7 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
                 bool Valid()=>!t.Invalid&&activity.Matches(t.ActivityVersion)&&ReferenceEquals(active,t);
                 await controller.SetDeliveryAsync("Copying","正在复制…",turnId:t.Id);
                 result=await TextDelivery.CopyAsync(text,Valid,t.Cancel.Token);
+                if(result.State=="Copied"&&captureWarning!=null)result=result with{Message=captureWarning};
                 if(result.State=="Copied"&&Valid()&&!t.Cancel.IsCancellationRequested&&!t.ManualDelivery&&!t.DictationOnly&&target!=null)
                 {
                     await controller.SetDeliveryAsync("Sending","正在粘贴…",turnId:t.Id);
@@ -258,6 +272,6 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
     {
         if(disposed)return;disposed=true;hook.Enable(false);QueueCancel("程序退出，自动输入已取消。","Shutdown");
         try{if(running!=null)await running.WaitAsync(TimeSpan.FromSeconds(10));}catch{}
-        controller.InputInterrupted-=Cancel;hook.Dispose();lifetime.Cancel();signals.Writer.TryComplete();try{await Task.WhenAll(loop,watchdog);}catch{}await TextDelivery.ShutdownAsync();lifetime.Dispose();
+        controller.InputInterrupted-=CaptureInterrupted;hook.Dispose();lifetime.Cancel();signals.Writer.TryComplete();try{await Task.WhenAll(loop,watchdog);}catch{}await TextDelivery.ShutdownAsync();lifetime.Dispose();
     }
 }

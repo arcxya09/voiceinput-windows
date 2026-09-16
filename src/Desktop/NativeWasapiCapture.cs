@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using RealtimeTranscription.Core;
@@ -10,7 +11,7 @@ namespace RealtimeTranscription.Desktop;
 /// remain observable. NAudio supplies the COM interop; packet processing is local.</summary>
 internal sealed class NativeWasapiCapture : IAsyncDisposable
 {
-    private readonly AudioClient client;
+    private readonly INativeCaptureClient client;
     private readonly Action<IntPtr, int, bool> data;
     private readonly Action<Exception?> completed;
     private readonly RuntimeLog? log;
@@ -22,23 +23,33 @@ internal sealed class NativeWasapiCapture : IAsyncDisposable
     private int startCalled, aborted, cleaned;
     private long stopAt;
     public WaveFormat Format { get; }
+    private long reportedGapFrames;
+    public long ReportedGapFrames => Interlocked.Read(ref reportedGapFrames);
     public NativeWasapiCapture(MMDevice device, Action<IntPtr, int, bool> data, Action<Exception?> completed,
-        RuntimeLog? log=null,string? turnId=null)
+        RuntimeLog? log=null,string? turnId=null) : this(OpenClient(device,log,turnId),data,completed,log,turnId) { }
+    private static INativeCaptureClient OpenClient(MMDevice device,RuntimeLog? log,string? turnId)
     {
-        this.log=log;this.turnId=turnId;
-        this.data = data; this.completed = completed;
-        string stage="ActivateAudioClient";
+        AudioLog.Write(log,"ActivateAudioClientStarted",turnId);
         try
         {
-            AudioLog.Write(log,stage+"Started",turnId);
-            client = device.AudioClient;
-            AudioLog.Write(log,stage+"Succeeded",turnId);
-            stage="GetMixFormat";AudioLog.Write(log,stage+"Started",turnId);
-            Format = client.MixFormat;
-            AudioLog.Write(log,stage+"Succeeded",turnId,null,("sampleRate",Format.SampleRate),("channels",Format.Channels),
+            var result=new NativeCaptureClient(device.AudioClient);
+            AudioLog.Write(log,"ActivateAudioClientSucceeded",turnId);
+            return result;
+        }
+        catch(Exception e){AudioLog.Write(log,"NativeOpenFailed",turnId,e,("stage","ActivateAudioClient"));throw;}
+    }
+    internal NativeWasapiCapture(INativeCaptureClient client,Action<IntPtr,int,bool> data,Action<Exception?> completed,
+        RuntimeLog? log=null,string? turnId=null)
+    {
+        this.client=client;this.data=data;this.completed=completed;this.log=log;this.turnId=turnId;
+        try
+        {
+            AudioLog.Write(log,"GetMixFormatStarted",turnId);
+            Format=client.MixFormat;
+            AudioLog.Write(log,"GetMixFormatSucceeded",turnId,null,("sampleRate",Format.SampleRate),("channels",Format.Channels),
                 ("bits",Format.BitsPerSample),("blockAlign",Format.BlockAlign),("encoding",Format.Encoding));
         }
-        catch(Exception e) { AudioLog.Write(log,"NativeOpenFailed",turnId,e,("stage",stage));Cleanup();throw; }
+        catch(Exception e){AudioLog.Write(log,"NativeOpenFailed",turnId,e,("stage","GetMixFormat"));Cleanup();throw;}
     }
     private static long QpcNow() => (long)(Stopwatch.GetTimestamp() * (double)AudioPacketTimeline.TicksPerSecond / Stopwatch.Frequency);
     public void Start()
@@ -55,83 +66,128 @@ internal sealed class NativeWasapiCapture : IAsyncDisposable
     }
     public void Abort() { Interlocked.Exchange(ref aborted, 1); Signal(); }
     private void Signal() { try { wake.Set(); } catch (ObjectDisposedException) { } }
+    [DllImport("avrt.dll",CharSet=CharSet.Unicode,SetLastError=true)]
+    private static extern IntPtr AvSetMmThreadCharacteristics(string taskName,out uint taskIndex);
+    [DllImport("avrt.dll",SetLastError=true)]
+    [return:MarshalAs(UnmanagedType.Bool)]
+    private static extern bool AvRevertMmThreadCharacteristics(IntPtr handle);
     private void Run()
     {
-        Exception? error = null;
-        bool running = false;
+        Exception? error=null;
+        bool running=false,deviceStopped=false;
+        IntPtr mmcss=IntPtr.Zero;
         string stage="StartingThread";
-        long packets=0,framesRead=0,silentPackets=0,started=Stopwatch.GetTimestamp();
+        long packets=0,framesRead=0,silentPackets=0,anomalies=0,drainedFrames=0,started=Stopwatch.GetTimestamp();
         void Stage(string value){stage=value;AudioLog.Write(log,value+"Started",turnId);}
         try
         {
             AudioLog.Write(log,stage,turnId);
-            if (Volatile.Read(ref aborted) != 0 || Interlocked.Read(ref stopAt) != 0) { AudioLog.Write(log,"StartSkippedAfterRelease",turnId);ready.TrySetResult();return; }
-            // Shared, event-driven streams let the audio engine choose the buffer
-            // duration. Both time parameters must be zero for this WASAPI mode.
-            Stage("InitializeSharedEvent");
-            client.Initialize(AudioClientShareMode.Shared,
-                AudioClientStreamFlags.EventCallback | AudioClientStreamFlags.AutoConvertPcm | AudioClientStreamFlags.SrcDefaultQuality,
-                0, 0, Format, Guid.Empty);
+            if(Volatile.Read(ref aborted)!=0||Interlocked.Read(ref stopAt)!=0)
+            {AudioLog.Write(log,"StartSkippedAfterRelease",turnId);ready.TrySetResult();return;}
+            // MMCSS is best effort: unavailable scheduling support must not
+            // prevent an otherwise usable microphone from starting.
+            try
+            {
+                mmcss=AvSetMmThreadCharacteristics("Audio",out _);
+                AudioLog.Write(log,"CaptureScheduling",turnId,null,("mmcss",mmcss!=IntPtr.Zero),
+                    ("win32Error",mmcss==IntPtr.Zero?Marshal.GetLastWin32Error():0));
+            }
+            catch(Exception e){AudioLog.Write(log,"CaptureSchedulingUnavailable",turnId,e);}
+            // Shared event mode requires both Initialize time arguments to be zero.
+            Stage("InitializeSharedEvent");client.Initialize(Format);
             AudioLog.Write(log,"InitializeSharedEventSucceeded",turnId,null,("bufferDuration",0),("periodicity",0),
                 ("autoConvertPcm",true),("srcDefaultQuality",true));
-            Stage("SetEventHandle");
-            client.SetEventHandle(packetReady.SafeWaitHandle.DangerousGetHandle());
-            Stage("GetCaptureService");
-            var capture = client.AudioCaptureClient;
-            var timeline = new AudioPacketTimeline(Format.SampleRate);
+            Stage("SetEventHandle");client.SetEventHandle(packetReady.SafeWaitHandle.DangerousGetHandle());
+            Stage("GetCaptureService");client.GetCaptureService();
+            var timeline=new AudioPacketTimeline(Format.SampleRate);
             Stage("GetDevicePeriod");
-            int tailBudgetMs = (int)Math.Clamp(client.DefaultDevicePeriod / 10_000 * 3, 250, 1000);
-            WaitHandle[] waits = [packetReady, wake];
-            Stage("AudioClientStart");
-            client.Start(); running = true; ready.TrySetResult();
+            long period=client.DefaultDevicePeriod;
+            int bufferFrames=client.BufferSize;
+            if(bufferFrames<=0)throw new AudioCaptureIntegrityException("麦克风返回了无效的缓冲区长度。");
+            int tailBudgetMs=(int)Math.Clamp(period/10_000*3,250,1000);
+            long maxTimestampAge=Math.Max(AudioPacketTimeline.TicksPerSecond,
+                (long)(bufferFrames*(double)AudioPacketTimeline.TicksPerSecond/Format.SampleRate)+AudioPacketTimeline.TicksPerSecond/10);
+            AudioLog.Write(log,"CaptureBuffer",turnId,null,("bufferFrames",bufferFrames),
+                ("bufferMs",bufferFrames*1000.0/Format.SampleRate),("devicePeriod100ns",period));
+            WaitHandle[] waits=[packetReady,wake];
+            Stage("AudioClientStart");client.Start();running=true;ready.TrySetResult();
             AudioLog.Write(log,"AudioClientStarted",turnId,null,("elapsedMs",Stopwatch.GetElapsedTime(started).TotalMilliseconds),("tailBudgetMs",tailBudgetMs));
             stage="ReadPackets";
-            while (Volatile.Read(ref aborted) == 0)
+            while(Volatile.Read(ref aborted)==0)
             {
-                long boundary = Interlocked.Read(ref stopAt);
-                if (boundary != 0 && timeline.Covers(boundary)) break;
-                bool reachedStop = false;
-                while (Volatile.Read(ref aborted) == 0 && capture.GetNextPacketSize() > 0)
+                long boundary=Interlocked.Read(ref stopAt);
+                if(boundary!=0&&timeline.RequiresDeviceStop&&!deviceStopped)
                 {
-                    IntPtr pointer = capture.GetBuffer(out int frames, out var flags, out long position, out long timestamp);
+                    // Stop freezes production; GetBuffer/ReleaseBuffer can drain
+                    // pending data. Reset would discard that data and is never used.
+                    stage="StopForDrain";client.Stop();deviceStopped=true;stage="ReadPackets";
+                    AudioLog.Write(log,"CompatibilityDrainStarted",turnId);
+                }
+                if(boundary!=0&&timeline.Covers(boundary))break;
+                bool reachedStop=false;
+                while(Volatile.Read(ref aborted)==0&&client.GetNextPacketSize()>0)
+                {
+                    IntPtr pointer=client.GetBuffer(out int frames,out var flags,out long position,out long timestamp);
+                    AudioPacketDecision decision=default;
                     try
                     {
-                        if (frames == 0) break;
+                        if(frames==0)break;
+                        if(frames<0||frames>bufferFrames)throw new AudioCaptureIntegrityException("麦克风返回了无效的音频包长度。");
                         packets++;framesRead+=frames;
-                        if((flags & AudioClientBufferFlags.Silent)!=0)silentPackets++;
-                        if(packets==1)AudioLog.Write(log,"FirstNativePacket",turnId,null,("frames",frames),("flags",flags),
-                            ("elapsedMs",Stopwatch.GetElapsedTime(started).TotalMilliseconds));
-                        boundary = Interlocked.Read(ref stopAt);
-                        var decision = timeline.Inspect(frames, position, timestamp,
-                            (flags & AudioClientBufferFlags.DataDiscontinuity) != 0,
-                            (flags & AudioClientBufferFlags.TimestampError) != 0,
-                            boundary == 0 ? null : boundary);
-                        if (decision.FramesToKeep > 0)
-                            data(pointer, decision.FramesToKeep, (flags & AudioClientBufferFlags.Silent) != 0);
-                        reachedStop = decision.ReachedStop;
+                        if((flags&AudioClientBufferFlags.Silent)!=0)silentPackets++;
+                        if(deviceStopped)
+                        {
+                            drainedFrames+=frames;
+                            if(drainedFrames>bufferFrames)throw new AudioCaptureIntegrityException("麦克风停止后仍持续返回音频，已结束本轮录音。");
+                        }
+                        boundary=Interlocked.Read(ref stopAt);
+                        decision=timeline.Inspect(frames,position,timestamp,
+                            (flags&AudioClientBufferFlags.DataDiscontinuity)!=0,
+                            (flags&AudioClientBufferFlags.TimestampError)!=0,
+                            boundary==0?null:boundary,QpcNow(),maxTimestampAge);
+                        Interlocked.Exchange(ref reportedGapFrames,timeline.ReportedGapFrames);
+                        if(decision.FramesToKeep>0)data(pointer,decision.FramesToKeep,(flags&AudioClientBufferFlags.Silent)!=0);
+                        reachedStop=decision.ReachedStop;
                     }
-                    finally { capture.ReleaseBuffer(frames); }
-                    if (reachedStop) break;
+                    finally{client.ReleaseBuffer(frames);}
+                    // No logging while holding a native packet lease.
+                    if(packets==1)AudioLog.Write(log,"FirstNativePacket",turnId,null,("frames",frames),("flags",flags),
+                        ("position",position),("timestamp100ns",timestamp),("elapsedMs",Stopwatch.GetElapsedTime(started).TotalMilliseconds));
+                    if(decision.Anomaly!=AudioPacketAnomaly.None)
+                    {
+                        anomalies++;
+                        if(anomalies<=16)AudioLog.Write(log,"PacketMetadataAnomaly",turnId,null,("packet",packets),("frames",frames),
+                            ("flags",flags),("anomaly",decision.Anomaly),("position",position),("expectedPosition",decision.ExpectedPosition),
+                            ("positionDelta",decision.PositionDelta),("timestamp100ns",timestamp),("timestampDelta100ns",decision.TimestampDelta),
+                            ("reportedGapFrames",timeline.ReportedGapFrames),("fallback","StopThenDrain"));
+                    }
+                    if(reachedStop||(!deviceStopped&&Interlocked.Read(ref stopAt)!=0&&timeline.RequiresDeviceStop))break;
                 }
-                if (reachedStop) break;
-                boundary = Interlocked.Read(ref stopAt);
-                if (boundary != 0 && QpcNow() - boundary > tailBudgetMs * 10_000L)
-                    throw new AudioCaptureIntegrityException("麦克风尾部采样未能完整收齐，确认文字已保留，本轮不自动输入。");
-                WaitHandle.WaitAny(waits, 20);
+                if(reachedStop||deviceStopped)break;
+                boundary=Interlocked.Read(ref stopAt);
+                if(boundary!=0&&timeline.RequiresDeviceStop)continue;
+                if(boundary!=0&&QpcNow()-boundary>tailBudgetMs*10_000L)
+                {
+                    timeline.UseDeviceStop();
+                    AudioLog.Write(log,"TailClockFallback",turnId,null,("tailBudgetMs",tailBudgetMs));
+                    continue;
+                }
+                WaitHandle.WaitAny(waits,20);
             }
         }
-        catch (Exception e) { error=e;AudioLog.Write(log,"NativeCaptureFailed",turnId,e,("stage",stage),("running",running));ready.TrySetException(e); }
+        catch(Exception e){error=e;AudioLog.Write(log,"NativeCaptureFailed",turnId,e,("stage",stage),("running",running));ready.TrySetException(e);}
         finally
         {
-            if (running) try { client.Stop(); } catch (Exception e) { error??=e;AudioLog.Write(log,"AudioClientStopFailed",turnId,e); }
+            if(running&&!deviceStopped)try{client.Stop();}catch(Exception e){error??=e;AudioLog.Write(log,"AudioClientStopFailed",turnId,e);}
+            if(mmcss!=IntPtr.Zero&&!AvRevertMmThreadCharacteristics(mmcss))
+                AudioLog.Write(log,"CaptureSchedulingRevertFailed",turnId,null,("win32Error",Marshal.GetLastWin32Error()));
             AudioLog.Write(log,"NativeCaptureStopped",turnId,null,("running",running),("packets",packets),("frames",framesRead),
-                ("silentPackets",silentPackets),("aborted",Volatile.Read(ref aborted)!=0));
+                ("silentPackets",silentPackets),("metadataAnomalies",anomalies),("reportedGapFrames",ReportedGapFrames),
+                ("compatibilityDrain",deviceStopped),("drainedFrames",drainedFrames),("aborted",Volatile.Read(ref aborted)!=0));
             Cleanup();
-            // Before Start succeeds, ready/Start() owns the failure. A second
-            // fault callback could otherwise replace its actionable diagnostic
-            // with a generic interruption message. Completion still drains the queue.
-            try { completed(running && Volatile.Read(ref aborted) == 0 ? error : null); }
-            finally { stopped.TrySetResult(); }
+            // Startup failures belong to Start(); avoid a second fault callback.
+            try{completed(running&&Volatile.Read(ref aborted)==0?error:null);}
+            finally{stopped.TrySetResult();}
         }
     }
     private void Cleanup()

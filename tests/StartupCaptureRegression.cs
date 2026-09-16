@@ -288,6 +288,19 @@ static class StartupCaptureRegression
             await f.App.StopAsync(false).WaitAsync(Budget);
         });
 
+        await test("2.1.11 首帧后故障取消启动时保留读取麦克风阶段和原始原因", async () =>
+        {
+            var turn=new Turn();
+            await using var f=await Fixture.Create(turn);
+            var target=new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var start=f.Start(target:target.Task);
+            var capture=await turn.StartedCapture();
+            capture.EmitFault("麦克风设备已失效，请重新连接。");
+            Check(!await start.WaitAsync(Budget),"设备故障后仍启动成功。");
+            Check(f.App.Diagnostic.Contains("失败阶段：ReadingMicrophone")&&f.App.Diagnostic.Contains("设备已失效"),"取消异常掩盖读取阶段根因。");
+            Check((await f.App.SnapshotAsync()).Status.Contains("设备已失效")&&capture.Disposed,"根因提示或设备清理遗漏。");
+        });
+
         await test("2.1.9 配置阶段失败不打开设备，修正配置后可重试", async () =>
         {
             var turn = new Turn();
@@ -321,7 +334,7 @@ static class StartupCaptureRegression
     public static async Task RunInputCompatibility(Func<string,Func<Task>,Task> test)
     {
         foreach(string scenario in new[]{"consumed-ctrl","no-focus","missing-focus","unavailable-provider","not-editable","read-only","disabled","focus-blip","focus-lost","window-changed","escape","password",
-            "dictation-only","clipboard-busy","paste-blocked","clipboard-changed","empty","incomplete","no-focus-polish","escape-polish","escape-copy","escape-paste","short-press"})
+            "dictation-only","clipboard-busy","paste-blocked","clipboard-changed","empty","incomplete","no-focus-polish","escape-polish","escape-copy","escape-paste","short-press","audio-gap","audio-fault","startup-audio-fault"})
         await test("2.1.8 生产按住说话："+scenario,async()=>
         {
             TextDelivery.Reset();
@@ -342,6 +355,8 @@ static class StartupCaptureRegression
             var polishEntered=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var polishRelease=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var turn=new Turn();
+            if(scenario=="startup-audio-fault")turn.EmitStartFault=true;
+            if(scenario=="audio-gap")turn.QualityWarning="麦克风报告音频位置缺口，文字已复制，请核对后手动粘贴。";
             if(scenario=="empty")turn.Socket.FinalText="";
             if(scenario=="incomplete")turn.Socket.IncompleteTail=true;
             if(polished)turn.Socket.FinalText="嗯，这个方案我们先试一下。";
@@ -368,6 +383,13 @@ static class StartupCaptureRegression
                 Check(turn.Socket.Actions.IsEmpty&&turn.Socket.Pcm.IsEmpty&&TextDelivery.CopyAttempts==0&&TextDelivery.Sends==0,"短按仍上传、复制或投递。");
                 return;
             }
+            if(scenario=="startup-audio-fault")
+            {
+                var failed=await completed.Task.WaitAsync(Budget);
+                Check(failed.DeliveryState=="Failed"&&failed.Status.Contains("麦克风采集已中断"),"启动取消覆盖了设备故障原因。");
+                Check(TextDelivery.CopyAttempts==0&&TextDelivery.Sends==0&&turn.Socket.Pcm.IsEmpty,"启动故障仍复制或上传。");
+                return;
+            }
             if(scenario=="password")
             {
                 var denied=await completed.Task.WaitAsync(Budget);
@@ -377,6 +399,18 @@ static class StartupCaptureRegression
             }
             var capture=await turn.StartedCapture();await capture.EmitFrame(.04f);
             await turn.Socket.FirstPcm.Task.WaitAsync(Budget);
+            if(scenario=="audio-fault")
+            {
+                var faultObserved=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                fixture.App.InputInterrupted+=_=>faultObserved.TrySetResult();
+                capture.EmitFault("麦克风设备已失效，请重新连接。");
+                await faultObserved.Task.WaitAsync(Budget);
+                PhysicalHook.Latest.Emit("up",downAt+10); // Late short release must retain the device failure.
+                var failed=await completed.Task.WaitAsync(Budget);
+                Check(failed.DeliveryState=="Failed"&&failed.Status.Contains("设备已失效"),"真实采集故障被普通取消掩盖。");
+                Check(CapsulePresentation.CompletionLabel(failed.DeliveryState)=="识别失败"&&TextDelivery.CopyAttempts==0&&TextDelivery.Sends==0,"故障状态或投递门禁错误。");
+                return;
+            }
             if(scenario is "focus-blip" or "focus-lost")Win32.Focus=FocusObservation.Changed;
             if(scenario=="window-changed")Win32.Window=FocusObservation.Changed;
             if(scenario=="focus-blip")
@@ -386,8 +420,8 @@ static class StartupCaptureRegression
             await Task.Delay(scenario=="focus-lost"?1300:700);
             Check(!completed.Task.IsCompleted&&ptt.Busy&&!capture.StopRequested,"未收到真实松键或取消就中断录音。");
             Check(TextDelivery.CopyAttempts==0&&TextDelivery.Sends==0,"仍在录音时提前复制或上屏。");
-            bool manual=scenario is "no-focus" or "missing-focus" or "read-only" or "disabled" or "focus-lost" or "window-changed" or "dictation-only" or "no-focus-polish" or "escape-polish";
-            if(manual&&!dictationOnly)
+            bool manual=scenario is "audio-gap" or "no-focus" or "missing-focus" or "read-only" or "disabled" or "focus-lost" or "window-changed" or "dictation-only" or "no-focus-polish" or "escape-polish";
+            if(manual&&!dictationOnly&&scenario!="audio-gap")
             {
                 var snapshot=await fixture.App.SnapshotAsync();
                 Check(snapshot.Session!.DeliveryReason.Contains("自动复制"),"兼容降级未给出完成后复制提示。");
@@ -421,6 +455,7 @@ static class StartupCaptureRegression
             string expectedText=scenario=="empty"?"":scenario=="no-focus-polish"?"这个方案我们先试一下。":turn.Socket.FinalText;
             Check(result.Text==expectedText,"收尾正文丢失或未采用完整润色："+result.Text);
             string expectedState=cancelledResult?"Cancelled":scenario=="empty"?"Empty":scenario is "incomplete" or "clipboard-changed"?"Blocked":scenario=="clipboard-busy"?"CopyFailed":manual||scenario=="paste-blocked"?"Copied":"PasteSent";
+            if(scenario=="audio-gap")Check(result.Status.Contains("音频位置缺口"),"缺口核对提示丢失。");
             Check(result.DeliveryState==expectedState,"终态错误："+result.DeliveryState+" / "+result.Status);
             bool shouldCopy=cancelDuringDelivery||!cancelledResult&&scenario is not ("empty" or "incomplete");
             Check(TextDelivery.CopyAttempts==(shouldCopy?1:0),"重复复制，或取消/空白/不完整结果仍改写剪贴板。");
@@ -450,6 +485,7 @@ static class StartupCaptureRegression
     {
         internal Exception? ConstructionFailure, StartFailure, DisposeFailure;
         internal bool EmitStartFault;
+        internal string? QualityWarning;
         internal readonly ScriptedSocket Socket = new();
         internal readonly TaskCompletionSource ConstructionEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource ConstructionRelease = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -480,7 +516,9 @@ static class StartupCaptureRegression
         public string EndpointId => "scripted-microphone";
         public string FormatDescription => "scripted PCM16 16000 Hz mono";
         public string Diagnostic => FormatDescription;
-        public string? FailureMessage => null;
+        public string? FailureMessage {get;private set;}
+        public string? QualityWarning => turn.QualityWarning;
+        internal void EmitFault(string message){FailureMessage=message;fault(message);}
         public long SamplesSent => Interlocked.Read(ref samplesSent);
         public void Start()
         {

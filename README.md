@@ -4,7 +4,7 @@
 
 VoiceInput 是一款 Windows 托盘语音输入工具，使用阿里云百炼进行语音识别，使用 DeepSeek 对整轮文字进行轻量润色，支持专业词库、本地历史记录和纠错学习。程序使用原生 WinUI 3 界面，提供自包含安装版和便携版，与现有拼音输入法配合使用，不注册到 Windows 的语言切换列表。
 
-运行日志与故障导出见 [2.1.10 版本说明](docs/releases/2.1.10.md)及[日志使用说明](docs/Runtime-logs.md)；录音排障见 [Win10 录音启动与浮窗验证](docs/Win10-startup.md)，输入接口研究见 [Win10 输入与剪贴板策略](docs/Win10-input.md)。
+Win10 麦克风包兼容修复见 [2.1.11 版本说明](docs/releases/2.1.11.md)。运行日志与故障导出见 [2.1.10 版本说明](docs/releases/2.1.10.md)及[日志使用说明](docs/Runtime-logs.md)；录音排障见 [Win10 录音启动与浮窗验证](docs/Win10-startup.md)，输入接口研究见 [Win10 输入与剪贴板策略](docs/Win10-input.md)。
 
 [下载与版本说明](https://github.com/arcxya09/voiceinput-windows/releases) · [构建状态](https://github.com/arcxya09/voiceinput-windows/actions/workflows/release.yml) · [问题反馈](https://github.com/arcxya09/voiceinput-windows/issues)
 
