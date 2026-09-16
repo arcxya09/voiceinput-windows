@@ -11,7 +11,7 @@ namespace RealtimeTranscription.Desktop;
 public record AudioDevice(string Id, string Name);
 public sealed class AudioCapture : IAudioCapture
 {
-    private record Block(byte[] Buffer, int Count);
+    private readonly record struct Block(byte[] Buffer, int Count);
     private readonly NativeWasapiCapture capture;
     private readonly MMDevice device;
     private readonly Channel<Block> queue = Channel.CreateBounded<Block>(new BoundedChannelOptions(128) { SingleReader = true, FullMode = BoundedChannelFullMode.Wait });
@@ -33,6 +33,8 @@ public sealed class AudioCapture : IAudioCapture
     public string? FailureMessage { get; private set; }
     public string? QualityWarning => capture.ReportedGapFrames > 0
         ? "麦克风报告音频位置缺口，文字已复制，请核对后手动粘贴。" : null;
+    public long MetadataAnomalies => capture.MetadataAnomalies;
+    public long ReportedGapFrames => capture.ReportedGapFrames;
     public long SamplesSent { get; private set; }
     public string EndpointId { get; }
     public bool UsedDefaultFallback { get; }

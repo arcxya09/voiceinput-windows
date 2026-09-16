@@ -52,7 +52,7 @@ internal static class ReleaseDeliveryRegression
             var seed=await f.Seed(raw);await f.App.LoadSessionAsync(seed.Session);
             var watch=System.Diagnostics.Stopwatch.StartNew();
             await f.App.FinishCurrentAsync(seed.Session.Id,forDelivery:true).WaitAsync(TimeSpan.FromSeconds(8));
-            Check(watch.Elapsed<TimeSpan.FromSeconds(8)&&f.Calls==1&&TranscriptText.Render(await f.App.SnapshotAsync())==raw);
+            Check(watch.Elapsed>=TimeSpan.FromMilliseconds(650)&&watch.Elapsed<TimeSpan.FromSeconds(2)&&f.Calls==1&&TranscriptText.Render(await f.App.SnapshotAsync())==raw);
             Check((await f.App.SnapshotAsync()).Session!.WholePolishState=="Fallback");
         });
         await test("2.1.6 关闭快速模式后仍可用回车取消润色而不取消投递",async()=>
@@ -67,6 +67,46 @@ internal static class ReleaseDeliveryRegression
             await started.Task.WaitAsync(TimeSpan.FromSeconds(5));expedite.Cancel();
             await running.WaitAsync(TimeSpan.FromSeconds(3));
             Check(TranscriptText.Render(await f.App.SnapshotAsync())==seed.Segment.RawText);
+        });
+        await test("2.1.12 不响应取消的润色有界返回，迟到结果不覆盖新会话",async()=>
+        {
+            var entered=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            await using var f=await ControllerFixture.Create(async(_,_)=>
+            {entered.TrySetResult();await release.Task;return ControllerFixture.Reply("迟到文本不应生效。");});
+            string raw="完整的第一句。完整的第二句。";
+            var seed=await f.Seed(raw);await f.App.LoadSessionAsync(seed.Session);
+            var running=f.App.FinishCurrentAsync(seed.Session.Id,forDelivery:true);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            try
+            {
+                await running.WaitAsync(TimeSpan.FromSeconds(2));
+                Check(TranscriptText.Render(await f.App.SnapshotAsync())==raw,"超时丢失完整正文");
+                var next=await f.Seed("下一轮正文。");await f.App.LoadSessionAsync(next.Session);
+                release.TrySetResult();
+                string export=Path.Combine(Path.GetTempPath(),"VoiceInput-late-"+Guid.NewGuid().ToString("N")+".log");
+                try
+                {
+                    using var budget=new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                    string logs;
+                    do{await f.App.Log.ExportAsync(export,budget.Token);logs=File.ReadAllText(export);if(!logs.Contains("LatePolishDiscarded"))await Task.Delay(20,budget.Token);}
+                    while(!logs.Contains("LatePolishDiscarded"));
+                    Check(logs.Contains("TextProcessingTimedOut")&&!logs.Contains("TextProcessingFailed"),"等待预算误记为真实故障");
+                    Check(TranscriptText.Render(await f.App.SnapshotAsync())=="下一轮正文。","迟到结果污染新会话");
+                }
+                finally{File.Delete(export);}
+            }
+            finally{release.TrySetResult();}
+        });
+        await test("2.1.12 完整润色优先允许超过800毫秒，并保留完整回复",async()=>
+        {
+            await using var f=await ControllerFixture.Create(async(_,token)=>
+            {await Task.Delay(1050,token);return ControllerFixture.Reply("这个方案我们先试一下。");});
+            await f.App.SaveSettingsAsync(f.App.Settings with{PreferFastDelivery=false},f.App.Keys);
+            var seed=await f.Seed("嗯，这个方案我们先试一下。");await f.App.LoadSessionAsync(seed.Session);
+            await f.App.FinishCurrentAsync(seed.Session.Id,forDelivery:true).WaitAsync(TimeSpan.FromSeconds(5));
+            Check((await f.App.SnapshotAsync()).Session!.WholePolishState=="Completed","关闭快速模式仍受800毫秒限制");
+            Check(TranscriptText.Render(await f.App.SnapshotAsync())=="这个方案我们先试一下。","完整润色回复未采用");
         });
     }
 }

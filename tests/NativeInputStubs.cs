@@ -4,7 +4,7 @@ using RealtimeTranscription.Core;
 namespace RealtimeTranscription.Desktop.Input;
 public record NativeTarget(IntPtr Window,IntPtr Focus,uint Thread,uint Process);
 public record InputTarget(NativeTarget Native,string WorkerId="test",string CaptureId="test",bool CheckSelection=true);
-public record PhysicalSignal(string Kind,int Key=0,long At=0,NativeTarget? Target=null,long ActivityVersion=0);
+public record PhysicalSignal(string Kind,int Key=0,long At=0,NativeTarget? Target=null,long ActivityVersion=0,long CancellationVersion=0,string InputCategory="Other");
 public record TargetCapture(InputTarget? Target,string Code,string Message);
 public record DeliveryResult(string State,string Message,int Accepted=0)
 {
@@ -29,7 +29,7 @@ public sealed class PhysicalHook(Action<PhysicalSignal> signal,Func<bool>? await
     public int Trigger=>0xA3;
     public void Configure(string key)=>Latest=this;
     public void Enable(bool enabled){}
-    public void Emit(string kind,long? at=null)=>signal(new(kind,kind is "down" or "up"?Trigger:27,at??Environment.TickCount64,Win32.Current(true)));
+    public void Emit(string kind,long? at=null,string inputCategory="Keyboard")=>signal(new(kind,kind is "down" or "up"?Trigger:27,at??Environment.TickCount64,Win32.Current(true),InputCategory:inputCategory));
     public void Dispose(){}
 }
 public static class TextDelivery

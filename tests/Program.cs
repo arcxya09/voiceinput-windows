@@ -460,6 +460,7 @@ await DeliveryDispatchRegression.Run(Test);
 await ClipboardPasteRegression.Run(Test);
 await ReleaseDeliveryRegression.Run(Test);
 await StartupCaptureRegression.RunInputCompatibility(Test);
+await StartupCaptureRegression.RunRepeatedInput(Test);
 await InputCompatibilityRegression.Run(Test);
 await RuntimeLogRegression.Run(Test);
 await ControllerLogRegression.Run(Test);

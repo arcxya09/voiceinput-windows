@@ -34,3 +34,11 @@
 设备构造中的系统调用可能阻塞；任务取消不能中断已经进入的驱动调用。因此会在每个关键调用之前记录开始，失败时记录异常，成功后进入下一阶段。最后一个开始事件有助于确定卡住的位置，导出过程独立于录音的互斥锁。
 
 若其他录音软件可以使用同一麦克风，请在 VoiceInput 再现失败后导出日志。若整个程序无法打开，可先保留上述目录中的最新 `.log` 文件。
+
+## 2.1.12 分阶段统计
+
+`TurnSummary` 是每轮完成后的汇总。`AudioDurationMs` 按实际发送的 16 kHz 样本数计算；`LocalStopMs` 是停止请求至本地音频处理完成，`RecognitionStopMs` 包含本地收尾及识别服务结束；`PolishMs` 是文字处理阶段耗时，`CopyMs`、`PasteMs` 分别记录调用等待时间。阶段未执行时相关耗时为 null，`ReleaseToDeliveryMs` 仅在实际松键时有值。`PasteSent` 表示系统已接受粘贴输入事件，不代表目标应用已保存正文。
+
+`TextProcessingCancelled` 区分整轮取消、回车加速和退出；`TextProcessingTimedOut` 表示快速模式等待预算耗尽并回退完整正文。`LatePolishDiscarded` 记录迟到请求已被观察，其结果不再应用。真实请求异常保留 `TextProcessingFailed`。
+
+`PacketMetadataAnomaly` 新增取包间隔、持包处理耗时、批次序号和阶段（FirstSecond / Recording / Draining），日志最多保留每轮前 16 个详细异常包。`NativeCaptureStopped` 汇总最大取包间隔、超过实际缓冲时长的间隔数、最大处理耗时、批次数、最大批次包数和空唤醒次数。取包间隔同时包含设备生产、等待和线程调度时间，不能单独当作 CPU 调度延迟。连续读出的包数用于观察积压，不等于某一时刻的完整设备队列深度。

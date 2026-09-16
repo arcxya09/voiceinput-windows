@@ -19,4 +19,21 @@ public sealed partial class AppController
         "Cancelled" or "Failed" or "StartFailed" or "Empty" or "NotRequested" or "PasteSent" or "CopyFailed" or "Partial" or "Dictated"=>state,
         _=>"Other"
     };
+    internal Task LogTurnSummaryAsync(string turnId,string? delivery,int characters,bool manual,bool cancelled,
+        long copyMs,long pasteMs,long releasedAt,int ordinaryInputs)=>OnActor(()=>
+    {
+        if(captureAttempt is not {} attempt||attempt.Id!=turnId)return;
+        static long? Span(long begin,long end)=>begin>0&&end>=begin?end-begin:null;
+        LogEvent("TurnSummary",turnId:turnId,fields:[
+            ("State",LogDeliveryState(delivery)),("Cancelled",cancelled),("ManualDelivery",manual),
+            ("CharacterCount",characters),("AudioDurationMs",attempt.SamplesSent/16.0),
+            ("SamplesSent",attempt.SamplesSent),("MetadataAnomalies",attempt.MetadataAnomalies),("ReportedGapFrames",attempt.ReportedGapFrames),
+            ("FirstAudioMs",Span(attempt.PressedAt,attempt.FirstAudioAt)),("RecognitionReadyMs",Span(attempt.PressedAt,attempt.AsrReadyAt)),
+            ("LocalStopMs",Span(attempt.StopRequestedAt,attempt.AudioStoppedAt)),
+            ("RecognitionStopMs",Span(attempt.StopRequestedAt,attempt.AsrStoppedAt)),
+            ("PolishMs",Span(attempt.PolishStartedAt,attempt.PolishFinishedAt)),("PolishOutcome",attempt.PolishOutcome),
+            ("CopyMs",copyMs<0?(long?)null:copyMs),("PasteMs",pasteMs<0?(long?)null:pasteMs),
+            ("ReleaseToDeliveryMs",Span(releasedAt,Environment.TickCount64)),
+            ("TotalMs",Math.Max(0,Environment.TickCount64-attempt.PressedAt)),("OrdinaryInputCount",ordinaryInputs)]);
+    });
 }

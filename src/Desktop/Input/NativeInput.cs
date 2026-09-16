@@ -12,7 +12,7 @@ public record DeliveryResult(string State,string Message,int Accepted=0)
     public string Diagnostic { get; init; } = "";
     public uint? ClipboardSequence { get; init; }
 }
-public record PhysicalSignal(string Kind,int Key=0,long At=0,NativeTarget? Target=null,long ActivityVersion=0);
+public record PhysicalSignal(string Kind,int Key=0,long At=0,NativeTarget? Target=null,long ActivityVersion=0,long CancellationVersion=0,string InputCategory="Other");
 public record TargetCapture(InputTarget? Target,string Code,string Message);
 
 internal static class Win32
@@ -143,7 +143,7 @@ public sealed class PhysicalHook : IDisposable
                     if(down&&!held){held=true;if(enabled)signal(new("down",vk,Environment.TickCount64,Win32.Current(allowMissingFocus:true)));}
                     if(up&&held){held=false;signal(new("up",vk,Environment.TickCount64));}
                 }
-                else if(down)signal(new(vk==27?"escape":"activity",vk,Environment.TickCount64));
+                else if(down)signal(new(vk==27?"escape":"activity",vk,Environment.TickCount64,InputCategory:"Keyboard"));
             }
         }
         return Win32.CallNextHookEx(keyHook,code,w,l);
@@ -152,7 +152,7 @@ public sealed class PhysicalHook : IDisposable
     {
         if(code>=0&&w.ToInt64() is 0x201 or 0x204 or 0x207 or 0x20b or 0x20a or 0x20e)
         {
-            var m=Marshal.PtrToStructure<Win32.MouseData>(l);if((m.Flags&1)==0)signal(new("activity",At:Environment.TickCount64));
+            var m=Marshal.PtrToStructure<Win32.MouseData>(l);if((m.Flags&1)==0)signal(new("activity",At:Environment.TickCount64,InputCategory:w.ToInt64() is 0x20a or 0x20e?"MouseWheel":"MouseButton"));
         }
         return Win32.CallNextHookEx(mouseHook,code,w,l);
     }
