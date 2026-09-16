@@ -24,9 +24,9 @@ public partial class MainWindow : Window
     private TranscriptSnapshot? pending;
     private CancellationTokenSource? search;
     private bool ready,updating,closed,shuttingDown,microphoneTesting;
-    private bool savingSettings,changingProject,changingLearning,updatingLearning,testingConnection;
+    private bool savingSettings,changingProject,changingLearning,updatingLearning,testingConnection,extractingCurrent;
     private int managementOperations;
-    private bool ManagementOperationBusy=>Volatile.Read(ref managementOperations)>0||Dialogs.IsOpen||pickerOpen||correctionBusy||extractingHistory||generatingTerms||importingGenerated||testingPrompt||testingConnection||microphoneTesting||savingSettings||changingProject||changingLearning;
+    private bool ManagementOperationBusy=>Volatile.Read(ref managementOperations)>0||Dialogs.IsOpen||pickerOpen||correctionBusy||extractingHistory||extractingCurrent||generatingTerms||importingGenerated||testingPrompt||testingConnection||microphoneTesting||savingSettings||changingProject||changingLearning;
     private bool ManagementBusy=>ManagementOperationBusy||ptt?.Busy==true;
     private float level;
     public string CurrentProject=>controller.Settings.ProjectId;
@@ -37,7 +37,7 @@ public partial class MainWindow : Window
         controller.TermsUpdated+=()=>UI(RefreshTerms);controller.Level+=v=>Volatile.Write(ref level,v);
         controller.Message+=m=>UI(()=>StatusText.Text=m);
         controller.CorrectionsUpdated+=()=>UI(async()=>{if(!shuttingDown&&controller.MemoryAvailable)await Safe(RefreshCorrections);});
-        controller.Extracting+=v=>UI(()=>{ExtractButton.IsEnabled=!v;AllHistoryButton.IsEnabled=HistoryExtractAllButton.IsEnabled=!v;ExtractButton.Content=v?"正在整理…":"整理当前会话词条";});
+        controller.Extracting+=v=>UI(()=>{extractingCurrent=v;ExtractButton.IsEnabled=!v;AllHistoryButton.IsEnabled=HistoryExtractAllButton.IsEnabled=!v;ExtractButton.Content=v?"正在整理…":"整理当前会话词条";});
         render.Tick+=(_,_)=>Render();render.Start();AppWindow.Closing+=ClosingWindow;
         ConfigureWindow();InitializeStartupSettings();
         SystemEvents.PowerModeChanged+=PowerChanged;SystemEvents.SessionSwitch+=SessionChanged;
@@ -60,11 +60,13 @@ public partial class MainWindow : Window
             controller.Log.Write("Application","ReadyCompleted");
             CompleteStartupPresentation();
             pending=await controller.SnapshotAsync();
+            InitializeUpdates();
         }
         catch(Exception e){controller.Log.Write("Application","ReadyFailed",exception:e);ready=true;StatusText.Text=AppController.SafeError(e);if(Program.IsStartupLaunch)NotifyStartupError(AppController.SafeError(e));else await Dialogs.MessageAsync(this,"启动",AppController.SafeError(e));}
     }
     private void Render()
     {
+        if(ManagementBusy||AppWindow.IsVisible||trayMenu?.IsOpen==true)idleUpdateSince=DateTimeOffset.UtcNow;
         ProjectBox.IsEnabled=!ManagementBusy;
         RefreshLogStatus();
         SaveSettingsButton.IsEnabled=TestBailianButton.IsEnabled=TestDeepSeekButton.IsEnabled=!ManagementBusy;
@@ -112,7 +114,7 @@ public partial class MainWindow : Window
     public void OpenManager(){Show();if(AppWindow.Presenter is OverlappedPresenter presenter)presenter.Restore();Activate();}
     private void EnsureIdle(){if(Volatile.Read(ref managementOperations)>0)throw new InvalidOperationException("管理操作尚未完成，请稍候。");if(correctionBusy)throw new InvalidOperationException("纠错学习操作尚未完成，请稍候。");if(savingSettings||changingProject||changingLearning)throw new InvalidOperationException("设置或项目切换正在保存，请稍候。");if(extractingHistory)throw new InvalidOperationException("全部历史词条提取尚未结束，请先取消或等待完成。");if(generatingTerms||importingGenerated)throw new InvalidOperationException("词库生成或导入尚未结束，请稍候或先取消生成。");if(testingPrompt)throw new InvalidOperationException("提示词试用尚未结束，请稍候。");if(testingConnection)throw new InvalidOperationException("连接测试尚未结束，请稍候。");if(microphoneTesting)throw new InvalidOperationException("麦克风测试尚未结束，请稍候。");if(ptt?.Busy==true)throw new InvalidOperationException("当前输入尚未完成，请松开快捷键并等待结果后再操作。");}
     private async Task Safe(Func<Task> fn){try{await fn();}catch(OperationCanceledException){StatusText.Text="操作已取消。";controller.Log.Write("UI","OperationCancelled");}catch(Exception e){controller.Log.Write("UI","OperationFailed",exception:e);await Dialogs.MessageAsync(this,"语音输入法",AppController.SafeError(e));}}
-    internal bool CanStartVoiceTurn() => !ManagementOperationBusy && !Volatile.Read(ref shuttingDown)
+    internal bool CanStartVoiceTurn() => !ManagementOperationBusy && !updateInstalling && !Volatile.Read(ref shuttingDown)
         && Volatile.Read(ref trayMenu)?.IsOpen != true;
     private Task Manage(Func<Task> action) => Safe(() => RunManagementOperationAsync(action));
     internal async Task RunManagementOperationAsync(Func<Task> action)
@@ -243,6 +245,7 @@ public partial class MainWindow : Window
     private async Task FillSettings()
     {
         var s=controller.Settings;BailianKeyBox.Password=controller.Keys.BailianKey;DeepSeekKeyBox.Password=controller.Keys.DeepSeekKey;WorkspaceBox.Text=s.WorkspaceId;RegionBox.SelectedIndex=s.Region=="cn-beijing"?0:1;LegacyBox.IsChecked=s.LegacyEndpoint;
+        AutoCheckUpdateBox.IsChecked=s.AutoCheckUpdates;AutoDownloadUpdateBox.IsChecked=s.AutoDownloadUpdates;AutoInstallUpdateBox.IsChecked=s.AutoOpenUpdateInstaller;
         SmartPunctuationBox.IsChecked=s.SmartPunctuationEnabled;
         AdaptiveAsrBox.IsChecked=s.AdaptiveAsrEnabled;
         PolishPromptBox.Text=s.EffectivePolishPrompt;GenerationRequirementBox.Text=s.GenerationRequirement;GenerationCountBox.Text=s.GenerationCount.ToString();GenerationScopeBox.SelectedIndex=s.GenerationGlobal?1:0;
@@ -280,7 +283,7 @@ public partial class MainWindow : Window
         try
         {
         int Parse(TextBox box,string name){if(!int.TryParse(box.Text.Trim(),out int value))throw new ArgumentException(name+"应为整数。");return value;}
-        var s=controller.Settings with{SchemaVersion=4,Region=RegionBox.SelectedIndex==0?"cn-beijing":"ap-southeast-1",WorkspaceId=WorkspaceBox.Text.Trim(),LegacyEndpoint=LegacyBox.IsChecked==true,DeviceId=DeviceBox.SelectedValue as string??"",SmartPunctuationEnabled=SmartPunctuationBox.IsChecked==true,AdaptiveAsrEnabled=AdaptiveAsrBox.IsChecked==true,PolishEnabled=PolishBox.IsChecked==true,PreferFastDelivery=FastDeliveryBox.IsChecked==true,PolishPrompt=PolishRules.ResolvePrompt(PolishPromptBox.Text),GenerationRequirement=GenerationRequirementBox.Text.Trim(),GenerationCount=Parse(GenerationCountBox,"目标词数"),GenerationGlobal=GenerationScopeBox.SelectedIndex==1,GenerationMaxThinking=GenerationMaxThinkingBox.IsChecked==true,PreviousContext=PreviousBox.IsChecked==true,SaveMemory=MemoryBox.IsChecked==true,AllowLearning=LearningBox.IsChecked==true,LearnCorrections=CorrectionLearningBox.IsChecked==true,UseLexicon=UseTermsBox.IsChecked==true,DynamicLexicon=DynamicTermsBox.IsChecked==true,AutoExtract=AutoExtractBox.IsChecked==true,AsrContext=AsrContextBox.IsChecked==true,AutoParagraph=ParagraphBox.IsChecked==true,CloseToTray=TrayBox.IsChecked==true,RetentionDays=string.IsNullOrWhiteSpace(RetentionBox.Text)?null:Parse(RetentionBox,"保留天数"),DailyExtractionTokens=Parse(BudgetBox,"整理预算"),SilenceMs=Parse(SilenceBox,"断句停顿"),HoldMs=Parse(HoldBox,"长按阈值"),MaxHoldSeconds=Parse(MaxHoldBox,"最长按住时间"),Hotkey=HotkeyBox.SelectedIndex switch{1=>"F8",2=>"F9",_=>"RightCtrl"}};
+        var s=controller.Settings with{SchemaVersion=4,AutoCheckUpdates=AutoCheckUpdateBox.IsChecked==true,AutoDownloadUpdates=AutoDownloadUpdateBox.IsChecked==true,AutoOpenUpdateInstaller=AutoInstallUpdateBox.IsChecked==true,Region=RegionBox.SelectedIndex==0?"cn-beijing":"ap-southeast-1",WorkspaceId=WorkspaceBox.Text.Trim(),LegacyEndpoint=LegacyBox.IsChecked==true,DeviceId=DeviceBox.SelectedValue as string??"",SmartPunctuationEnabled=SmartPunctuationBox.IsChecked==true,AdaptiveAsrEnabled=AdaptiveAsrBox.IsChecked==true,PolishEnabled=PolishBox.IsChecked==true,PreferFastDelivery=FastDeliveryBox.IsChecked==true,PolishPrompt=PolishRules.ResolvePrompt(PolishPromptBox.Text),GenerationRequirement=GenerationRequirementBox.Text.Trim(),GenerationCount=Parse(GenerationCountBox,"目标词数"),GenerationGlobal=GenerationScopeBox.SelectedIndex==1,GenerationMaxThinking=GenerationMaxThinkingBox.IsChecked==true,PreviousContext=PreviousBox.IsChecked==true,SaveMemory=MemoryBox.IsChecked==true,AllowLearning=LearningBox.IsChecked==true,LearnCorrections=CorrectionLearningBox.IsChecked==true,UseLexicon=UseTermsBox.IsChecked==true,DynamicLexicon=DynamicTermsBox.IsChecked==true,AutoExtract=AutoExtractBox.IsChecked==true,AsrContext=AsrContextBox.IsChecked==true,AutoParagraph=ParagraphBox.IsChecked==true,CloseToTray=TrayBox.IsChecked==true,RetentionDays=string.IsNullOrWhiteSpace(RetentionBox.Text)?null:Parse(RetentionBox,"保留天数"),DailyExtractionTokens=Parse(BudgetBox,"整理预算"),SilenceMs=Parse(SilenceBox,"断句停顿"),HoldMs=Parse(HoldBox,"长按阈值"),MaxHoldSeconds=Parse(MaxHoldBox,"最长按住时间"),Hotkey=HotkeyBox.SelectedIndex switch{1=>"F8",2=>"F9",_=>"RightCtrl"}};
         await controller.SaveSettingsAsync(s,new(BailianKeyBox.Password.Trim(),DeepSeekKeyBox.Password.Trim()));ptt?.Configure();StatusText.Text="设置已保存。";
         }
         finally{savingSettings=false;}
@@ -321,7 +324,7 @@ public partial class MainWindow : Window
             if(controller.FailedSaveCount>0&&!await Dialogs.ConfirmAsync(this,"仍有正文未保存",$"仍有 {controller.FailedSaveCount} 项保存失败。退出后未保存的部分可能无法恢复。\n取消可返回重试保存、复制或导出正文。","继续退出"))return;
         }
         finally{closingPrompt=false;}
-        shuttingDown=true;ready=false;exportCancellation?.Cancel();generationCancel?.Cancel();promptPreviewCancel?.Cancel();controller.CancelGeneration();controller.CancelExtraction();
+        shuttingDown=true;ready=false;updateTimer.Stop();updateCancellation?.Cancel();exportCancellation?.Cancel();generationCancel?.Cancel();promptPreviewCancel?.Cancel();controller.CancelGeneration();controller.CancelExtraction();
         ptt?.SetEnabled(false);StatusText.Text="正在退出并保存…";
         controller.Log.Write("Application","ShutdownRequested");
         try{async Task Clean(){if(ptt!=null)await ptt.DisposeAsync();await controller.DisposeAsync();}await Clean().WaitAsync(TimeSpan.FromSeconds(12));}catch(Exception error){controller.Log.Write("Application","ShutdownCleanupFailed",exception:error);}

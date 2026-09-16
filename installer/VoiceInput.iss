@@ -83,6 +83,41 @@ function CreateFileW(FileName: String; DesiredAccess, ShareMode, SecurityAttribu
 function CloseHandle(Handle: THandle): Boolean;
   external 'CloseHandle@kernel32.dll stdcall';
 
+function OpenProcess(Access: LongWord; InheritHandle: Boolean; ProcessId: LongWord): THandle;
+  external 'OpenProcess@kernel32.dll stdcall';
+function WaitForSingleObject(Handle: THandle; Milliseconds: LongWord): LongWord;
+  external 'WaitForSingleObject@kernel32.dll stdcall';
+function GetLastError: LongWord;
+  external 'GetLastError@kernel32.dll stdcall';
+
+function InitializeSetup: Boolean;
+var
+  ParentId: Integer;
+  Argument: String;
+  Handle: THandle;
+begin
+  Result := True;
+  Argument := ExpandConstant('{param:UPDATEWAIT|}');
+  if Argument = '' then Exit;
+  ParentId := StrToIntDef(Argument, 0);
+  Result := ParentId > 0;
+  if Result then
+  begin
+    Handle := OpenProcess($00100000, False, ParentId);
+    if Handle = 0 then
+      Result := GetLastError = 87 { The parent already exited. }
+    else
+    begin
+      Log('Waiting for VoiceInput update parent to exit.');
+      Result := WaitForSingleObject(Handle, 120000) = 0;
+      CloseHandle(Handle);
+      if Result then Log('VoiceInput update parent exited.');
+    end;
+  end;
+  if not Result then
+    SuppressibleMsgBox('VoiceInput update could not wait for the application to exit. Please exit VoiceInput and open the installer again.', mbError, MB_OK, IDOK);
+end;
+
 function FileIsInUse(const FileName: String): Boolean;
 var
   Handle: THandle;

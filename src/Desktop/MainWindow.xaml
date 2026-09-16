@@ -559,6 +559,26 @@
                             </Border>
                             <Border Style="{StaticResource Card}">
                                 <StackPanel Spacing="10">
+                                    <TextBlock Text="软件更新" Style="{StaticResource SectionTitle}"/>
+                                    <TextBlock x:Name="UpdateVersionText" Style="{StaticResource SecondaryText}"/>
+                                    <CheckBox x:Name="AutoCheckUpdateBox"><TextBlock Text="启动后自动检查新版（每 6 小时）" TextWrapping="Wrap"/></CheckBox>
+                                    <CheckBox x:Name="AutoDownloadUpdateBox"><TextBlock Text="发现新版后自动下载安装包" TextWrapping="Wrap"/></CheckBox>
+                                    <CheckBox x:Name="AutoInstallUpdateBox"><TextBlock Text="托盘空闲 1 分钟后自动退出并打开安装程序（仅安装版）" TextWrapping="Wrap"/></CheckBox>
+                                    <TextBlock Text="以上选项点击页面底部“保存设置”生效。自动打开安装程序默认关闭，安装向导由你完成。" Style="{StaticResource SecondaryText}"/>
+                                    <TextBlock x:Name="UpdateModeText" Style="{StaticResource SecondaryText}"/>
+                                    <TextBlock x:Name="UpdateStatusText" Text="尚未检查更新。" Style="{StaticResource SecondaryText}"/>
+                                    <ProgressBar x:Name="UpdateProgress" Minimum="0" Maximum="100" Visibility="Collapsed"/>
+                                    <local:ResponsivePanel Spacing="8">
+                                        <Button x:Name="UpdateCheckButton" Content="检查更新" Click="UpdateCheck_Click"/>
+                                        <Button x:Name="UpdateDownloadButton" Content="下载 / 重新下载" Click="UpdateDownload_Click" IsEnabled="False"/>
+                                        <Button x:Name="UpdateInstallButton" Content="退出并安装" Click="UpdateInstall_Click" IsEnabled="False"/>
+                                        <Button x:Name="UpdateCancelButton" Content="取消下载" Click="UpdateCancel_Click" IsEnabled="False"/>
+                                        <Button Content="版本说明" Click="UpdateRelease_Click"/>
+                                    </local:ResponsivePanel>
+                                </StackPanel>
+                            </Border>
+                            <Border Style="{StaticResource Card}">
+                                <StackPanel Spacing="10">
                                     <TextBlock Text="记忆与词库" Style="{StaticResource SectionTitle}" Margin="0,0,0,2"/>
                                     <CheckBox x:Name="MemoryBox" Content="保存本地文本记忆"/>
                                     <CheckBox x:Name="LearningBox" Content="允许词条整理（新会话默认）"/>

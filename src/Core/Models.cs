@@ -41,6 +41,9 @@ public record AppSettings
     public bool AsrContext { get; init; }
     public bool PreviousContext { get; init; }
     public bool AutoParagraph { get; init; }
+    public bool AutoCheckUpdates { get; init; } = true;
+    public bool AutoDownloadUpdates { get; init; } = true;
+    public bool AutoOpenUpdateInstaller { get; init; }
     public bool CloseToTray { get; init; } = true;
     public int SilenceMs { get; init; } = 2500;
     public int DailyExtractionTokens { get; init; } = 50000;

@@ -142,6 +142,51 @@ try {
     Invoke-TestInstall ''
     Add-Check 'Silent per-user installation creates the organized app bundle and a versioned uninstall registration in a path containing spaces.'
 
+    # A controlled parent process proves the updater never writes over a live app.
+    $gate = Join-Path ([IO.Path]::GetTempPath()) "VoiceInput-update-gate-$token"
+    $parent = $null
+    $updater = $null
+    $updateLog = Join-Path $evidenceDirectory 'installer-update-wait.log'
+    try {
+        $parentStart = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
+        $parentStart.UseShellExecute = $false
+        $parentStart.Environment['VOICEINPUT_TEST_GATE'] = $gate
+        foreach ($arg in @('-NoProfile', '-Command', 'while (!(Test-Path -LiteralPath $env:VOICEINPUT_TEST_GATE)) { Start-Sleep -Milliseconds 50 }')) { $parentStart.ArgumentList.Add($arg) }
+        $parent = [Diagnostics.Process]::Start($parentStart)
+        $beforeUpdate = (Get-Item -LiteralPath $launcher).LastWriteTimeUtc
+        $updateStart = [Diagnostics.ProcessStartInfo]::new($setup)
+        $updateStart.UseShellExecute = $false
+        foreach ($arg in @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/UPDATEWAIT=$($parent.Id)", "/DIR=$installDirectory", "/GROUP=$group", "/LOG=$updateLog")) { $updateStart.ArgumentList.Add($arg) }
+        $updater = [Diagnostics.Process]::Start($updateStart)
+        $deadline = [DateTime]::UtcNow.AddSeconds(30)
+        do {
+            $waiting = (Test-Path -LiteralPath $updateLog) -and ((Get-Content -LiteralPath $updateLog -Raw) -match 'Waiting for VoiceInput update parent to exit')
+            if ($waiting -or $updater.HasExited) { break }
+            Start-Sleep -Milliseconds 100
+        } while ([DateTime]::UtcNow -lt $deadline)
+        if (!$waiting -or $updater.HasExited -or $parent.HasExited -or (Get-Item -LiteralPath $launcher).LastWriteTimeUtc -ne $beforeUpdate) { throw 'Update installation did not wait for the live parent before modifying files.' }
+        [IO.File]::WriteAllText($gate, 'exit')
+        if (!$parent.WaitForExit(10000) -or !$updater.WaitForExit(120000) -or $updater.ExitCode -ne 0) { throw 'Update installer did not complete after the parent exited.' }
+        if ((Get-Content -LiteralPath $updateLog -Raw) -notmatch 'VoiceInput update parent exited') { throw 'Update wait completion was not recorded.' }
+        Assert-UserDataPreserved
+        Add-Check 'Update installer waits for the exact parent process, then upgrades in place and preserves user data.'
+    }
+    finally {
+        foreach ($process in @($parent, $updater)) {
+            if ($process) { if (!$process.HasExited) { $process.Kill($true); $process.WaitForExit() }; $process.Dispose() }
+        }
+        if (Test-Path -LiteralPath $gate) { Remove-Item -LiteralPath $gate -Force }
+    }
+    $invalidStart = [Diagnostics.ProcessStartInfo]::new($setup)
+    $invalidStart.UseShellExecute = $false
+    foreach ($arg in @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/UPDATEWAIT=invalid')) { $invalidStart.ArgumentList.Add($arg) }
+    $invalid = [Diagnostics.Process]::Start($invalidStart)
+    try {
+        if (!$invalid.WaitForExit(30000)) { $invalid.Kill($true); $invalid.WaitForExit(); throw 'Invalid update parent did not fail promptly.' }
+        if ($invalid.ExitCode -eq 0) { throw 'Invalid update parent was accepted.' }
+    } finally { $invalid.Dispose() }
+    Add-Check 'Malformed update parent arguments abort without proceeding with installation.'
+
     $shortcuts = @(Get-ChildItem -LiteralPath $shortcutDirectory -Filter '*.lnk' -Recurse)
     if ($shortcuts.Count -lt 1) { throw 'The installer did not create a Start menu shortcut.' }
     $shell = New-Object -ComObject WScript.Shell
