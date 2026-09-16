@@ -277,13 +277,24 @@ public partial class MainWindow : Window
     });
     private async void Diagnostics_Click(object sender,RoutedEventArgs e)=>await Dialogs.TextAsync(this,"录音诊断（可复制）",controller.Diagnostic);
 
+    private AppSettings ReadSettings()
+    {
+        int Parse(TextBox box,string name){if(!int.TryParse(box.Text.Trim(),out int value))throw new ArgumentException(name+"应为整数。");return value;}
+        return controller.Settings with{SchemaVersion=4,AutoCheckUpdates=AutoCheckUpdateBox.IsChecked==true,AutoDownloadUpdates=AutoDownloadUpdateBox.IsChecked==true,AutoOpenUpdateInstaller=AutoInstallUpdateBox.IsChecked==true,Region=RegionBox.SelectedIndex==0?"cn-beijing":"ap-southeast-1",WorkspaceId=WorkspaceBox.Text.Trim(),LegacyEndpoint=LegacyBox.IsChecked==true,DeviceId=DeviceBox.SelectedValue as string??"",SmartPunctuationEnabled=SmartPunctuationBox.IsChecked==true,AdaptiveAsrEnabled=AdaptiveAsrBox.IsChecked==true,PolishEnabled=PolishBox.IsChecked==true,PreferFastDelivery=FastDeliveryBox.IsChecked==true,PolishPrompt=PolishRules.ResolvePrompt(PolishPromptBox.Text),GenerationRequirement=GenerationRequirementBox.Text.Trim(),GenerationCount=Parse(GenerationCountBox,"目标词数"),GenerationGlobal=GenerationScopeBox.SelectedIndex==1,GenerationMaxThinking=GenerationMaxThinkingBox.IsChecked==true,PreviousContext=PreviousBox.IsChecked==true,SaveMemory=MemoryBox.IsChecked==true,AllowLearning=LearningBox.IsChecked==true,LearnCorrections=CorrectionLearningBox.IsChecked==true,UseLexicon=UseTermsBox.IsChecked==true,DynamicLexicon=DynamicTermsBox.IsChecked==true,AutoExtract=AutoExtractBox.IsChecked==true,AsrContext=AsrContextBox.IsChecked==true,AutoParagraph=ParagraphBox.IsChecked==true,CloseToTray=TrayBox.IsChecked==true,RetentionDays=string.IsNullOrWhiteSpace(RetentionBox.Text)?null:Parse(RetentionBox,"保留天数"),DailyExtractionTokens=Parse(BudgetBox,"整理预算"),SilenceMs=Parse(SilenceBox,"断句停顿"),HoldMs=Parse(HoldBox,"长按阈值"),MaxHoldSeconds=Parse(MaxHoldBox,"最长按住时间"),Hotkey=HotkeyBox.SelectedIndex switch{1=>"F8",2=>"F9",_=>"RightCtrl"}};
+    }
+    internal bool SettingsHaveUnsavedChanges()
+    {
+        AppSettings Canonical(AppSettings value)=>value with{SchemaVersion=4,PolishPrompt=value.EffectivePolishPrompt.ReplaceLineEndings("\n"),GenerationRequirement=value.GenerationRequirement.Trim().ReplaceLineEndings("\n"),WorkspaceId=value.WorkspaceId.Trim()};
+        try { return Canonical(ReadSettings())!=Canonical(controller.Settings) || BailianKeyBox.Password.Trim()!=controller.Keys.BailianKey || DeepSeekKeyBox.Password.Trim()!=controller.Keys.DeepSeekKey; }
+        catch (ArgumentException) { return true; }
+    }
+
     private async Task SaveSettings()
     {
         EnsureIdle();savingSettings=true;
         try
         {
-        int Parse(TextBox box,string name){if(!int.TryParse(box.Text.Trim(),out int value))throw new ArgumentException(name+"应为整数。");return value;}
-        var s=controller.Settings with{SchemaVersion=4,AutoCheckUpdates=AutoCheckUpdateBox.IsChecked==true,AutoDownloadUpdates=AutoDownloadUpdateBox.IsChecked==true,AutoOpenUpdateInstaller=AutoInstallUpdateBox.IsChecked==true,Region=RegionBox.SelectedIndex==0?"cn-beijing":"ap-southeast-1",WorkspaceId=WorkspaceBox.Text.Trim(),LegacyEndpoint=LegacyBox.IsChecked==true,DeviceId=DeviceBox.SelectedValue as string??"",SmartPunctuationEnabled=SmartPunctuationBox.IsChecked==true,AdaptiveAsrEnabled=AdaptiveAsrBox.IsChecked==true,PolishEnabled=PolishBox.IsChecked==true,PreferFastDelivery=FastDeliveryBox.IsChecked==true,PolishPrompt=PolishRules.ResolvePrompt(PolishPromptBox.Text),GenerationRequirement=GenerationRequirementBox.Text.Trim(),GenerationCount=Parse(GenerationCountBox,"目标词数"),GenerationGlobal=GenerationScopeBox.SelectedIndex==1,GenerationMaxThinking=GenerationMaxThinkingBox.IsChecked==true,PreviousContext=PreviousBox.IsChecked==true,SaveMemory=MemoryBox.IsChecked==true,AllowLearning=LearningBox.IsChecked==true,LearnCorrections=CorrectionLearningBox.IsChecked==true,UseLexicon=UseTermsBox.IsChecked==true,DynamicLexicon=DynamicTermsBox.IsChecked==true,AutoExtract=AutoExtractBox.IsChecked==true,AsrContext=AsrContextBox.IsChecked==true,AutoParagraph=ParagraphBox.IsChecked==true,CloseToTray=TrayBox.IsChecked==true,RetentionDays=string.IsNullOrWhiteSpace(RetentionBox.Text)?null:Parse(RetentionBox,"保留天数"),DailyExtractionTokens=Parse(BudgetBox,"整理预算"),SilenceMs=Parse(SilenceBox,"断句停顿"),HoldMs=Parse(HoldBox,"长按阈值"),MaxHoldSeconds=Parse(MaxHoldBox,"最长按住时间"),Hotkey=HotkeyBox.SelectedIndex switch{1=>"F8",2=>"F9",_=>"RightCtrl"}};
+        var s=ReadSettings();
         await controller.SaveSettingsAsync(s,new(BailianKeyBox.Password.Trim(),DeepSeekKeyBox.Password.Trim()));ptt?.Configure();StatusText.Text="设置已保存。";
         }
         finally{savingSettings=false;}

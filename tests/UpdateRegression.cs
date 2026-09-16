@@ -83,7 +83,7 @@ internal static class UpdateRegression
             File.WriteAllBytes(update.Path, new byte[Payload.Length]);
             await client.DownloadAsync(Release(), directory, null, CancellationToken.None); Check(downloads == 2);
         }));
-        await test("更新：流传输中取消删除半包并保留已有文件", () => InDirectory(async directory =>
+        await test("更新：流传输中取消删除半包、不生成安装包", () => InDirectory(async directory =>
         {
             byte[] large = new byte[200000]; string hash = Convert.ToHexString(SHA256.HashData(large));
             var release = Release() with { Size = large.Length, Digest = hash };
@@ -158,7 +158,7 @@ internal static class UpdateRegression
         {
             await using var fixture = await ControllerFixture.Create(); var source = await fixture.Seed("更新前内容。"); await fixture.App.LoadSessionAsync(source.Session);
             fixture.Protector.Fail = j => j.TryGetProperty("finalText", out var text) && text.GetString() == "更新前修订。";
-            await fixture.App.EditAsync(source.Segment.Id, "更新前修订。"); await fixture.Settle();
+            await fixture.App.EditAsync(source.Segment.Id, "更新前修订。"); await fixture.App.Repository.BarrierAsync(); await fixture.App.SnapshotAsync();
             await Reject<InvalidOperationException>(() => fixture.App.PrepareUpdateAsync());
             fixture.Protector.Fail = null; await fixture.App.PrepareUpdateAsync();
             Check((await fixture.App.Repository.LoadSessionAsync(source.Session.Id))!.Segments.Single().FinalText == "更新前修订。");

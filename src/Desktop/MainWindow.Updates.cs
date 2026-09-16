@@ -109,6 +109,7 @@ public partial class MainWindow
     private async Task InstallUpdateAsync(bool automatic)
     {
         if (downloadedUpdate == null || updateBusy || updateInstalling || shuttingDown) return;
+        if (SettingsHaveUnsavedChanges()) { UpdateStatusText.Text = "设置页仍有未保存修改，请先保存设置再安装。"; return; }
         if (ManagementBusy || trayMenu?.IsOpen == true) { UpdateStatusText.Text = "请等待本轮输入或管理操作完成后安装。"; return; }
         updateInstalling = true; RefreshUpdateButtons();
         try
