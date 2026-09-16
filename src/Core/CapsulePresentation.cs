@@ -3,6 +3,14 @@ namespace RealtimeTranscription.Core;
 /// <summary>Compact terminal labels come from delivery results, never inferred from prose.</summary>
 public static class CapsulePresentation
 {
+    public static TimeSpan CompletionDuration(string? state) => TimeSpan.FromMilliseconds(state switch
+    {
+        "Sent" or "PasteSent" => 450,
+        "Copied" => 1200,
+        "Cancelled" or "Empty" => 900,
+        _ => 3000
+    });
+
     public static string CompletionLabel(string? state) => state switch
     {
         "Sent" => "已输入",

@@ -8,6 +8,8 @@ public interface IAudioCapture : IAsyncDisposable
     string Diagnostic { get; }
     string? FailureMessage { get; }
     string? QualityWarning => null;
+    long MetadataAnomalies => 0;
+    long ReportedGapFrames => 0;
     long SamplesSent { get; }
     void Start();
     void RequestStop();

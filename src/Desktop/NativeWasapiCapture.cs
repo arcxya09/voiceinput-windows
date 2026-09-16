@@ -23,7 +23,10 @@ internal sealed class NativeWasapiCapture : IAsyncDisposable
     private int startCalled, aborted, cleaned;
     private long stopAt;
     public WaveFormat Format { get; }
-    private long reportedGapFrames;
+    private long reportedGapFrames,metadataAnomalies;
+    public long MetadataAnomalies => Interlocked.Read(ref metadataAnomalies);
+    private readonly record struct PacketTrace(long Packet,int Frames,AudioClientBufferFlags Flags,long Position,long Timestamp,
+        AudioPacketDecision Decision,double ElapsedMs,double ReadIntervalMs,double LeaseMs,int BatchPackets,string Phase);
     public long ReportedGapFrames => Interlocked.Read(ref reportedGapFrames);
     public NativeWasapiCapture(MMDevice device, Action<IntPtr, int, bool> data, Action<Exception?> completed,
         RuntimeLog? log=null,string? turnId=null) : this(OpenClient(device,log,turnId),data,completed,log,turnId) { }
@@ -78,6 +81,30 @@ internal sealed class NativeWasapiCapture : IAsyncDisposable
         IntPtr mmcss=IntPtr.Zero;
         string stage="StartingThread";
         long packets=0,framesRead=0,silentPackets=0,anomalies=0,drainedFrames=0,started=Stopwatch.GetTimestamp();
+        long lastRead=0,readGapCount=0,batches=0,emptyWakes=0,deviceStarted=0;
+        double maxReadIntervalMs=0,maxLeaseMs=0,maxBatchMs=0;
+        int maxBatchPackets=0,traceCount=0;
+        var traces=new PacketTrace[16];
+        PacketTrace? firstTrace=null;
+        void FlushPacketLogs()
+        {
+            if(firstTrace is {} first)
+            {
+                AudioLog.Write(log,"FirstNativePacket",turnId,null,("frames",first.Frames),("flags",first.Flags),
+                    ("position",first.Position),("timestamp100ns",first.Timestamp),("elapsedMs",first.ElapsedMs));
+                firstTrace=null;
+            }
+            for(int i=0;i<traceCount;i++)
+            {
+                var t=traces[i];
+                AudioLog.Write(log,"PacketMetadataAnomaly",turnId,null,("packet",t.Packet),("frames",t.Frames),("flags",t.Flags),
+                    ("anomaly",t.Decision.Anomaly),("position",t.Position),("expectedPosition",t.Decision.ExpectedPosition),
+                    ("positionDelta",t.Decision.PositionDelta),("timestamp100ns",t.Timestamp),("timestampDelta100ns",t.Decision.TimestampDelta),
+                    ("elapsedMs",t.ElapsedMs),("readIntervalMs",t.ReadIntervalMs),("leaseMs",t.LeaseMs),
+                    ("batchPacketsSoFar",t.BatchPackets),("phase",t.Phase),("reportedGapFrames",ReportedGapFrames),("fallback","StopThenDrain"));
+            }
+            traceCount=0;
+        }
         void Stage(string value){stage=value;AudioLog.Write(log,value+"Started",turnId);}
         try
         {
@@ -110,7 +137,7 @@ internal sealed class NativeWasapiCapture : IAsyncDisposable
             AudioLog.Write(log,"CaptureBuffer",turnId,null,("bufferFrames",bufferFrames),
                 ("bufferMs",bufferFrames*1000.0/Format.SampleRate),("devicePeriod100ns",period));
             WaitHandle[] waits=[packetReady,wake];
-            Stage("AudioClientStart");client.Start();running=true;ready.TrySetResult();
+            Stage("AudioClientStart");client.Start();deviceStarted=Stopwatch.GetTimestamp();running=true;ready.TrySetResult();
             AudioLog.Write(log,"AudioClientStarted",turnId,null,("elapsedMs",Stopwatch.GetElapsedTime(started).TotalMilliseconds),("tailBudgetMs",tailBudgetMs));
             stage="ReadPackets";
             while(Volatile.Read(ref aborted)==0)
@@ -125,15 +152,24 @@ internal sealed class NativeWasapiCapture : IAsyncDisposable
                 }
                 if(boundary!=0&&timeline.Covers(boundary))break;
                 bool reachedStop=false;
+                int batchPackets=0;long batchAt=Stopwatch.GetTimestamp();
                 while(Volatile.Read(ref aborted)==0&&client.GetNextPacketSize()>0)
                 {
+                    long readAt=Stopwatch.GetTimestamp();
+                    double readIntervalMs=lastRead==0?0:Stopwatch.GetElapsedTime(lastRead,readAt).TotalMilliseconds;
+                    if(!deviceStopped)
+                    {
+                        maxReadIntervalMs=Math.Max(maxReadIntervalMs,readIntervalMs);
+                        if(readIntervalMs>bufferFrames*1000.0/Format.SampleRate)readGapCount++;
+                    }
+                    lastRead=readAt;
                     IntPtr pointer=client.GetBuffer(out int frames,out var flags,out long position,out long timestamp);
                     AudioPacketDecision decision=default;
                     try
                     {
                         if(frames==0)break;
                         if(frames<0||frames>bufferFrames)throw new AudioCaptureIntegrityException("麦克风返回了无效的音频包长度。");
-                        packets++;framesRead+=frames;
+                        packets++;batchPackets++;framesRead+=frames;
                         if((flags&AudioClientBufferFlags.Silent)!=0)silentPackets++;
                         if(deviceStopped)
                         {
@@ -150,19 +186,27 @@ internal sealed class NativeWasapiCapture : IAsyncDisposable
                         reachedStop=decision.ReachedStop;
                     }
                     finally{client.ReleaseBuffer(frames);}
-                    // No logging while holding a native packet lease.
-                    if(packets==1)AudioLog.Write(log,"FirstNativePacket",turnId,null,("frames",frames),("flags",flags),
-                        ("position",position),("timestamp100ns",timestamp),("elapsedMs",Stopwatch.GetElapsedTime(started).TotalMilliseconds));
+                    double leaseMs=Stopwatch.GetElapsedTime(readAt).TotalMilliseconds;
+                    maxLeaseMs=Math.Max(maxLeaseMs,leaseMs);
+                    double elapsedMs=Stopwatch.GetElapsedTime(deviceStarted).TotalMilliseconds;
+                    var trace=new PacketTrace(packets,frames,flags,position,timestamp,decision,elapsedMs,readIntervalMs,leaseMs,batchPackets,
+                        boundary!=0?"Draining":elapsedMs<1000?"FirstSecond":"Recording");
+                    if(packets==1)firstTrace=trace with{ElapsedMs=Stopwatch.GetElapsedTime(started).TotalMilliseconds};
                     if(decision.Anomaly!=AudioPacketAnomaly.None)
                     {
-                        anomalies++;
-                        if(anomalies<=16)AudioLog.Write(log,"PacketMetadataAnomaly",turnId,null,("packet",packets),("frames",frames),
-                            ("flags",flags),("anomaly",decision.Anomaly),("position",position),("expectedPosition",decision.ExpectedPosition),
-                            ("positionDelta",decision.PositionDelta),("timestamp100ns",timestamp),("timestampDelta100ns",decision.TimestampDelta),
-                            ("reportedGapFrames",timeline.ReportedGapFrames),("fallback","StopThenDrain"));
+                        anomalies++;Interlocked.Exchange(ref metadataAnomalies,anomalies);
+                        if(anomalies<=16)traces[traceCount++]=trace;
                     }
                     if(reachedStop||(!deviceStopped&&Interlocked.Read(ref stopAt)!=0&&timeline.RequiresDeviceStop))break;
                 }
+                if(batchPackets>0)
+                {
+                    batches++;maxBatchPackets=Math.Max(maxBatchPackets,batchPackets);
+                    maxBatchMs=Math.Max(maxBatchMs,Stopwatch.GetElapsedTime(batchAt).TotalMilliseconds);
+                }
+                else emptyWakes++;
+                // Drain ready PCM before allocating/logging diagnostic fields.
+                FlushPacketLogs();
                 if(reachedStop||deviceStopped)break;
                 boundary=Interlocked.Read(ref stopAt);
                 if(boundary!=0&&timeline.RequiresDeviceStop)continue;
@@ -179,11 +223,15 @@ internal sealed class NativeWasapiCapture : IAsyncDisposable
         finally
         {
             if(running&&!deviceStopped)try{client.Stop();}catch(Exception e){error??=e;AudioLog.Write(log,"AudioClientStopFailed",turnId,e);}
+            FlushPacketLogs();
             if(mmcss!=IntPtr.Zero&&!AvRevertMmThreadCharacteristics(mmcss))
                 AudioLog.Write(log,"CaptureSchedulingRevertFailed",turnId,null,("win32Error",Marshal.GetLastWin32Error()));
             AudioLog.Write(log,"NativeCaptureStopped",turnId,null,("running",running),("packets",packets),("frames",framesRead),
                 ("silentPackets",silentPackets),("metadataAnomalies",anomalies),("reportedGapFrames",ReportedGapFrames),
-                ("compatibilityDrain",deviceStopped),("drainedFrames",drainedFrames),("aborted",Volatile.Read(ref aborted)!=0));
+                ("compatibilityDrain",deviceStopped),("drainedFrames",drainedFrames),("aborted",Volatile.Read(ref aborted)!=0),
+                ("maxReadIntervalMs",maxReadIntervalMs),("readIntervalsOverBuffer",readGapCount),
+                ("maxPacketLeaseMs",maxLeaseMs),("packetBatches",batches),("maxBatchPackets",maxBatchPackets),
+                ("maxBatchMs",maxBatchMs),("emptyWakes",emptyWakes));
             Cleanup();
             // Startup failures belong to Start(); avoid a second fault callback.
             try{completed(running&&Volatile.Read(ref aborted)==0?error:null);}

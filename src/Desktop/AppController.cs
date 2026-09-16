@@ -28,9 +28,14 @@ public sealed partial class AppController : IAsyncDisposable
     private sealed class CaptureAttempt(string id,long pressedAt)
     {
         public readonly string Id=id;
+        public readonly AudioEnvironmentAnalyzer EnvironmentAnalysis = new();
         public readonly long PressedAt=pressedAt;
         public long FirstAudioAt,AsrReadyAt,FirstRecognitionAt;
+        public long StopRequestedAt,AudioStoppedAt,AsrStoppedAt,PolishStartedAt,PolishFinishedAt;
+        public long SamplesSent,MetadataAnomalies,ReportedGapFrames;
+        public string PolishOutcome="NotRequested";
         public int RecognitionEvents,FinalEvents;
+        public bool ConfirmedTextSeen;
         public string Timing
         {
             get
@@ -41,6 +46,7 @@ public sealed partial class AppController : IAsyncDisposable
         }
     }
     private CaptureAttempt? captureAttempt;
+    private readonly AudioEnvironmentMemory audioEnvironmentMemory = new();
     public string Diagnostic {get{lock(diagnosticSync)return diagnostic+(captureAttempt is {} attempt?"\n"+attempt.Timing:"");}}
     private void SetDiagnostic(string stage,Exception? error=null,string? detail=null)
     {
@@ -240,6 +246,7 @@ public sealed partial class AppController : IAsyncDisposable
             var allowed=await OnActor(()=>state is not (CaptureState.Recording or CaptureState.Connecting or CaptureState.Draining or CaptureState.Closing));
             if(!allowed){LogEvent("StartRejected",turnId:turnId,fields:[("Reason","CaptureBusy")]);return false;}
             var attempt=new CaptureAttempt(turnId,pressedAt);
+            var turnSettings=Settings;
             await OnActor(()=>{captureAttempt=attempt;captureFailure=null;captureWarning=null;});
             Stage("Configuration");
             Settings.AsrUri();if(Keys.BailianKey.Length==0)throw new ArgumentException("请先在设置页填写百炼 API Key。");
@@ -262,7 +269,7 @@ public sealed partial class AppController : IAsyncDisposable
             // Local capture precedes database refresh and the cloud handshake. Startup PCM
             // is bounded to the same fifteen seconds as the overall startup deadline.
             Stage("OpeningMicrophone");
-            var capture=await Task.Run(()=>captureFactory(Settings.DeviceId,client.AudioAsync,text=>AudioFault(client.TaskId,text),value=>AudioLevel(attempt,client.TaskId,value)),startupToken);audio=capture;
+            var capture=await Task.Run(()=>captureFactory(turnSettings.DeviceId,(pcm,token)=>{attempt.EnvironmentAnalysis.Add(pcm);return client.AudioAsync(pcm,token);},text=>AudioFault(client.TaskId,text),value=>AudioLevel(attempt,client.TaskId,value)),startupToken);audio=capture;
             // A release can arrive while the device is being constructed and audio
             // is still null. Forward it before Start so no post-release PCM is read.
             Stage("StartingMicrophone");
@@ -278,7 +285,16 @@ public sealed partial class AppController : IAsyncDisposable
             startup.Token.ThrowIfCancellationRequested();
             if(!await targetReady.WaitAsync(startup.Token))throw new InvalidOperationException("无法确认可编辑的输入位置，未上传语音。");
             Stage("ConnectingRecognition");
-            await client.StartPreparedAsync(Settings,Keys.BailianKey,preparation,startupToken);
+            await client.StartPreparedAsync(turnSettings,Keys.BailianKey,preparation,startupToken,()=>
+            {
+                var environment=attempt.EnvironmentAnalysis.Snapshot;
+                var tuning=audioEnvironmentMemory.Select(turnSettings.AdaptiveAsrEnabled,capture.EndpointId,environment,Environment.TickCount64);
+                LogEvent("AsrTuning",turnId:attempt.Id,fields:[("Source",tuning.Source),("Kind",tuning.Kind),
+                    ("SpeechNoiseThreshold",tuning.SpeechNoiseThreshold),("MultiThreshold",tuning.MultiThreshold),
+                    ("ObservedMs",environment.DurationMs),("NoiseDbFS",environment.NoiseDb),("ActiveDbFS",environment.ActiveDb),
+                    ("ContrastDb",environment.ContrastDb),("ClippedFraction",environment.ClippedFraction)]);
+                return tuning;
+            });
             Interlocked.Exchange(ref attempt.AsrReadyAt,Environment.TickCount64);
             LogEvent("RecognitionReady",turnId:attempt.Id,fields:[("ElapsedMs",Math.Max(0,attempt.AsrReadyAt-attempt.PressedAt))]);
             SetDiagnostic("Recognizing");
@@ -292,6 +308,7 @@ public sealed partial class AppController : IAsyncDisposable
             // exception to preparation, without mislabelling a transport failure.
             if(preparation?.Exception is {} preparationError&&ExceptionChain(preparationError).Any(x=>ReferenceEquals(x,e)))
                 startStage="PreparingRecognition";
+            audioEnvironmentMemory.Remember("",AudioEnvironment.Empty,Environment.TickCount64);
             string? priorCaptureFailure=e is OperationCanceledException?await OnActor(()=>captureFailure):null;
             if(priorCaptureFailure!=null)startStage="ReadingMicrophone";
             LogEvent("StartFailed",e,turnId,("FailureStage",startStage),("State",state.ToString()),("Cancelled",e is OperationCanceledException));
@@ -335,16 +352,18 @@ public sealed partial class AppController : IAsyncDisposable
         lock(audioFeedbackSync)
         {
             if(!captureReleased)LogEvent("CaptureStopRequested",fields:[("SamplesSent",audio?.SamplesSent??0)]);
+            if(captureAttempt is {} attempt)Interlocked.CompareExchange(ref attempt.StopRequestedAt,Environment.TickCount64,0);
             captureReleased=true;Level?.Invoke(0);
         }
         try{audio?.RequestStop();}catch(Exception e){LogEvent("CaptureStopRequestFailed",e);}
         _=OnActor(()=>{if(state is CaptureState.Connecting or CaptureState.Recording)Notify();});
     }
-    public async Task SetDeliveryAsync(string state,string reason,int accepted=0,string? turnId=null)
+    public async Task SetDeliveryAsync(string state,string reason,int accepted=0,string? turnId=null,bool onlyIfPending=false)
     {
         var session=await OnActor(()=>
         {
             if(engine==null||(turnId!=null&&engine.Session.Id!=turnId))return null;
+            if(onlyIfPending&&engine.Session.DeliveryState!="Pending")return null;
             var current=engine.Session with{DeliveryState=state,DeliveryReason=reason,AcceptedInputEvents=accepted,Revision=engine.Session.Revision+1};
             LogEvent("DeliveryChanged",turnId:turnId,fields:[("State",LogDeliveryState(state)),("AcceptedInputEvents",accepted)]);
             engine.UpdateSession(current);Status(reason);return current;
@@ -371,7 +390,8 @@ public sealed partial class AppController : IAsyncDisposable
                 SetDiagnostic("MicrophoneReady");Notify();
             });
         }
-        if(value>.006f){Interlocked.Exchange(ref lastVoice,Environment.TickCount64);voiceSeen=true;}
+        if(value>(Settings.AdaptiveAsrEnabled && attempt.EnvironmentAnalysis.Snapshot.Usable
+            ? attempt.EnvironmentAnalysis.Snapshot.ActivityThreshold : .006f)){Interlocked.Exchange(ref lastVoice,Environment.TickCount64);voiceSeen=true;}
         Level?.Invoke(Math.Min(1,value*5));
         }
     }
@@ -395,7 +415,7 @@ public sealed partial class AppController : IAsyncDisposable
         var previous=engine.Segments.FirstOrDefault(s=>s.TaskId==e.TaskId&&s.SentenceId==e.SentenceId);
         if(e.Final&&previous?.AsrState!=AsrState.Confirmed)
         {
-            if(captureAttempt is {} currentAttempt)currentAttempt.FinalEvents++;
+            if(captureAttempt is {} currentAttempt){currentAttempt.FinalEvents++;currentAttempt.ConfirmedTextSeen|=!string.IsNullOrWhiteSpace(e.Text);}
             LogEvent("RecognitionFinal",fields:[("Sequence",e.SentenceId),("CharacterCount",e.Text.Length)]);
         }
         if(previous?.AsrState!=AsrState.Confirmed&&(e.Final||e.Text.Length>0&&(previous==null||e.Text!=previous.PartialText)))lastProgress=Environment.TickCount64;
@@ -424,25 +444,39 @@ public sealed partial class AppController : IAsyncDisposable
             await captureGate.WaitAsync(budget.Token);gate=true;
             if(asr==null){await OnActor(()=>{if(state!=CaptureState.Closing)state=requestedPause?CaptureState.Paused:CaptureState.Stopped;Notify();});return;}
             var client=asr;await OnActor(()=>{state=CaptureState.Draining;Status(captureFailure??"正在收齐尾部语音…");});
-            if(emergency){audio?.Abort();client.Abort();gap="系统挂起，尾部可能不完整";}
+            if(emergency){audioEnvironmentMemory.Remember("",AudioEnvironment.Empty,Environment.TickCount64);audio?.Abort();client.Abort();gap="系统挂起，尾部可能不完整";}
             else
             {
                 if(audio!=null)
                 {
                     await audio.StopAsync(budget.Token);
+                    if(captureAttempt is {} stoppingAttempt)Interlocked.Exchange(ref stoppingAttempt.AudioStoppedAt,Environment.TickCount64);
                     string? warning=audio.QualityWarning;
                     await OnActor(()=>captureWarning=warning);
                     if(audio.FailureMessage is {} failure){gap=failure;await OnActor(()=>FailCapture(failure));}
                 }
                 await client.FinishAsync(budget.Token);
+                if(captureAttempt is {} finishingAttempt)
+                {
+                    Interlocked.Exchange(ref finishingAttempt.AsrStoppedAt,Environment.TickCount64);
+                    var environment=finishingAttempt.EnvironmentAnalysis.Snapshot;
+                    audioEnvironmentMemory.Remember(audio?.EndpointId??"",
+                        captureFailure==null && captureWarning==null && finishingAttempt.ConfirmedTextSeen ? environment : AudioEnvironment.Empty,
+                        Environment.TickCount64);
+                    LogEvent("AudioEnvironment",fields:[("Kind",environment.Kind),("ObservedMs",environment.DurationMs),
+                        ("NoiseDbFS",environment.NoiseDb),("ActiveDbFS",environment.ActiveDb),
+                        ("ContrastDb",environment.ContrastDb),("ClippedFraction",environment.ClippedFraction)]);
+                }
             }
         }
-        catch(Exception e){LogEvent("StopFailed",e);gap="连接或收尾超时，尾部可能不完整";CancelToken(startup);audio?.Abort();asr?.Abort();}
+        catch(Exception e){audioEnvironmentMemory.Remember("",AudioEnvironment.Empty,Environment.TickCount64);LogEvent("StopFailed",e);gap="连接或收尾超时，尾部可能不完整";CancelToken(startup);audio?.Abort();asr?.Abort();}
         finally
         {
             try
             {
             samples=audio?.SamplesSent??0;
+            if(audio!=null&&captureAttempt is {} summaryAttempt)
+            {summaryAttempt.SamplesSent=samples;summaryAttempt.MetadataAnomalies=audio.MetadataAnomalies;summaryAttempt.ReportedGapFrames=audio.ReportedGapFrames;}
             string? task=asr?.TaskId;
             if(!gate){await OnActor(()=>{state=CaptureState.Faulted;Status("收尾超时，自动输入已取消。");});}
             else
@@ -491,33 +525,82 @@ public sealed partial class AppController : IAsyncDisposable
             if(allowPolish&&!token.IsCancellationRequested&&Settings.UseLexicon)engine.ApplyConfirmedCorrections(approvedCorrections);
             var protectedTerms=Settings.UseLexicon?Lexicon.Matches(TranscriptText.Render(engine.Segments),terms,engine.Session.ProjectId):[];
             engine.UpdateSession(engine.Session with{ProtectedTermCount=protectedTerms.Length,Revision=engine.Session.Revision+1});
-            var work=engine.Segments.Count==0?null:engine.BeginWholePolish(allowPolish&&!token.IsCancellationRequested&&!expedite.IsCancellationRequested&&Settings.PolishEnabled&&!polishCircuit&&Keys.DeepSeekKey.Length>0,protectedTerms);
+            var work=engine.Segments.Count==0?null:engine.BeginWholePolish(allowPolish&&!token.IsCancellationRequested&&!expedite.IsCancellationRequested&&Settings.PolishEnabled&&!polishCircuit&&Keys.DeepSeekKey.Length>0,protectedTerms,Settings.SmartPunctuationEnabled);
             if(work!=null){Interlocked.Increment(ref activePolish);Status("正在统一润色本次完整输入…");}else Notify();
             return (Source:(TranscriptEngine?)engine,Work:work,Key:Keys.DeepSeekKey,Prompt:Settings.EffectivePolishPrompt);
         });
         if(prepared.Source==null)return;
-        LogEvent("TextProcessingStarted",turnId:turnId,fields:[("PolishRequested",prepared.Work!=null)]);
+        var polishAttempt=captureAttempt?.Id==turnId?captureAttempt:null;
+        if(polishAttempt!=null)Interlocked.Exchange(ref polishAttempt.PolishStartedAt,Environment.TickCount64);
+        int? waitBudget=forDelivery&&Settings.PreferFastDelivery?800:null;
+        string polishOutcome=prepared.Work!=null?"Completed":"NotRequested";
+        LogEvent("TextProcessingStarted",turnId:turnId,fields:[("PolishRequested",prepared.Work!=null),("WaitBudgetMs",waitBudget)]);
         if(prepared.Work is {} work)
         {
             string? result=null,error=null;
-            using var cancelled=CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token,token,expedite);
-            if(forDelivery&&Settings.PreferFastDelivery)cancelled.CancelAfter(TimeSpan.FromSeconds(3));
-            try{result=await deepseek.PolishWholeAsync(work,prepared.Key,prepared.Prompt,cancelled.Token);}
-            catch(Exception e){LogEvent("TextProcessingFailed",e,turnId,("Cancelled",cancelled.IsCancellationRequested));error=cancelled.IsCancellationRequested&&!token.IsCancellationRequested&&!lifetime.IsCancellationRequested?"已优先上屏，保留完整识别正文及已确认纠错。":SafeError(e);}
+            using var budget=new CancellationTokenSource();
+            if(waitBudget.HasValue)budget.CancelAfter(waitBudget.Value);
+            using var cancelled=CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token,token,expedite,budget.Token);
+            Task<string>? request=null;
+            try
+            {
+                request=deepseek.PolishWholeAsync(work,prepared.Key,prepared.Prompt,cancelled.Token);
+                // Bound our wait even if a transport/provider ignores cancellation.
+                result=await request.WaitAsync(cancelled.Token);
+                cancelled.Token.ThrowIfCancellationRequested();
+            }
+            catch(OperationCanceledException) when(cancelled.IsCancellationRequested)
+            {
+                polishOutcome=lifetime.IsCancellationRequested?"Shutdown":token.IsCancellationRequested?"TurnCancelled":
+                    expedite.IsCancellationRequested?"UserExpedite":"WaitBudgetExpired";
+                LogEvent(polishOutcome=="WaitBudgetExpired"?"TextProcessingTimedOut":"TextProcessingCancelled",turnId:turnId,
+                    fields:[("Reason",polishOutcome),("WaitBudgetMs",waitBudget)]);
+                error=polishOutcome is "WaitBudgetExpired" or "UserExpedite"?"已优先上屏，保留完整识别正文及已确认纠错。":"本轮已取消，保留识别正文。";
+            }
+            catch(Exception e)
+            {
+                polishOutcome="ProviderFailure";
+                LogEvent("TextProcessingFailed",e,turnId,("Cancelled",false));error=SafeError(e);
+            }
             finally
             {
+                if(request is {IsCompleted:false})_=ObserveLatePolishAsync(request,turnId);
+                else if(request?.IsFaulted==true)_=request.Exception;
                 await OnActor(()=>{prepared.Source.CompleteWholePolish(work,cancelled.IsCancellationRequested?null:result,error);if(ReferenceEquals(engine,prepared.Source))Status(prepared.Source.Session.WholePolishReason);});
                 Interlocked.Decrement(ref activePolish);
             }
         }
-        var saved=await OnActor(()=>prepared.Source.Session);
+        if(polishAttempt!=null)
+        {polishAttempt.PolishOutcome=polishOutcome;Interlocked.Exchange(ref polishAttempt.PolishFinishedAt,Environment.TickCount64);}
+        var saved=await OnActor(()=>
+        {
+            var source=prepared.Source;
+            if(allowPolish&&!token.IsCancellationRequested&&Settings.SmartPunctuationEnabled&&
+                !source.Segments.Any(s=>s.UserLocked)&&source.Session.Gaps.Count==0)
+            {
+                string text=TranscriptText.Render(source.Session with{OmitTerminalFullStop=false},source.Segments);
+                var protectedTerms=Settings.UseLexicon?Lexicon.Matches(text,terms,source.Session.ProjectId):[];
+                bool omit=SmartPunctuation.Format(text,protectedTerms)!=text;
+                source.UpdateSession(source.Session with{OmitTerminalFullStop=omit,Revision=source.Session.Revision+1});
+                if(ReferenceEquals(engine,source))Notify();
+            }
+            return source.Session;
+        });
         LogEvent("TextProcessingCompleted",turnId:turnId,fields:[("State",saved.WholePolishState is "None" or "Waiting" or "Completed" or "Fallback"?saved.WholePolishState:"Other"),
-            ("ElapsedMs",Math.Max(0,Environment.TickCount64-processingAt))]);
+            ("ElapsedMs",Math.Max(0,Environment.TickCount64-processingAt)),("Outcome",polishOutcome)]);
         if(CanSaveMemory)await SaveSessionSafe(saved);
         // Next StartAsync awaits the repository barrier and refreshes memory.
         // Do not put a redundant vocabulary reload ahead of automatic delivery.
         if(!forDelivery)await RefreshMemoryBeforeRecognitionAsync();
         if(MemoryAvailable&&Settings.AutoExtract&&!token.IsCancellationRequested&&allowPolish)_=AutoExtractWhenReady();
+    }
+    private async Task ObserveLatePolishAsync(Task<string> request,string? turnId)
+    {
+        // Observe completion only. A late result can never update a session,
+        // clipboard or input target, including after the next turn has started.
+        try{await request;LogEvent("LatePolishDiscarded",turnId:turnId,fields:[("Outcome","Completed")]);}
+        catch(OperationCanceledException){LogEvent("LatePolishDiscarded",turnId:turnId,fields:[("Outcome","Cancelled")]);}
+        catch(Exception e){LogEvent("LatePolishDiscarded",e,turnId,("Outcome","Failed"));}
     }
     public Task ParagraphAsync()=>OnActor(()=>{engine?.Paragraph();Status("将在下一个识别片段开始时换段。");});
     public Task EditAsync(string id,string text,string action="编辑")=>OnActor(()=>

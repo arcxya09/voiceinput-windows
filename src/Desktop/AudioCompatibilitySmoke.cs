@@ -12,7 +12,7 @@ internal static class AudioCompatibilitySmoke
     private static void Require(bool ok,string message){if(!ok)throw new InvalidOperationException(message);}
     internal static async Task RunAsync(RuntimeLog log)
     {
-        foreach(string scenario in new[]{"repeat","flag","timestamp-error","backwards","future","gap","tail-stall","device-failure","stop-failure","start-failure"})
+        foreach(string scenario in new[]{"repeat","flag","timestamp-error","backwards","future","gap","tail-stall","device-failure","stop-failure","start-failure","long-stream"})
         {
             var device=new Packets(scenario);
             var completion=new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -23,7 +23,7 @@ internal static class AudioCompatibilitySmoke
                 Require(pointer!=IntPtr.Zero&&count==448,"Native fixture PCM was discarded or incorrectly clipped: "+scenario);
                 Require(Marshal.ReadByte(pointer)==42&&!silent,"Native fixture PCM changed");
                 frames+=count;
-                if(++callbacks==2)capture.RequestStop(); // Includes a stop during a packet lease.
+                if(++callbacks==(scenario=="long-stream"?300:2))capture.RequestStop(); // Includes a stop during a packet lease.
             },e=>completion.TrySetResult(e),log);
             await using(capture)
             {
@@ -44,7 +44,8 @@ internal static class AudioCompatibilitySmoke
                     continue;
                 }
                 Require(error==null,"Recoverable metadata stopped native capture: "+scenario);
-                Require(frames==4*448&&device.Reads==4&&device.Releases==4&&device.Stops==1,
+                int expectedPackets=scenario=="long-stream"?302:4;
+                Require(frames==expectedPackets*448&&device.Reads==expectedPackets&&device.Releases==expectedPackets&&device.Stops==1,
                     "Stop-and-drain lost/duplicated packets or stopped twice: "+scenario);
                 Require(capture.ReportedGapFrames==(scenario=="gap"?448:0),"Incorrect gap accounting: "+scenario);
             }
@@ -79,7 +80,8 @@ internal static class AudioCompatibilitySmoke
         {
             Owned();
             if(scenario=="device-failure"&&Reads==1)throw Failure;
-            return Reads<(Stops==0?2:4)?448:0;
+            int livePackets=scenario=="long-stream"?300:2;
+            return Reads<(Stops==0?livePackets:livePackets+2)?448:0;
         }
         public IntPtr GetBuffer(out int frames,out AudioClientBufferFlags flags,out long position,out long timestamp)
         {

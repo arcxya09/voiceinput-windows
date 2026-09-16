@@ -752,6 +752,23 @@ public static class DesktopSmoke
             await Task.Delay(1850);
             Require(!overlay.AppWindow.IsVisible, "A duplicate completion, in-turn notice or late snapshot restarted the three-second hide timer.");
 
+            source.Start("quick-paste-turn");
+            source.Complete(new("quick-paste-turn", "已发起整段粘贴", "已粘贴正文") { DeliveryState = "PasteSent" });
+            await UntilAsync(() => preview.Text == "已粘贴正文", "Paste completion did not reach the production overlay.");
+            await Task.Delay(850);
+            Require(!overlay.AppWindow.IsVisible, "Successful paste did not dismiss within 850 ms.");
+            source.Complete(new("quick-paste-turn", "重复完成", "不应重新显示") { DeliveryState = "PasteSent" });
+            await Task.Delay(100);
+            Require(!overlay.AppWindow.IsVisible, "A duplicate paste completion reopened the overlay.");
+            source.Start("fade-old-turn");
+            source.Complete(new("fade-old-turn", "已发起整段粘贴", "上一轮") { DeliveryState = "PasteSent" });
+            await UntilAsync(() => preview.Text == "上一轮", "Fade fixture did not appear.");
+            await Task.Delay(500);
+            source.Start("fade-new-turn");
+            await UntilAsync(() => IsPreparingText(preview.Text), "Next turn did not reset a pending fade.");
+            await Task.Delay(350);
+            Require(overlay.AppWindow.IsVisible, "The previous turn's fade hid an active turn.");
+
             const string nextTurn = "next-preview-turn";
             source.Start(nextTurn);
             source.Complete(completed);

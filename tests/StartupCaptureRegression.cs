@@ -13,6 +13,24 @@ static class StartupCaptureRegression
 
     public static async Task Run(Func<string, Func<Task>, Task> test)
     {
+        await test("自适应 ASR：连接期间分析缓冲音频，下一轮复用且 PCM 完整上传", async () =>
+        {
+            var first=new Turn(holdTransport:true);var second=new Turn();
+            await using var f=await Fixture.Create(first,second);
+            var start=f.Start();var capture=await first.StartedCapture();
+            await first.ConnectionEntered.Task.WaitAsync(Budget);
+            var pcm=AdaptiveAsrRegression.Recording(-75,-48);
+            for(int i=0;i<pcm.Length;i+=640)await capture.EmitPcm(pcm.AsSpan(i,640).ToArray());
+            Check(first.Socket.Actions.IsEmpty && first.Socket.Pcm.IsEmpty,"云握手前上传了音频");
+            first.ConnectionRelease.TrySetResult();Check(await start.WaitAsync(Budget),"首轮启动失败");
+            Check(first.Socket.StartParameters.GetProperty("speech_noise_threshold").GetDouble()==-.1,"当前轮未使用轻声参数");
+            await f.App.StopAsync(false).WaitAsync(Budget);
+            Check(first.Socket.Pcm.SelectMany(x=>x).SequenceEqual(pcm),"缓冲音频被丢弃或改写");
+            Check(await f.Start().WaitAsync(Budget),"第二轮启动失败");
+            Check(second.Socket.StartParameters.GetProperty("speech_noise_threshold").GetDouble()==-.1,"近期同设备统计没有接入启动请求");
+            await f.App.StopAsync(false).WaitAsync(Budget);
+        });
+
         await test("启动延迟：麦克风构造期间松键，设备返回后不能补开录音", async () =>
         {
             var turn = new Turn(holdConstruction: true);
@@ -334,27 +352,27 @@ static class StartupCaptureRegression
     public static async Task RunInputCompatibility(Func<string,Func<Task>,Task> test)
     {
         foreach(string scenario in new[]{"consumed-ctrl","no-focus","missing-focus","unavailable-provider","not-editable","read-only","disabled","focus-blip","focus-lost","window-changed","escape","password",
-            "dictation-only","clipboard-busy","paste-blocked","clipboard-changed","empty","incomplete","no-focus-polish","escape-polish","escape-copy","escape-paste","short-press","audio-gap","audio-fault","startup-audio-fault"})
+            "dictation-only","clipboard-busy","paste-blocked","clipboard-changed","empty","incomplete","no-focus-polish","escape-polish","escape-copy","escape-paste","short-press","audio-gap","audio-fault","startup-audio-fault","activity-key","activity-mouse","activity-wheel","activity-startup","activity-queued","activity-password","activity-polish","activity-copy","activity-paste"})
         await test("2.1.8 生产按住说话："+scenario,async()=>
         {
             TextDelivery.Reset();
-            bool polished=scenario is "no-focus-polish" or "escape-polish";
+            bool polished=scenario is "no-focus-polish" or "escape-polish" or "activity-polish";
             bool dictationOnly=scenario=="dictation-only";
             if(scenario is "no-focus" or "no-focus-polish" or "escape-polish")Win32.Target=null;
             if(scenario=="missing-focus")Win32.Target=Win32.Target! with{Focus=IntPtr.Zero};
             if(scenario=="unavailable-provider")TextDelivery.CaptureCode="Unavailable";
             if(scenario=="not-editable")TextDelivery.CaptureCode="NotEditable";
-            if(scenario=="password")TextDelivery.CaptureCode="Password";
+            if(scenario is "password" or "activity-password")TextDelivery.CaptureCode="Password";
             if(scenario=="read-only")TextDelivery.CaptureCode="ReadOnly";
             if(scenario=="disabled")TextDelivery.CaptureCode="Disabled";
             TextDelivery.ClipboardBusy=scenario=="clipboard-busy";
             TextDelivery.BlockPaste=scenario=="paste-blocked";
             TextDelivery.ClipboardChangesBeforePaste=scenario=="clipboard-changed";
-            TextDelivery.PauseBeforeCopy=scenario=="escape-copy";
-            TextDelivery.PauseBeforeSend=scenario=="escape-paste";
+            TextDelivery.PauseBeforeCopy=scenario is "escape-copy" or "activity-copy";
+            TextDelivery.PauseBeforeSend=scenario is "escape-paste" or "activity-paste";
             var polishEntered=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var polishRelease=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            var turn=new Turn();
+            var turn=new Turn(holdConstruction:scenario=="activity-startup");
             if(scenario=="startup-audio-fault")turn.EmitStartFault=true;
             if(scenario=="audio-gap")turn.QualityWarning="麦克风报告音频位置缺口，文字已复制，请核对后手动粘贴。";
             if(scenario=="empty")turn.Socket.FinalText="";
@@ -373,7 +391,21 @@ static class StartupCaptureRegression
             var completed=new TaskCompletionSource<VoiceTurnCompletion>(TaskCreationOptions.RunContinuationsAsynchronously);
             ptt.TurnCompleted+=c=>completed.TrySetResult(c);
             await ptt.InitializeAsync();
+            var downEntered=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var downRelease=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            if(scenario is "activity-queued" or "activity-password")ptt.CanStart=()=>
+            {downEntered.TrySetResult();downRelease.Task.WaitAsync(Budget).GetAwaiter().GetResult();return true;};
             long downAt=Environment.TickCount64;PhysicalHook.Latest!.Emit("down",downAt);
+            if(scenario is "activity-queued" or "activity-password")
+            {
+                await downEntered.Task.WaitAsync(Budget);
+                PhysicalHook.Latest.Emit("activity");downRelease.TrySetResult();
+            }
+            if(scenario=="activity-startup")
+            {
+                await turn.ConstructionEntered.Task.WaitAsync(Budget);
+                PhysicalHook.Latest.Emit("activity");turn.ConstructionRelease.TrySetResult();
+            }
             if(scenario=="short-press")
             {
                 // Explicit event times reproduce a real short press without depending on task scheduling.
@@ -390,7 +422,7 @@ static class StartupCaptureRegression
                 Check(TextDelivery.CopyAttempts==0&&TextDelivery.Sends==0&&turn.Socket.Pcm.IsEmpty,"启动故障仍复制或上传。");
                 return;
             }
-            if(scenario=="password")
+            if(scenario is "password" or "activity-password")
             {
                 var denied=await completed.Task.WaitAsync(Budget);
                 Check(denied.DeliveryState=="StartFailed"&&denied.Status.Contains("密码"),"密码拒绝原因被取消/无文字掩盖。");
@@ -411,6 +443,12 @@ static class StartupCaptureRegression
                 Check(CapsulePresentation.CompletionLabel(failed.DeliveryState)=="识别失败"&&TextDelivery.CopyAttempts==0&&TextDelivery.Sends==0,"故障状态或投递门禁错误。");
                 return;
             }
+            if(scenario is "activity-key" or "activity-mouse" or "activity-wheel")
+            {
+                string category=scenario=="activity-key"?"Keyboard":scenario=="activity-mouse"?"MouseButton":"MouseWheel";
+                // Exercise repeated input and sticky downgrade without canceling audio.
+                for(int count=0;count<8;count++)PhysicalHook.Latest.Emit("activity",inputCategory:category);
+            }
             if(scenario is "focus-blip" or "focus-lost")Win32.Focus=FocusObservation.Changed;
             if(scenario=="window-changed")Win32.Window=FocusObservation.Changed;
             if(scenario=="focus-blip")
@@ -420,8 +458,8 @@ static class StartupCaptureRegression
             await Task.Delay(scenario=="focus-lost"?1300:700);
             Check(!completed.Task.IsCompleted&&ptt.Busy&&!capture.StopRequested,"未收到真实松键或取消就中断录音。");
             Check(TextDelivery.CopyAttempts==0&&TextDelivery.Sends==0,"仍在录音时提前复制或上屏。");
-            bool manual=scenario is "audio-gap" or "no-focus" or "missing-focus" or "read-only" or "disabled" or "focus-lost" or "window-changed" or "dictation-only" or "no-focus-polish" or "escape-polish";
-            if(manual&&!dictationOnly&&scenario!="audio-gap")
+            bool manual=scenario.StartsWith("activity-")||scenario is "audio-gap" or "no-focus" or "missing-focus" or "read-only" or "disabled" or "focus-lost" or "window-changed" or "dictation-only" or "no-focus-polish" or "escape-polish";
+            if(manual&&!dictationOnly&&scenario is not ("audio-gap" or "activity-polish" or "activity-copy" or "activity-paste"))
             {
                 var snapshot=await fixture.App.SnapshotAsync();
                 Check(snapshot.Session!.DeliveryReason.Contains("自动复制"),"兼容降级未给出完成后复制提示。");
@@ -434,7 +472,11 @@ static class StartupCaptureRegression
                 await polishEntered.Task.WaitAsync(Budget);
                 Check(capture.StopRequested&&!completed.Task.IsCompleted&&TextDelivery.CopyAttempts==0,"全文润色尚未结束就复制或完成。");
                 if(scenario=="escape-polish")PhysicalHook.Latest.Emit("escape");
-                else polishRelease.TrySetResult();
+                else
+                {
+                    if(scenario=="activity-polish")PhysicalHook.Latest.Emit("activity");
+                    polishRelease.TrySetResult();
+                }
             }
             bool cancelDuringDelivery=scenario is "escape-copy" or "escape-paste";
             if(cancelDuringDelivery)
@@ -449,10 +491,18 @@ static class StartupCaptureRegression
                 await TextDelivery.CancellationObserved.Task.WaitAsync(Budget);
                 (beforeCopy?TextDelivery.CopyRelease:TextDelivery.SendRelease).TrySetResult();
             }
+            if(scenario is "activity-copy" or "activity-paste")
+            {
+                bool beforeCopy=scenario=="activity-copy";
+                await (beforeCopy?TextDelivery.CopyEntered:TextDelivery.SendEntered).Task.WaitAsync(Budget);
+                PhysicalHook.Latest.Emit("activity",inputCategory:"MouseButton");
+                (beforeCopy?TextDelivery.CopyRelease:TextDelivery.SendRelease).TrySetResult();
+            }
             var result=await completed.Task.WaitAsync(Budget);
             bool cancelledResult=scenario is "escape" or "escape-polish" or "escape-copy" or "escape-paste";
             if(cancelDuringDelivery)Check(result.Status=="本轮输入已取消。","复制/粘贴的边界结果覆盖了原始Esc取消原因："+result.Status);
-            string expectedText=scenario=="empty"?"":scenario=="no-focus-polish"?"这个方案我们先试一下。":turn.Socket.FinalText;
+            string expectedText=scenario=="empty"?"":scenario is "no-focus-polish" or "activity-polish"?"这个方案我们先试一下。":turn.Socket.FinalText;
+            if((!cancelledResult||cancelDuringDelivery)&&scenario!="incomplete")expectedText=SmartPunctuation.Format(expectedText);
             Check(result.Text==expectedText,"收尾正文丢失或未采用完整润色："+result.Text);
             string expectedState=cancelledResult?"Cancelled":scenario=="empty"?"Empty":scenario is "incomplete" or "clipboard-changed"?"Blocked":scenario=="clipboard-busy"?"CopyFailed":manual||scenario=="paste-blocked"?"Copied":"PasteSent";
             if(scenario=="audio-gap")Check(result.Status.Contains("音频位置缺口"),"缺口核对提示丢失。");
@@ -464,6 +514,48 @@ static class StartupCaptureRegression
             bool shouldPaste=copied&&!cancelledResult&&!manual&&scenario is not ("paste-blocked" or "clipboard-changed");
             Check(TextDelivery.Sends==(shouldPaste?1:0)&&TextDelivery.SentText==(shouldPaste?expectedText:""),"兼容降级后误投递、重复投递或正文不一致。");
             Check(polishCalls==(polished?1:0),"无焦点流程跳过润色或重复请求。");
+            await fixture.App.Log.FlushAsync();
+            var export=Path.Combine(Path.GetTempPath(),"VoiceInput-summary-"+Guid.NewGuid().ToString("N")+".log");
+            try
+            {
+                await fixture.App.Log.ExportAsync(export);
+                var entries=File.ReadAllLines(export).Select(line=>System.Text.Json.JsonDocument.Parse(line)).ToArray();
+                try
+                {
+                    var summaries=entries.Select(d=>d.RootElement).Where(e=>e.GetProperty("event").GetString()=="TurnSummary").ToArray();
+                    Check(summaries.Length==1&&summaries[0].GetProperty("fields").GetProperty("State").GetString()==expectedState,"最终汇总遗漏或重复。");
+                    if(scenario=="activity-polish")Check(!entries.Any(d=>d.RootElement.GetProperty("event").GetString() is "TextProcessingCancelled" or "TextProcessingFailed"),"普通操作仍取消润色。");
+                    if(scenario=="escape-polish")Check(entries.Any(d=>d.RootElement.GetProperty("event").GetString()=="TextProcessingCancelled")&&!entries.Any(d=>d.RootElement.GetProperty("event").GetString()=="TextProcessingFailed"),"明确取消仍误记为故障。");
+                }
+                finally{foreach(var doc in entries)doc.Dispose();}
+            }
+            finally{File.Delete(export);}
+        });
+    }
+
+    public static async Task RunRepeatedInput(Func<string,Func<Task>,Task> test)
+    {
+        await test("2.1.12 连续20轮快速录音无残留取消状态或重复投递",async()=>
+        {
+            var turns=Enumerable.Range(0,20).Select(_=>new Turn()).ToArray();
+            await using var fixture=await Fixture.Create(turns);
+            await fixture.App.SaveSettingsAsync(fixture.App.Settings with{DictationOnly=false},fixture.App.Keys);
+            await using var ptt=new PushToTalkService(fixture.App);await ptt.InitializeAsync();
+            var results=System.Threading.Channels.Channel.CreateUnbounded<VoiceTurnCompletion>();
+            ptt.TurnCompleted+=r=>results.Writer.TryWrite(r);
+            for(int i=0;i<turns.Length;i++)
+            {
+                TextDelivery.Reset();long downAt=Environment.TickCount64-1000;
+                PhysicalHook.Latest!.Emit("down",downAt);
+                var capture=await turns[i].StartedCapture();await capture.EmitFrame(.04f);
+                await turns[i].Socket.FirstPcm.Task.WaitAsync(Budget);
+                if(i%2==0)PhysicalHook.Latest.Emit("activity");
+                PhysicalHook.Latest.Emit("up");
+                var result=await results.Reader.ReadAsync().AsTask().WaitAsync(Budget);
+                Check(result.DeliveryState==(i%2==0?"Copied":"PasteSent")&&TextDelivery.Copies==1&&TextDelivery.Sends==(i%2==0?0:1),"连续录音污染后一轮或重复投递");
+                using var deadline=new CancellationTokenSource(Budget);
+                while(ptt.Busy)await Task.Delay(5,deadline.Token);
+            }
         });
     }
 
@@ -527,6 +619,7 @@ static class StartupCaptureRegression
             if (!StopRequested) Interlocked.Increment(ref recordingStarts);
             Started.TrySetResult();
         }
+        internal async Task EmitPcm(byte[] pcm) { await send(pcm,CancellationToken.None); Interlocked.Add(ref samplesSent,pcm.Length/2); }
         internal async Task EmitFrame(float value)
         {
             Check(RecordingStarts > 0 && !StopRequested && !Disposed, "测试试图让非录音设备生成音频。");
