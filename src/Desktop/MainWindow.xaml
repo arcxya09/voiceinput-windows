@@ -477,6 +477,9 @@
                                         <TextBox x:Name="WorkspaceBox" Grid.Column="1" Header="Workspace ID" PlaceholderText="业务空间 ID"/>
                                     </Grid>
                                     <CheckBox x:Name="LegacyBox"><TextBlock Text="使用兼容地址（无需 Workspace ID）" TextWrapping="Wrap"/></CheckBox>
+                                    <CheckBox x:Name="AdaptiveAsrBox" Content="根据音量和背景噪声自动调整识别灵敏度"/>
+                                    <CheckBox x:Name="SmartPunctuationBox" Content="智能标点：短输入省略句末句号"/>
+                                    <TextBlock Text="适用于单词、短语和简短单句；保留问号、感叹号、多句及专业符号。关闭润色或润色超时也会生效。" Style="{StaticResource SecondaryText}"/>
                                     <Button x:Name="TestBailianButton" Content="保存设置并测试百炼" Click="TestBailian_Click"/>
                                 </StackPanel>
                             </Border>
@@ -487,7 +490,7 @@
                                     <PasswordBox x:Name="DeepSeekKeyBox" Header="API Key" PasswordRevealMode="Peek"/>
                                     <CheckBox x:Name="PolishBox" Content="启用轻量润色"/>
                                     <CheckBox x:Name="FastDeliveryBox" Content="优先快速上屏"/>
-                                    <TextBlock Text="自动上屏最多等待润色 3 秒，超时使用完整识别正文及已确认纠错；关闭后等待完整润色。松手后回车加速、Esc 取消。" Style="{StaticResource SecondaryText}"/>
+                                    <TextBlock Text="自动复制或上屏最多等待润色 0.8 秒，超时使用完整识别正文及已确认纠错；关闭后等待完整润色。松手后回车加速、Esc 取消。" Style="{StaticResource SecondaryText}"/>
                                     <CheckBox x:Name="PreviousBox" Visibility="Collapsed" Content="旧版分片上下文设置"/>
                                     <Button x:Name="TestDeepSeekButton" Content="保存设置并测试 DeepSeek" Click="TestDeepSeek_Click"/>
                                     <TextBlock Text="连接测试会发起少量 API 调用。deepseek-flash 使用非思考模式，仅返回整理后的正文。" Style="{StaticResource SecondaryText}"/>

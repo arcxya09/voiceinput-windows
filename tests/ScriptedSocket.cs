@@ -10,6 +10,7 @@ sealed class ScriptedSocket : WebSocket
     private WebSocketState state=WebSocketState.Open;
     private string taskId="";
     public string? RejectCode;
+    public JsonElement StartParameters;
     public string FinalText="完整结果。";
     public bool IncompleteTail;
     public readonly ConcurrentQueue<byte[]> Pcm=[];
@@ -42,7 +43,7 @@ sealed class ScriptedSocket : WebSocket
         {
             using var doc=JsonDocument.Parse(buffer.AsMemory());var h=doc.RootElement.GetProperty("header");
             taskId=h.GetProperty("task_id").GetString()!;string action=h.GetProperty("action").GetString()!;Actions.Enqueue(action);
-            if(action=="run-task")Emit(RejectCode==null?"task-started":"task-failed",new{},RejectCode);
+            if(action=="run-task"){StartParameters=doc.RootElement.GetProperty("payload").GetProperty("parameters").Clone();Emit(RejectCode==null?"task-started":"task-failed",new{},RejectCode);}
             if(action=="finish-task")
             {
                 Emit("result-generated",new{output=new{sentence=new{sentence_id=1,text=FinalText,sentence_end=true,begin_time=0,end_time=850}},usage=new{duration=1}});

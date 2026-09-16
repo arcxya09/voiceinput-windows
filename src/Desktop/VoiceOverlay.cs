@@ -177,7 +177,11 @@ public sealed class VoiceOverlay : Window
         if (!AppWindow.IsVisible) AppWindow.Show(false);
         Position();
         topmost.Start();
-        if (dismiss && persistentWarning.Length == 0) hide.Start();
+        if (dismiss)
+        {
+            hide.Interval = CapsulePresentation.CompletionDuration(deliveryState);
+            if (persistentWarning.Length == 0) hide.Start();
+        }
     }
 
     public void SetPersistentWarning(string text)

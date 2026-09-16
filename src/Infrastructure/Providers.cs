@@ -14,9 +14,16 @@ public sealed class ProviderException(string message, bool retry = false, int re
 public static class BailianProtocol
 {
     public const string Model = "qwen-audio-3.0-asr-flash-streaming";
-    public static byte[] Start(string taskId, AppSettings options, IReadOnlyList<TermData> terms)
+    public static byte[] Start(string taskId, AppSettings options, IReadOnlyList<TermData> terms, AsrTuning? tuning = null)
     {
-        var parameters = new Dictionary<string, object> { ["format"] = "pcm", ["sample_rate"] = 16000, ["language_hints"] = new[] { "zh", "en" }, ["semantic_punctuation_enabled"] = false, ["max_sentence_silence"] = options.SilenceMs, ["multi_threshold_mode_enabled"] = false, ["heartbeat"] = true };
+        // semantic_punctuation_enabled selects sentence segmentation, not punctuation removal.
+        // Keep interactive VAD; short-input punctuation is handled after the whole turn completes.
+        var parameters = new Dictionary<string, object> { ["format"] = "pcm", ["sample_rate"] = 16000, ["language_hints"] = new[] { "zh", "en" }, ["semantic_punctuation_enabled"] = false, ["max_sentence_silence"] = options.SilenceMs, ["multi_threshold_mode_enabled"] = options.AdaptiveAsrEnabled && tuning?.MultiThreshold == true, ["heartbeat"] = true };
+        if (options.AdaptiveAsrEnabled && tuning?.SpeechNoiseThreshold is double threshold)
+        {
+            if (!double.IsFinite(threshold) || threshold is < -1 or > 1) throw new ArgumentOutOfRangeException(nameof(tuning));
+            parameters["speech_noise_threshold"] = threshold;
+        }
         if (terms.Count > 0) parameters["vocabulary"] = terms.ToDictionary(t => t.Text, t => t.Weight);
         object input = options.AsrContext && terms.Count > 0 ? new { context = Context(Lexicon.Context(terms)) } : new { };
         return JsonSerializer.SerializeToUtf8Bytes(new { header = new { action = "run-task", task_id = taskId, streaming = "duplex" }, payload = new { task_group = "audio", task = "asr", function = "recognition", model = Model, parameters, input } });
@@ -104,7 +111,7 @@ public sealed class BailianClient : IAsyncDisposable
     public Task StartAsync(AppSettings options, string key, IReadOnlyList<TermData> terms, CancellationToken token)
         => StartPreparedAsync(options, key, Task.FromResult(terms), token);
 
-    public async Task StartPreparedAsync(AppSettings options, string key, Task<IReadOnlyList<TermData>> terms, CancellationToken token)
+    public async Task StartPreparedAsync(AppSettings options, string key, Task<IReadOnlyList<TermData>> terms, CancellationToken token, Func<AsrTuning>? resolveTuning = null)
     {
         ArgumentNullException.ThrowIfNull(terms);
         Observe(terms);
@@ -136,7 +143,7 @@ public sealed class BailianClient : IAsyncDisposable
             preparing = false;
             startup.Token.ThrowIfCancellationRequested();
             receiveTask = ReceiveLoop();
-            await socket.SendAsync(BailianProtocol.Start(TaskId, options, selected).AsMemory(), WebSocketMessageType.Text, true, startup.Token);
+            await socket.SendAsync(BailianProtocol.Start(TaskId, options, selected, resolveTuning?.Invoke()).AsMemory(), WebSocketMessageType.Text, true, startup.Token);
             sendTask = SendLoop();
             await started.Task.WaitAsync(TimeSpan.FromSeconds(5), startup.Token).ConfigureAwait(false);
         }
@@ -287,7 +294,7 @@ category 只能为人名、机构、地名、专业术语、产品型号、固�
         return JsonSerializer.SerializeToUtf8Bytes(body);
     }
     public Task<string> PolishWholeAsync(WholePolishWork work,string key,string prompt,CancellationToken token)
-        =>CallAsync(PolishRules.ResolvePrompt(prompt),new{current_text=work.Raw,protected_terms=work.ProtectedTerms},false,work.MaxTokens,"polish",key,(int)Math.Max(1,work.Deadline-Environment.TickCount64),token);
+        =>CallAsync(PolishRules.ResolvePrompt(prompt)+(work.SmartPunctuationEnabled?"":"\n本轮已关闭短输入省略句末句号：保留原有句末句号，不删除。"),new{current_text=work.Raw,protected_terms=work.ProtectedTerms},false,work.MaxTokens,"polish",key,(int)Math.Max(1,work.Deadline-Environment.TickCount64),token);
     public async Task<string> PolishAsync(PolishWork work, string key, CancellationToken token,string? systemPrompt=null)
     {
         string prompt=PolishRules.ResolvePrompt(systemPrompt);

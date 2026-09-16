@@ -246,7 +246,7 @@ public sealed partial class TranscriptEngine
             history = history.Take(cursor + 1).ToList(); history.Add(new(text, deleted, corrections)); cursor++;
         }
         if (action is not ("撤销" or "恢复原文") && JsonCodec.Count(text) > 20000) throw new ArgumentException("单段编辑超过 20,000 字。");
-        Session=Session with{WholePolishState="Fallback",WholePolishText="",WholePolishReason="原始片段已编辑，使用编辑后的正文",WholePolishOperation=Session.WholePolishOperation+1,Revision=Session.Revision+1};
+        Session=Session with{OmitTerminalFullStop=false,WholePolishState="Fallback",WholePolishText="",WholePolishReason="原始片段已编辑，使用编辑后的正文",WholePolishOperation=Session.WholePolishOperation+1,Revision=Session.Revision+1};
         RefreshAppliedCorrectionSummary(id, text, deleted);
         long edit = s.EditRevision + 1;
         s = s with { FinalText = text, UserLocked = true, Operation = s.Operation + 1, EditRevision = edit, Revision = s.Revision + 1, OutputState = deleted ? OutputState.Deleted : OutputState.Published, Reason = action, Edits = [.. s.Edits, new EditVersion(edit, text, action, DateTimeOffset.UtcNow)], UndoHistory = history, UndoPosition = cursor };

@@ -277,7 +277,7 @@ sealed class ControllerFixture:IAsyncDisposable
     public static async Task<ControllerFixture> Create(Func<HttpRequestMessage,CancellationToken,Task<HttpResponseMessage>>? handler=null)
     {
         var f=new ControllerFixture();f.handler=handler??((_,_)=>throw new Exception("Unexpected cloud request"));
-        new SettingsStore(f.folder,f.Protector).Save(new(){LegacyEndpoint=true,DailyExtractionTokens=1000000},new("TEST_ONLY","TEST_ONLY"));await f.Open();return f;
+        new SettingsStore(f.folder,f.Protector).Save(new(){LegacyEndpoint=true,DailyExtractionTokens=1000000,SmartPunctuationEnabled=false},new("TEST_ONLY","TEST_ONLY"));await f.Open();return f;
     }
     async Task Open(){App=new(folder,Protector,new RegressionHandler((r,t)=>{Interlocked.Increment(ref Calls);return handler(r,t);}));await App.InitializeAsync();}
     public async Task Reopen(){await App.DisposeAsync();await Open();}
