@@ -523,8 +523,11 @@
                                     <local:ResponsivePanel Spacing="8">
                                         <Button x:Name="TestMicrophoneButton" Content="本地麦克风测试（3 秒）" Click="TestMicrophone_Click"/>
                                         <Button Content="查看录音诊断" Click="Diagnostics_Click"/>
+                                        <Button x:Name="ExportLogButton" Content="导出运行日志" Click="ExportLog_Click"/>
                                     </local:ResponsivePanel>
                                     <TextBlock Text="已选设备断开或失效时，临时使用 Windows 默认通信麦克风。麦克风测试不上传音频。启动失败后请先查看录音诊断，再运行测试；诊断不包含 Key、录音或识别正文。" Style="{StaticResource SecondaryText}"/>
+                                    <TextBlock x:Name="LogStatusText" Text="正在准备运行日志…" Style="{StaticResource SecondaryText}"/>
+                                    <TextBlock Text="日志自动记录启动、设备、识别和上屏过程，保留最近 7 天、最多 10 个文件。导出为一个 .log 文件，不包含 Key、录音或识别正文。" Style="{StaticResource SecondaryText}"/>
                                     <Grid ColumnSpacing="16" RowSpacing="12">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="*"/>

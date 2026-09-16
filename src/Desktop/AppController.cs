@@ -10,6 +10,8 @@ namespace RealtimeTranscription.Desktop;
 public sealed partial class AppController : IAsyncDisposable
 {
     public readonly MemoryRepository Repository;
+    public RuntimeLog Log { get; }
+    private readonly bool ownsLog;
     private readonly SettingsStore settingsStore;
     private readonly DeepSeekClient deepseek;
     private readonly Channel<Action> events = Channel.CreateBounded<Action>(4096);
@@ -26,7 +28,8 @@ public sealed partial class AppController : IAsyncDisposable
     {
         public readonly string Id=id;
         public readonly long PressedAt=pressedAt;
-        public long FirstAudioAt,AsrReadyAt;
+        public long FirstAudioAt,AsrReadyAt,FirstRecognitionAt;
+        public int RecognitionEvents,FinalEvents;
         public string Timing
         {
             get
@@ -41,6 +44,7 @@ public sealed partial class AppController : IAsyncDisposable
     private void SetDiagnostic(string stage,Exception? error=null,string? detail=null)
     {
         lock(diagnosticSync)diagnostic=$"VoiceInput {typeof(AppController).Assembly.GetName().Version?.ToString(3)}\n时间：{DateTimeOffset.Now:O}\n阶段：{stage}（{StageLabel(stage)}）\n{detail??audio?.FormatDescription??"音频格式尚未读取"}\n{ExceptionMetadata(error)}";
+        LogDiagnostic(stage,error);
     }
     private void FailCapture(string text)
     {
@@ -51,8 +55,7 @@ public sealed partial class AppController : IAsyncDisposable
     }
     private BailianClient? asr;
     private IAudioCapture? audio;
-    private readonly Func<string,Func<byte[],CancellationToken,ValueTask>,Action<string>,Action<float>,IAudioCapture> captureFactory
-        = (device,send,fault,level)=>new AudioCapture(device,send,fault,level);
+    private readonly Func<string,Func<byte[],CancellationToken,ValueTask>,Action<string>,Action<float>,IAudioCapture> captureFactory;
     private readonly Func<Func<AsrEvent,Task>,BailianClient> clientFactory=receive=>new BailianClient(receive);
     private CancellationTokenSource? startup, extraction, generation;
     private readonly object stopSync = new();
@@ -86,10 +89,12 @@ public sealed partial class AppController : IAsyncDisposable
     public event Action<string>? Message;
     public event Action<string>? InputInterrupted;
     public event Action<bool>? Extracting;
-    public AppController(string folder,IProtector? protector=null,HttpMessageHandler? provider=null)
+    public AppController(string folder,IProtector? protector=null,HttpMessageHandler? provider=null,RuntimeLog? log=null)
     {
+        Log=log??new RuntimeLog(Path.Combine(folder,"logs"));ownsLog=log==null;
+        captureFactory=(device,send,fault,level)=>new AudioCapture(device,send,fault,level,Log,captureAttempt?.Id);
         protector??=new WindowsProtector();deepseek=new(provider);settingsStore = new(folder,protector); Repository = new(Path.Combine(folder,"sessions.db"),protector);
-        eventLoop = Task.Run(async()=>{await foreach(var action in events.Reader.ReadAllAsync()){try{action();}catch{Message?.Invoke("操作未完成，已保留现有文字。");}}});
+        eventLoop = Task.Run(async()=>{await foreach(var action in events.Reader.ReadAllAsync()){try{action();}catch(Exception e){LogEvent("ActorFailed",e);Message?.Invoke("操作未完成，已保留现有文字。");}}});
         timer = Task.Run(TimerLoop);
         maintenance = Task.Run(MaintenanceLoop);
         deepseek.Used += u => { _ = RecordUsage(u); };
@@ -98,7 +103,7 @@ public sealed partial class AppController : IAsyncDisposable
     // audio source and wire. Normal application construction retains native audio.
     internal AppController(string folder,IProtector? protector,HttpMessageHandler? provider,
         Func<string,Func<byte[],CancellationToken,ValueTask>,Action<string>,Action<float>,IAudioCapture> captureFactory,
-        Func<Func<AsrEvent,Task>,BailianClient> clientFactory):this(folder,protector,provider)
+        Func<Func<AsrEvent,Task>,BailianClient> clientFactory,RuntimeLog? log=null):this(folder,protector,provider,log)
     {this.captureFactory=captureFactory;this.clientFactory=clientFactory;}
     private async Task RecordUsage(UsageData u){if(!MemoryAvailable)return;try{await Repository.SaveUsageAsync(u);}catch{}}
     private async Task<T> OnActor<T>(Func<T> fn)
@@ -148,7 +153,8 @@ public sealed partial class AppController : IAsyncDisposable
     {
         bool ok=true;
         var options=Settings;
-        try{await Repository.SaveSegmentAsync(session,s,options.SaveMemory&&options.AllowLearning&&options.LearnCorrections,options.SaveMemory&&options.AllowLearning&&options.DynamicLexicon);}catch{ok=false;}
+        try{await Repository.SaveSegmentAsync(session,s,options.SaveMemory&&options.AllowLearning&&options.LearnCorrections,options.SaveMemory&&options.AllowLearning&&options.DynamicLexicon);}
+        catch(Exception e){ok=false;LogEvent("PersistenceFailed",e,session.Id,("Operation","SaveSegment"),("Sequence",s.SentenceId),("Revision",s.Revision));}
         await OnActor(()=>
         {
             if(IsForgotten(session))return;
@@ -167,14 +173,21 @@ public sealed partial class AppController : IAsyncDisposable
     }
     public async Task InitializeAsync()
     {
+        LogEvent("InitializeStarted");
+        try
+        {
         var loaded=await Task.Run(settingsStore.LoadForStartup);
         Settings=loaded.Settings;Keys=loaded.Credentials;StartupWarning=loaded.Warning;
+        if(loaded.Warning!=null)LogEvent("ConfigurationRecovery",fields:[("Reason","UnreadableConfiguration")]);
         await InitializeMemoryAsync();
         await OnActor(()=>
         {
             string readiness=Keys.BailianKey.Length==0?"请先在设置中填写百炼 Key。":!MemoryAvailable?MemoryStatus:$"准备就绪。按住 {HotkeyLabel} 说话，松开后{(Settings.DictationOnly?"自动复制结果":"输入")}。";
             Status(StartupWarning is { } warning ? warning + (!MemoryAvailable ? "\n" + MemoryStatus : "") : readiness);
         });
+        LogEvent("InitializeCompleted",fields:[("MemoryAvailable",MemoryAvailable),("ConfigurationRecovered",loaded.Warning!=null)]);
+        }
+        catch(Exception e){LogEvent("InitializeFailed",e);throw;}
     }
     private async Task ReloadTerms()
     {
@@ -199,12 +212,15 @@ public sealed partial class AppController : IAsyncDisposable
         await OnActor(()=>{Settings=options;Keys=keys;StartupWarning=null;polishCircuit=false;knowledgeEpoch++;CancelToken(extraction);engine?.SetMemoryState(CanSaveMemory);Status("设置已保存。");});
         await MaintainMemoryAsync();await ReloadTerms();
         }
+        catch(Exception e){LogEvent("SettingsSaveFailed",e);throw;}
         finally{settingsGate.Release();}
     }
     public async Task ChangeProjectAsync(string id)
     {
         await StopAsync(false);await OnActor(()=>{engine?.FinishAll();engine=null;Settings=Settings with{ProjectId=id};knowledgeEpoch++;state=CaptureState.Idle;Status("已切换项目。");});
-        await Task.Run(()=>settingsStore.Save(Settings,Keys));await ReloadTerms();
+        try{await Task.Run(()=>settingsStore.Save(Settings,Keys));}
+        catch(Exception e){LogEvent("SettingsSaveFailed",e);throw;}
+        await ReloadTerms();
     }
     public async Task CreateProjectAsync(string name)
     {
@@ -221,7 +237,7 @@ public sealed partial class AppController : IAsyncDisposable
         try
         {
             var allowed=await OnActor(()=>state is not (CaptureState.Recording or CaptureState.Connecting or CaptureState.Draining or CaptureState.Closing));
-            if(!allowed)return false;
+            if(!allowed){LogEvent("StartRejected",turnId:turnId,fields:[("Reason","CaptureBusy")]);return false;}
             var attempt=new CaptureAttempt(turnId,pressedAt);
             await OnActor(()=>{captureAttempt=attempt;captureFailure=null;});
             Stage("Configuration");
@@ -263,6 +279,7 @@ public sealed partial class AppController : IAsyncDisposable
             Stage("ConnectingRecognition");
             await client.StartPreparedAsync(Settings,Keys.BailianKey,preparation,startupToken);
             Interlocked.Exchange(ref attempt.AsrReadyAt,Environment.TickCount64);
+            LogEvent("RecognitionReady",turnId:attempt.Id,fields:[("ElapsedMs",Math.Max(0,attempt.AsrReadyAt-attempt.PressedAt))]);
             SetDiagnostic("Recognizing");
             await OnActor(()=>engine!.UpdateSession(engine.Session with{HotwordState=!Settings.UseLexicon?"Disabled":MemoryAvailable?"Sent":"Unavailable",Revision=engine.Session.Revision+1}));
             await OnActor(()=>{state=captureReleased?CaptureState.Draining:CaptureState.Recording;Status(captureReleased?"录音已停止，正在收齐尾句…":Settings.DictationOnly?"正在听 · 松开后自动复制，Esc 取消。":"正在听 · 松开快捷键后输入，Esc 取消。");});
@@ -274,6 +291,7 @@ public sealed partial class AppController : IAsyncDisposable
             // exception to preparation, without mislabelling a transport failure.
             if(preparation?.Exception is {} preparationError&&ExceptionChain(preparationError).Any(x=>ReferenceEquals(x,e)))
                 startStage="PreparingRecognition";
+            LogEvent("StartFailed",e,turnId,("FailureStage",startStage),("State",state.ToString()),("Cancelled",e is OperationCanceledException));
             string error=IsMicrophoneStage(startStage)?MicrophoneError(e,startStage):asr?.FailureMessage??SafeError(e);
             string audioDetail=audio?.Diagnostic.Length>0?audio.Diagnostic:audio?.FormatDescription??"音频格式尚未读取";
             CancelToken(startup);
@@ -311,8 +329,12 @@ public sealed partial class AppController : IAsyncDisposable
     }
     public void RequestStopCapture()
     {
-        lock(audioFeedbackSync){captureReleased=true;Level?.Invoke(0);}
-        try{audio?.RequestStop();}catch{}
+        lock(audioFeedbackSync)
+        {
+            if(!captureReleased)LogEvent("CaptureStopRequested",fields:[("SamplesSent",audio?.SamplesSent??0)]);
+            captureReleased=true;Level?.Invoke(0);
+        }
+        try{audio?.RequestStop();}catch(Exception e){LogEvent("CaptureStopRequestFailed",e);}
         _=OnActor(()=>{if(state is CaptureState.Connecting or CaptureState.Recording)Notify();});
     }
     public async Task SetDeliveryAsync(string state,string reason,int accepted=0,string? turnId=null)
@@ -321,6 +343,7 @@ public sealed partial class AppController : IAsyncDisposable
         {
             if(engine==null||(turnId!=null&&engine.Session.Id!=turnId))return null;
             var current=engine.Session with{DeliveryState=state,DeliveryReason=reason,AcceptedInputEvents=accepted,Revision=engine.Session.Revision+1};
+            LogEvent("DeliveryChanged",turnId:turnId,fields:[("State",LogDeliveryState(state)),("AcceptedInputEvents",accepted)]);
             engine.UpdateSession(current);Status(reason);return current;
         });
         if(session!=null&&CanSaveMemory)await SaveSessionSafe(session);
@@ -337,6 +360,7 @@ public sealed partial class AppController : IAsyncDisposable
         if(!ReferenceEquals(captureAttempt,attempt)||asr?.TaskId!=taskId||captureReleased||captureFailure!=null)return;
         if(Interlocked.CompareExchange(ref attempt.FirstAudioAt,Environment.TickCount64,0)==0)
         {
+            LogEvent("FirstAudioFrame",turnId:attempt.Id,fields:[("ElapsedMs",Math.Max(0,attempt.FirstAudioAt-attempt.PressedAt))]);
             _=OnActor(()=>
             {
                 if(!ReferenceEquals(captureAttempt,attempt)||asr?.TaskId!=taskId||captureReleased||captureFailure!=null
@@ -352,11 +376,25 @@ public sealed partial class AppController : IAsyncDisposable
     {
         if(asr?.TaskId!=e.TaskId||engine==null)return;
         lastResponse=Environment.TickCount64;
+        if(captureAttempt is {} attempt)
+        {
+            attempt.RecognitionEvents++;
+            if(attempt.FirstRecognitionAt==0)
+            {
+                attempt.FirstRecognitionAt=lastResponse;
+                LogEvent("RecognitionFirstEvent",turnId:attempt.Id,fields:[("ElapsedMs",Math.Max(0,lastResponse-attempt.PressedAt))]);
+            }
+        }
         if(e.Duration.HasValue)billedSeconds=Math.Max(billedSeconds,e.Duration.Value);
-        if(e.Event=="connection-failed"){SetDiagnostic("AsrFailed",detail:e.Error);FailCapture(e.Error);_=StopAsync(true);return;}
+        if(e.Event=="connection-failed"){LogEvent("RecognitionFailed",fields:[("Reason","ConnectionFailed")]);SetDiagnostic("AsrFailed",detail:e.Error);FailCapture(e.Error);_=StopAsync(true);return;}
         if(e.Event=="task-finished"){engine.SealTask(e.TaskId);Notify();return;}
         if(e.Event!="result-generated"||e.Heartbeat)return;
         var previous=engine.Segments.FirstOrDefault(s=>s.TaskId==e.TaskId&&s.SentenceId==e.SentenceId);
+        if(e.Final&&previous?.AsrState!=AsrState.Confirmed)
+        {
+            if(captureAttempt is {} currentAttempt)currentAttempt.FinalEvents++;
+            LogEvent("RecognitionFinal",fields:[("Sequence",e.SentenceId),("CharacterCount",e.Text.Length)]);
+        }
         if(previous?.AsrState!=AsrState.Confirmed&&(e.Final||e.Text.Length>0&&(previous==null||e.Text!=previous.PartialText)))lastProgress=Environment.TickCount64;
         engine.Receive(e,false,Settings.AutoParagraph,[],false);
         if(engine.Segments.Count>=50000||engine.Segments.Sum(s=>(long)(s.RawText.Length+s.FinalText.Length+s.PartialText.Length)*2)>64*1024*1024){Status("本次会话达到容量上限，停止后可导出并开启新会话。");_=StopAsync(false);}
@@ -369,12 +407,15 @@ public sealed partial class AppController : IAsyncDisposable
             RequestStopCapture();
             if(emergency)CancelToken(startup);
             if(stopping is {IsCompleted:false}){requestedPause&=pause;return stopping;}
+            if(asr!=null||audio!=null)LogEvent("StopRequested",fields:[("Pause",pause),("Emergency",emergency),("SamplesSent",audio?.SamplesSent??0)]);
             requestedPause=pause;return stopping=StopInternal(emergency);
         }
     }
     private async Task StopInternal(bool emergency)
     {
         using var budget=new CancellationTokenSource(emergency?1000:15000);bool gate=false;string gap="";
+        long stoppingAt=Environment.TickCount64,samples=0;
+        bool completed=false;
         try
         {
             await captureGate.WaitAsync(budget.Token);gate=true;
@@ -391,9 +432,12 @@ public sealed partial class AppController : IAsyncDisposable
                 await client.FinishAsync(budget.Token);
             }
         }
-        catch(Exception){gap="连接或收尾超时，尾部可能不完整";CancelToken(startup);audio?.Abort();asr?.Abort();}
+        catch(Exception e){LogEvent("StopFailed",e);gap="连接或收尾超时，尾部可能不完整";CancelToken(startup);audio?.Abort();asr?.Abort();}
         finally
         {
+            try
+            {
+            samples=audio?.SamplesSent??0;
             string? task=asr?.TaskId;
             if(!gate){await OnActor(()=>{state=CaptureState.Faulted;Status("收尾超时，自动输入已取消。");});}
             else
@@ -409,7 +453,15 @@ public sealed partial class AppController : IAsyncDisposable
             });
             }
             if(billedSeconds>0){_=RecordUsage(new("asr",0,0,false,DateTimeOffset.UtcNow,billedSeconds));billedSeconds=0;}
-            Level?.Invoke(0);if(gate)captureGate.Release();
+            completed=gate;
+            }
+            catch(Exception e){LogEvent("StopCleanupFailed",e);throw;}
+            finally
+            {
+                LogEvent("StopCompleted",fields:[("Completed",completed),("Incomplete",gap.Length>0),("ElapsedMs",Math.Max(0,Environment.TickCount64-stoppingAt)),
+                    ("SamplesSent",samples),("RecognitionEvents",captureAttempt?.RecognitionEvents??0),("FinalEvents",captureAttempt?.FinalEvents??0),("State",state.ToString())]);
+                if(gate)captureGate.Release();Level?.Invoke(0);
+            }
         }
     }
     public void Suspend(){CancelToken(startup);audio?.Abort();asr?.Abort();CancelToken(extraction);_=StopAsync(true,true);}
@@ -420,12 +472,13 @@ public sealed partial class AppController : IAsyncDisposable
         {
             if(engine==null)return;int before=engine.Pending;bool gap=engine.Tick().Length>0;
             bool finalWait=RecognitionTimeout.Stalled(Environment.TickCount64,lastResponse,lastProgress,Interlocked.Read(ref lastVoice),voiceSeen,engine.Segments.Any(s=>s.AsrState==AsrState.Partial),Settings.SilenceMs);
-            if(state==CaptureState.Recording&&(gap||finalWait||Environment.TickCount64-lastResponse>20000)){InputInterrupted?.Invoke("识别等待超时，自动输入已取消，确认文字可复制。");Status("识别响应等待超时，正在保留已有结果并暂停。");_=StopAsync(true);}
+            if(state==CaptureState.Recording&&(gap||finalWait||Environment.TickCount64-lastResponse>20000)){LogEvent("RecognitionTimeout",fields:[("Reason",gap?"SequenceGap":finalWait?"FinalResultStalled":"ResponseTimeout")]);InputInterrupted?.Invoke("识别等待超时，自动输入已取消，确认文字可复制。");Status("识别响应等待超时，正在保留已有结果并暂停。");_=StopAsync(true);}
             if(before!=engine.Pending)Notify();
         });}catch(OperationCanceledException){}
     }
     public async Task FinishCurrentAsync(string? turnId=null,bool allowPolish=true,CancellationToken token=default,bool forDelivery=false,CancellationToken expedite=default)
     {
+        long processingAt=Environment.TickCount64;
         var prepared=await OnActor(()=>
         {
             if(engine==null||(turnId!=null&&engine.Session.Id!=turnId)||state is CaptureState.Connecting or CaptureState.Recording or CaptureState.Draining)return (Source:(TranscriptEngine?)null,Work:(WholePolishWork?)null,Key:"",Prompt:"");
@@ -438,13 +491,14 @@ public sealed partial class AppController : IAsyncDisposable
             return (Source:(TranscriptEngine?)engine,Work:work,Key:Keys.DeepSeekKey,Prompt:Settings.EffectivePolishPrompt);
         });
         if(prepared.Source==null)return;
+        LogEvent("TextProcessingStarted",turnId:turnId,fields:[("PolishRequested",prepared.Work!=null)]);
         if(prepared.Work is {} work)
         {
             string? result=null,error=null;
             using var cancelled=CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token,token,expedite);
             if(forDelivery&&Settings.PreferFastDelivery)cancelled.CancelAfter(TimeSpan.FromSeconds(3));
             try{result=await deepseek.PolishWholeAsync(work,prepared.Key,prepared.Prompt,cancelled.Token);}
-            catch(Exception e){error=cancelled.IsCancellationRequested&&!token.IsCancellationRequested&&!lifetime.IsCancellationRequested?"已优先上屏，保留完整识别正文及已确认纠错。":SafeError(e);}
+            catch(Exception e){LogEvent("TextProcessingFailed",e,turnId,("Cancelled",cancelled.IsCancellationRequested));error=cancelled.IsCancellationRequested&&!token.IsCancellationRequested&&!lifetime.IsCancellationRequested?"已优先上屏，保留完整识别正文及已确认纠错。":SafeError(e);}
             finally
             {
                 await OnActor(()=>{prepared.Source.CompleteWholePolish(work,cancelled.IsCancellationRequested?null:result,error);if(ReferenceEquals(engine,prepared.Source))Status(prepared.Source.Session.WholePolishReason);});
@@ -452,6 +506,8 @@ public sealed partial class AppController : IAsyncDisposable
             }
         }
         var saved=await OnActor(()=>prepared.Source.Session);
+        LogEvent("TextProcessingCompleted",turnId:turnId,fields:[("State",saved.WholePolishState is "None" or "Waiting" or "Completed" or "Fallback"?saved.WholePolishState:"Other"),
+            ("ElapsedMs",Math.Max(0,Environment.TickCount64-processingAt))]);
         if(CanSaveMemory)await SaveSessionSafe(saved);
         // Next StartAsync awaits the repository barrier and refreshes memory.
         // Do not put a redundant vocabulary reload ahead of automatic delivery.
@@ -663,12 +719,24 @@ public sealed partial class AppController : IAsyncDisposable
     public static string SafeError(Exception e)=>e is ProviderException?e.Message:e is OperationCanceledException or TimeoutException?"操作超时或已取消，确认文字已保留。":e is ArgumentException or InvalidOperationException or NotSupportedException?e.Message:"操作失败，请检查网络、设备或保存位置。";
     public async ValueTask DisposeAsync()
     {
+        LogEvent("DisposeStarted");
+        try
+        {
         CancelToken(extraction);CancelToken(generation);await StopAsync(false);await OnActor(()=>{engine?.FinishAll();state=CaptureState.Closing;});lifetime.Cancel();try{await Task.WhenAll(timer,maintenance);}catch{}
         // Let cancelled dictionary work settle its usage before disposing the repository.
         if(await extractionGate.WaitAsync(TimeSpan.FromSeconds(2)))extractionGate.Release();
-        try{await Repository.BarrierAsync().WaitAsync(TimeSpan.FromSeconds(2));await Repository.CheckpointAsync().WaitAsync(TimeSpan.FromSeconds(1));}catch{}
+        try{await Repository.BarrierAsync().WaitAsync(TimeSpan.FromSeconds(2));await Repository.CheckpointAsync().WaitAsync(TimeSpan.FromSeconds(1));}
+        catch(Exception e){LogEvent("PersistenceFailed",e,fields:[("Operation","ShutdownCheckpoint")]);}
         // Keep the actor alive until provider completions have observed cancellation.
         long end=Environment.TickCount64+1500;while(Volatile.Read(ref activePolish)>0&&Environment.TickCount64<end)await Task.Delay(20);
         deepseek.Dispose();events.Writer.TryComplete();await eventLoop;await Repository.DisposeAsync();lifetime.Dispose();
+        LogEvent("DisposeCompleted");
+        }
+        catch(Exception e){LogEvent("DisposeFailed",e);throw;}
+        finally
+        {
+            try{await Log.FlushAsync();}catch{ /* Logging IO cannot replace a business failure or prevent exit. */ }
+            if(ownsLog)try{await Log.DisposeAsync();}catch{ }
+        }
     }
 }

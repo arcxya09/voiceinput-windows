@@ -162,7 +162,7 @@ public partial class MainWindow
         try
         {
             var picker = new FileSavePicker { SuggestedFileName = filename, DefaultFileExtension = extension };
-            picker.FileTypeChoices.Add(extension == ".json" ? "JSON 文件" : extension == ".md" ? "Markdown 文档" : "文本文件", new List<string> { extension });
+            picker.FileTypeChoices.Add(extension == ".json" ? "JSON 文件" : extension == ".md" ? "Markdown 文档" : extension == ".log" ? "运行日志" : "文本文件", new List<string> { extension });
             WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(this));
             return (await picker.PickSaveFileAsync())?.Path;
         }

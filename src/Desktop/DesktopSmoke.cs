@@ -73,7 +73,10 @@ public static class DesktopSmoke
             // Ready() intentionally remains uncalled: it owns global hooks, device
             // watchers and real capture. These checks use an isolated database and
             // a handler that rejects any accidental outbound provider request.
-            controller = new AppController(folder, provider: new NoNetwork());
+            var microphoneOpening = new OfflineMicrophoneOpening();
+            controller = new AppController(folder, null, new NoNetwork(), microphoneOpening.Open,
+                receive => new BailianClient(receive));
+            microphoneOpening.Log = controller.Log;
             await controller.InitializeAsync();
             await controller.SaveSettingsAsync(controller.Settings, new("SMOKE_LOCAL_ONLY", "SMOKE_LOCAL_ONLY"));
             var credentials = new SettingsStore(folder, new WindowsProtector()).LoadCredentials();
@@ -137,6 +140,11 @@ public static class DesktopSmoke
             checks.Add("Production controller updates transcript, Unicode count, and native WinUI lexicon list");
             checks.Add("Repeated history snapshots preserve exact text and paragraphs across native line endings without resetting the user's selection");
             checks.Add("Version and dictation hotkey labels follow current production settings");
+
+            Stage("Export production runtime logs while offline microphone preparation is blocked");
+            await CheckRuntimeLogExportAsync(window, controller, microphoneOpening, folder, text);
+            checks.Add("The real Settings export button is enabled and invokable while preparation is blocked; production export completes without waiting for capture or management guards");
+            checks.Add("Exported JSONL preserves ordered controller/audio events and an earlier microphone HRESULT, with no credentials, transcript, or lexicon fixture strings");
 
             Stage("Verify the production management guard and dispatched final-preview event bridge");
             await CheckManagementOperationGuardAsync(window);
@@ -575,6 +583,124 @@ public static class DesktopSmoke
         byte[] png = new byte[checked((int)stream.Size)];
         reader.ReadBytes(png);
         await File.WriteAllBytesAsync(path, png);
+    }
+
+    private static async Task CheckRuntimeLogExportAsync(MainWindow window, AppController controller,
+        OfflineMicrophoneOpening microphone, string folder, string transcript)
+    {
+        microphone.PrivateFixture = transcript;
+        string first = await controller.TestMicrophoneAsync("").WaitAsync(TimeSpan.FromSeconds(5));
+        Require(first.Contains("0x80070490", StringComparison.Ordinal), "The offline microphone failure lost its HRESULT.");
+        await controller.Log.FlushAsync();
+
+        window.ShowPage(3);
+        await LayoutAsync(window);
+        var exportButton = Find<Button>(window, "ExportLogButton");
+        var releaseManagement = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task? management = null;
+        Task<string> preparing = controller.TestMicrophoneAsync("");
+        string exportPath = Path.Combine(folder, "log-export.log");
+        try
+        {
+            await microphone.Blocked.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Require(!preparing.IsCompleted, "The offline microphone preparation did not remain blocked.");
+            management = window.RunManagementOperationAsync(() => releaseManagement.Task);
+            await UntilAsync(() => !Find<ComboBox>(window, "ProjectBox").IsEnabled,
+                "The management guard did not render before the log export check.");
+            Require(exportButton.IsEnabled, "Runtime log export was disabled while microphone preparation or management was pending.");
+            var peer = FrameworkElementAutomationPeer.CreatePeerForElement(exportButton) ?? new ButtonAutomationPeer(exportButton);
+            Require(peer.GetPattern(PatternInterface.Invoke) is IInvokeProvider, "The runtime log export button is not invokable.");
+            // Invoke the same production operation after destination selection. Opening the native
+            // picker would make this unattended check interactive; the picker uses PickSaveAsync.
+            await window.ExportRuntimeLogAsync(exportPath).WaitAsync(TimeSpan.FromSeconds(5));
+            Require(!preparing.IsCompleted && !management.IsCompleted,
+                "Log export waited for the pending microphone or management operation.");
+            Require(exportButton.IsEnabled, "The runtime log export button did not remain available after export.");
+        }
+        finally
+        {
+            microphone.Release.TrySetResult();
+            releaseManagement.TrySetResult();
+            try { await preparing.WaitAsync(TimeSpan.FromSeconds(5)); }
+            finally { if (management != null) await management.WaitAsync(TimeSpan.FromSeconds(5)); }
+        }
+
+        string exported = await File.ReadAllTextAsync(exportPath);
+        Require(exported.Length > 0 && exported.EndsWith('\n'), "Runtime log export ended with an incomplete JSONL record.");
+        var records = new List<JsonElement>();
+        var sequences = new Dictionary<string, long>(StringComparer.Ordinal);
+        foreach (string line in exported.Split('\n').SkipLast(1))
+        {
+            Require(!string.IsNullOrWhiteSpace(line), "Runtime log export contains an empty JSONL record.");
+            using var document = JsonDocument.Parse(line);
+            var record = document.RootElement;
+            Require(record.ValueKind == JsonValueKind.Object, "Runtime log export contains a non-object JSONL record.");
+            string instance = record.GetProperty("instanceId").GetString()!;
+            long sequence = record.GetProperty("sequence").GetInt64();
+            if (sequence > 0)
+            {
+                Require(!sequences.TryGetValue(instance, out long previous) || sequence > previous,
+                    "Runtime log records are duplicated or out of order within an app instance.");
+                sequences[instance] = sequence;
+            }
+            CheckLogStrings(record, ["SMOKE_LOCAL_ONLY", "JUNA", "离线界面验收", "第二段核对完整正文", "12C(α,γ)16O", transcript]);
+            records.Add(record.Clone());
+        }
+        int initialized = records.FindIndex(r => LogEventIs(r, "Controller", "InitializeCompleted"));
+        int opened = records.FindIndex(r => LogEventIs(r, "Audio", "SmokeOpenStarted"));
+        int audioFailed = records.FindIndex(r => LogEventIs(r, "Audio", "SmokeOpenFailed"));
+        int failed = records.FindIndex(r => LogEventIs(r, "Controller", "Diagnostic")
+            && r.GetProperty("fields").GetProperty("Stage").GetString() == "MicrophoneTestFailed"
+            && r.TryGetProperty("exception", out var error) && error.GetProperty("hresult").GetString() == "0x80070490");
+        int blocked = records.FindLastIndex(r => LogEventIs(r, "Audio", "SmokeOpenStarted"));
+        int requested = records.FindIndex(r => LogEventIs(r, "Application", "LogExportRequested"));
+        Require(initialized >= 0 && opened > initialized && audioFailed > opened && failed > audioFailed
+            && blocked > failed && requested > blocked,
+            "Runtime log export lost the earlier microphone failure or the ordered production controller/audio/export events.");
+        Require(records[audioFailed].GetProperty("exception").GetProperty("hresult").GetString() == "0x80070490",
+            "Runtime log export lost the earlier audio exception HRESULT.");
+    }
+
+    private static bool LogEventIs(JsonElement record, string component, string eventName)
+        => record.GetProperty("component").GetString() == component && record.GetProperty("event").GetString() == eventName;
+
+    private static void CheckLogStrings(JsonElement value, string[] privateStrings)
+    {
+        if (value.ValueKind == JsonValueKind.String)
+        {
+            string text = value.GetString()!;
+            Require(!privateStrings.Any(item => text.Contains(item, StringComparison.Ordinal)),
+                "Runtime log export contains a private credential, transcript, or lexicon fixture string.");
+        }
+        else if (value.ValueKind == JsonValueKind.Object)
+            foreach (var property in value.EnumerateObject()) CheckLogStrings(property.Value, privateStrings);
+        else if (value.ValueKind == JsonValueKind.Array)
+            foreach (var item in value.EnumerateArray()) CheckLogStrings(item, privateStrings);
+    }
+
+    private sealed class OfflineMicrophoneOpening
+    {
+        public RuntimeLog? Log { get; set; }
+        public string PrivateFixture { get; set; } = "";
+        public TaskCompletionSource Blocked { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int attempts;
+
+        public IAudioCapture Open(string device, Func<byte[], CancellationToken, ValueTask> send,
+            Action<string> fault, Action<float> level)
+        {
+            int attempt = Interlocked.Increment(ref attempts);
+            AudioLog.Write(Log, "SmokeOpenStarted", null, null, ("attempt", attempt));
+            if (attempt > 1)
+            {
+                Blocked.TrySetResult();
+                Release.Task.WaitAsync(TimeSpan.FromSeconds(20)).GetAwaiter().GetResult();
+            }
+            var error = new COMException("SMOKE_LOCAL_ONLY JUNA " + PrivateFixture, unchecked((int)0x80070490));
+            error.Data["privateFixture"] = PrivateFixture;
+            AudioLog.Write(Log, "SmokeOpenFailed", null, error, ("attempt", attempt));
+            throw error;
+        }
     }
 
     private static async Task CheckManagementOperationGuardAsync(MainWindow window)

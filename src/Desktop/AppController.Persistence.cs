@@ -44,7 +44,7 @@ public sealed partial class AppController
             if(permissionOnly)await Repository.SaveLearningPermissionAsync(session);
             else await Repository.SaveSessionAsync(session);
         }
-        catch{success=false;}
+        catch(Exception e){success=false;LogEvent("PersistenceFailed",e,session.Id,("Operation",permissionOnly?"SaveLearningPermission":"SaveSession"),("Revision",session.Revision));}
         await OnActor(()=>
         {
             if(IsForgotten(session))return;

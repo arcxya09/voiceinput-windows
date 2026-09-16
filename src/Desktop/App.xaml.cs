@@ -14,6 +14,7 @@ public partial class App : Microsoft.UI.Xaml.Application
         UnhandledException += async (_, args) =>
         {
             args.Handled = true;
+            Program.Log?.Write("Application","UnhandledUiException",exception:args.Exception);
             await ShowErrorAsync("操作遇到错误。已显示的正文可以继续复制或导出。", "语音输入法");
         };
     }
@@ -34,17 +35,20 @@ public partial class App : Microsoft.UI.Xaml.Application
             return;
         }
 
-        string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RealtimeTranscription");
-        var controller = new AppController(folder);
+        string folder = Program.DataDirectory;
+        var controller = new AppController(folder,log:Program.Log);
+        controller.Log.Write("Application","CreatingMainWindow");
         MainWindow = CreateWindowForLaunch(controller, Program.IsStartupLaunch);
+        controller.Log.Write("Application","MainWindowCreated");
         string? startupError = null;
         try
         {
             await controller.InitializeAsync();
             startupError = controller.StartupWarning;
         }
-        catch
+        catch(Exception error)
         {
+            controller.Log.Write("Application","ControllerInitializationFailed",exception:error);
             startupError = "配置载入未完成，请检查设置。本地数据已保留。";
         }
         if (!Program.IsStartupLaunch && startupError != null) await ShowErrorAsync(startupError, "启动");

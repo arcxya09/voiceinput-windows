@@ -47,23 +47,26 @@ public partial class MainWindow : Window
     {
         try
         {
+            controller.Log.Write("Application","ReadyStarted");
             CreateTray();
-            try{await FillSettings();}catch(Exception e){StatusText.Text=AppController.SafeError(e);}
+            try{await FillSettings();}catch(Exception e){controller.Log.Write("UI","LoadSettingsFailed",exception:e);StatusText.Text=AppController.SafeError(e);}
             ProjectsRefresh();RefreshTerms();
             if(controller.MemoryAvailable)
                 try{await RefreshCorrections();}catch(Exception e){CorrectionStatus.Text="纠错记录暂不可用："+AppController.SafeError(e);}
             ptt=new(controller){CanStart=CanStartVoiceTurn};
             ConnectPreviewEvents(ptt);
             await ptt.InitializeAsync();
-            devices=new DeviceWatcher((id,isDefault)=>{if(ptt.Busy&&((isDefault&&controller.Settings.DeviceId=="")||(!isDefault&&controller.ActiveDeviceId==id))){ptt.Cancel("麦克风设备已变化，本轮停止，确认文字可复制。");controller.RequestStopCapture();}});ready=true;
+            devices=new DeviceWatcher((id,isDefault)=>{if(ptt.Busy&&((isDefault&&controller.Settings.DeviceId=="")||(!isDefault&&controller.ActiveDeviceId==id))){ptt.Cancel("麦克风设备已变化，本轮停止，确认文字可复制。");controller.RequestStopCapture();}},controller.Log);ready=true;
+            controller.Log.Write("Application","ReadyCompleted");
             CompleteStartupPresentation();
             pending=await controller.SnapshotAsync();
         }
-        catch(Exception e){ready=true;StatusText.Text=AppController.SafeError(e);if(Program.IsStartupLaunch)NotifyStartupError(AppController.SafeError(e));else await Dialogs.MessageAsync(this,"启动",AppController.SafeError(e));}
+        catch(Exception e){controller.Log.Write("Application","ReadyFailed",exception:e);ready=true;StatusText.Text=AppController.SafeError(e);if(Program.IsStartupLaunch)NotifyStartupError(AppController.SafeError(e));else await Dialogs.MessageAsync(this,"启动",AppController.SafeError(e));}
     }
     private void Render()
     {
         ProjectBox.IsEnabled=!ManagementBusy;
+        RefreshLogStatus();
         SaveSettingsButton.IsEnabled=TestBailianButton.IsEnabled=TestDeepSeekButton.IsEnabled=!ManagementBusy;
         RefreshSelectionActions();
         SessionLearningBox.IsEnabled=!ManagementBusy&&SessionLearningBox.Tag is string;
@@ -108,7 +111,7 @@ public partial class MainWindow : Window
     }
     public void OpenManager(){Show();if(AppWindow.Presenter is OverlappedPresenter presenter)presenter.Restore();Activate();}
     private void EnsureIdle(){if(Volatile.Read(ref managementOperations)>0)throw new InvalidOperationException("管理操作尚未完成，请稍候。");if(correctionBusy)throw new InvalidOperationException("纠错学习操作尚未完成，请稍候。");if(savingSettings||changingProject||changingLearning)throw new InvalidOperationException("设置或项目切换正在保存，请稍候。");if(extractingHistory)throw new InvalidOperationException("全部历史词条提取尚未结束，请先取消或等待完成。");if(generatingTerms||importingGenerated)throw new InvalidOperationException("词库生成或导入尚未结束，请稍候或先取消生成。");if(testingPrompt)throw new InvalidOperationException("提示词试用尚未结束，请稍候。");if(testingConnection)throw new InvalidOperationException("连接测试尚未结束，请稍候。");if(microphoneTesting)throw new InvalidOperationException("麦克风测试尚未结束，请稍候。");if(ptt?.Busy==true)throw new InvalidOperationException("当前输入尚未完成，请松开快捷键并等待结果后再操作。");}
-    private async Task Safe(Func<Task> fn){try{await fn();}catch(OperationCanceledException){StatusText.Text="操作已取消。";}catch(Exception e){await Dialogs.MessageAsync(this,"语音输入法",AppController.SafeError(e));}}
+    private async Task Safe(Func<Task> fn){try{await fn();}catch(OperationCanceledException){StatusText.Text="操作已取消。";controller.Log.Write("UI","OperationCancelled");}catch(Exception e){controller.Log.Write("UI","OperationFailed",exception:e);await Dialogs.MessageAsync(this,"语音输入法",AppController.SafeError(e));}}
     internal bool CanStartVoiceTurn() => !ManagementOperationBusy && !Volatile.Read(ref shuttingDown)
         && Volatile.Read(ref trayMenu)?.IsOpen != true;
     private Task Manage(Func<Task> action) => Safe(() => RunManagementOperationAsync(action));
@@ -246,7 +249,7 @@ public partial class MainWindow : Window
     }
     private async Task DevicesRefresh()
     {
-        var list=await Task.Run(AudioCapture.Devices);
+        var list=await Task.Run(()=>AudioCapture.Devices(controller.Log));
         string selected=controller.Settings.DeviceId;
         // Keep the saved selection visible. Both the local test and real capture
         // now resolve this same ID, including the explicit default fallback.
@@ -297,8 +300,8 @@ public partial class MainWindow : Window
     private async void TestDeepSeek_Click(object sender,RoutedEventArgs e)=>await Safe(()=>TestConnectionAsync(false));
     private async void DeleteProject_Click(object sender,RoutedEventArgs e)=>await Manage(async()=>{if(!await Dialogs.ConfirmAsync(this,"删除项目","删除当前项目及其全部记忆和项目词条？全局手动词条保留。","删除项目"))return;await controller.DeleteCurrentProjectAsync();ProjectsRefresh();});
     private async void Usage_Click(object sender,RoutedEventArgs e)=>await Safe(async()=>{var usage=await controller.Repository.UsageAsync();UsageBox.Text=usage.Count==0?"尚无用量记录。":string.Join("\n",usage.Select(u=>$"{u.At:yyyy-MM-dd} · {u.Purpose} · 输入 {u.InputTokens:N0} / 输出 {u.OutputTokens:N0} Token · ASR {u.AudioSeconds:F1} 秒"+(u.Unknown?" · 包含未知用量":"")))+"\n\nterm_budget 是预算占用，已知用量会结算，未知请求保留预留；不与 term_extraction / term_generation 相加作为账单。以服务商账单为准。";});
-    private void PowerChanged(object sender,PowerModeChangedEventArgs e){if(e.Mode==PowerModes.Suspend){ptt?.Cancel("系统睡眠，自动输入已取消。");controller.Suspend();}}
-    private void SessionChanged(object sender,SessionSwitchEventArgs e){if(e.Reason is SessionSwitchReason.SessionLock or SessionSwitchReason.SessionLogoff or SessionSwitchReason.ConsoleDisconnect or SessionSwitchReason.RemoteDisconnect){ptt?.Cancel("Windows 会话已锁定或断开，自动输入已取消。");controller.Suspend();}}
+    private void PowerChanged(object sender,PowerModeChangedEventArgs e){controller.Log.Write("Application","PowerChanged",fields:new Dictionary<string,object?>{["mode"]=e.Mode});if(e.Mode==PowerModes.Suspend){ptt?.Cancel("系统睡眠，自动输入已取消。");controller.Suspend();}}
+    private void SessionChanged(object sender,SessionSwitchEventArgs e){controller.Log.Write("Application","SessionChanged",fields:new Dictionary<string,object?>{["reason"]=e.Reason});if(e.Reason is SessionSwitchReason.SessionLock or SessionSwitchReason.SessionLogoff or SessionSwitchReason.ConsoleDisconnect or SessionSwitchReason.RemoteDisconnect){ptt?.Cancel("Windows 会话已锁定或断开，自动输入已取消。");controller.Suspend();}}
     private async void ClosingWindow(AppWindow sender,AppWindowClosingEventArgs e)
     {
         e.Cancel=true;
@@ -316,9 +319,10 @@ public partial class MainWindow : Window
             if(controller.FailedSaveCount>0&&!await Dialogs.ConfirmAsync(this,"仍有正文未保存",$"仍有 {controller.FailedSaveCount} 项保存失败。退出后未保存的部分可能无法恢复。\n取消可返回重试保存、复制或导出正文。","继续退出"))return;
         }
         finally{closingPrompt=false;}
-        shuttingDown=true;ready=false;generationCancel?.Cancel();promptPreviewCancel?.Cancel();controller.CancelGeneration();controller.CancelExtraction();
+        shuttingDown=true;ready=false;exportCancellation?.Cancel();generationCancel?.Cancel();promptPreviewCancel?.Cancel();controller.CancelGeneration();controller.CancelExtraction();
         ptt?.SetEnabled(false);StatusText.Text="正在退出并保存…";
-        try{async Task Clean(){if(ptt!=null)await ptt.DisposeAsync();await controller.DisposeAsync();}await Clean().WaitAsync(TimeSpan.FromSeconds(12));}catch{}
+        controller.Log.Write("Application","ShutdownRequested");
+        try{async Task Clean(){if(ptt!=null)await ptt.DisposeAsync();await controller.DisposeAsync();}await Clean().WaitAsync(TimeSpan.FromSeconds(12));}catch(Exception error){controller.Log.Write("Application","ShutdownCleanupFailed",exception:error);}
         search?.Cancel();render.Stop();SystemEvents.PowerModeChanged-=PowerChanged;SystemEvents.SessionSwitch-=SessionChanged;tray?.Dispose();trayMenu?.Dispose();trayIcon?.Dispose();devices?.Dispose();overlay.Close();closed=true;Microsoft.UI.Xaml.Application.Current.Exit();
     }
 }
