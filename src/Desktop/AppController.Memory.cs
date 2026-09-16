@@ -36,6 +36,7 @@ public sealed partial class AppController
 
     private Task DisableMemoryAsync(Exception error) => OnActor(() =>
     {
+        LogEvent("MemoryUnavailable",error);
         memoryAvailable = false;
         memoryStatus = $"本地记忆不可用（{error.GetType().Name}）。听写和复制仍可使用；新内容暂不保存，词库和学习已暂停。修复数据目录后可点击重试保存。";
         terms = []; suppressed = []; approvedCorrections = [];

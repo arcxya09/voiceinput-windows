@@ -23,7 +23,7 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
         public readonly TaskCompletionSource Released=new(TaskCreationOptions.RunContinuationsAsynchronously);
         public Task? Stop;
         public volatile bool Invalid;
-        public string Reason="";
+        public string Reason="",CancellationCategory="ExternalCancellation";
         public void CancelInput(){try{Cancel.Cancel();}catch(ObjectDisposedException){}}
     }
     private readonly AppController controller;
@@ -43,6 +43,13 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
     public event Action<string>? TurnStarted;
     public event Action<VoiceTurnCompletion>? TurnCompleted;
     public event Action<bool>? Listening;
+    private void LogTurn(string eventName,Turn? turn=null,Exception? error=null,params (string Key,object? Value)[] fields)
+        =>controller.Log.Write("PushToTalk",eventName,AppController.LogCorrelation(turn?.Id),fields.ToDictionary(x=>x.Key,x=>x.Value),error);
+    private void UseManualDelivery(Turn turn,string reason,string category)
+    {
+        turn.UseManualDelivery(reason);
+        LogTurn("ManualDelivery",turn,fields:[("Reason",category)]);
+    }
     public PushToTalkService(AppController controller)
     {
         this.controller=controller;controller.InputInterrupted+=Cancel;hook=new PhysicalHook(s=>
@@ -53,15 +60,23 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
             // Invalidate before queuing, so SendInput cannot race the channel consumer.
             if(s.Kind is "activity" or "escape" or "cancel")activity.Advance();
             s=s with{ActivityVersion=activity.Current};
-            if(!signals.Writer.TryWrite(s)){activity.Advance();controller.RequestStopCapture();}
+            if(!signals.Writer.TryWrite(s)){LogTurn("SignalQueueFull",current);activity.Advance();controller.RequestStopCapture();}
         },()=>Volatile.Read(ref active) is {PhysicalReleased:true,DeliveryDispatched:false,Invalid:false,DictationOnly:false});
         loop=Task.Run(Loop);watchdog=Task.Run(Watchdog);
     }
-    public async Task InitializeAsync(){await hook.Ready;Configure();await TextDelivery.InitializeAsync();}
+    public async Task InitializeAsync()
+    {
+        LogTurn("InitializeStarted");
+        try{await hook.Ready;Configure();await TextDelivery.InitializeAsync();LogTurn("InitializeCompleted");}
+        catch(Exception e){LogTurn("InitializeFailed",error:e);throw;}
+    }
     public void Configure()=>hook.Configure(controller.Settings.Hotkey);
     public void SetEnabled(bool value){Enabled=value;hook.Enable(value);PublishNotice(value?"按住说话已启用。":"按住说话已暂停。");}
     public void Cancel(string reason="本轮输入已取消，确认文字已保留。")
+        =>QueueCancel(reason,"ExternalCancellation");
+    private void QueueCancel(string reason,string category)
     {
+        if(Volatile.Read(ref active) is {} turn)turn.CancellationCategory=category;
         activity.Advance();
         signals.Writer.TryWrite(new("cancel:"+reason,At:Environment.TickCount64));
     }
@@ -78,7 +93,7 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
                     var native=s.Target;bool dictationOnly=DictationOnly;
                     if(InputSafety.HasOtherModifier(hook.Trigger,Win32.Down)){PublishNotice("检测到组合键，本次不启动语音。");continue;}
                     if(!activity.Matches(s.ActivityVersion)){PublishNotice("按键后输入位置或操作已改变，请重新按住说话。");continue;}
-                    var t=new Turn(s.At,native,s.ActivityVersion,dictationOnly);active=t;TurnStarted?.Invoke(t.Id);Listening?.Invoke(true);running=Run(t);
+                    var t=new Turn(s.At,native,s.ActivityVersion,dictationOnly);active=t;LogTurn("Started",t,fields:[("DictationOnly",dictationOnly)]);TurnStarted?.Invoke(t.Id);Listening?.Invoke(true);running=Run(t);
                 }
                 else if(active is {} t)
                 {
@@ -86,12 +101,14 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
                     {
                         if(t.ReleasedAt!=0)continue;
                         t.ReleasedAt=s.At;controller.RequestStopCapture();Listening?.Invoke(false);
-                        if(s.At-t.PressedAt<controller.Settings.HoldMs){t.Invalid=true;t.Reason="短按已取消。";t.CancelInput();}
+                        LogTurn("Released",t,fields:[("HeldMs",Math.Max(0,s.At-t.PressedAt))]);
+                        if(s.At-t.PressedAt<controller.Settings.HoldMs){LogTurn("Cancelled",t,fields:[("Reason","ShortPress")]);t.Invalid=true;t.Reason="短按已取消。";t.CancelInput();}
                         t.Stop=controller.StopAsync(false);t.Released.TrySetResult();
                     }
                     else if(s.Kind is "activity" or "escape" or "cancel"||s.Kind.StartsWith("cancel:"))
                     {
                         if(t.Invalid)continue; // Keep the first reason; cleanup/late events cannot hide the failure.
+                        LogTurn("Cancelled",t,fields:[("Reason",s.Kind=="activity"?"OtherInputActivity":s.Kind=="escape"?"Escape":s.Kind=="cancel"?"PhysicalCancellation":t.CancellationCategory)]);
                         t.Invalid=true;t.Reason=s.Kind.StartsWith("cancel:")?s.Kind[7..]:s.Kind=="activity"?"检测到其他按键或鼠标操作，本轮改为手动复制。":"本轮输入已取消。";
                         t.CancelInput();controller.RequestStopCapture();t.Stop??=controller.StopAsync(false);t.Released.TrySetResult();Listening?.Invoke(false);
                     }
@@ -99,16 +116,17 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
             }
         }
         catch(OperationCanceledException){}
+        catch(Exception e){LogTurn("LoopFailed",Volatile.Read(ref active),e);throw;}
     }
     private async Task<TargetCapture> CaptureTarget(Turn t)
     {
         if(t.DictationOnly)return new(null,"Dictation","");
-        TargetCapture Manual(string reason)
+        TargetCapture Manual(string reason,string category)
         {
-            t.UseManualDelivery(reason);
+            UseManualDelivery(t,reason,category);
             return new(null,"DictationFallback",reason);
         }
-        if(t.Native is not {} anchor||anchor.Focus==IntPtr.Zero)return Manual("未检测到可靠的输入焦点，已继续听写；完成后自动复制。");
+        if(t.Native is not {} anchor||anchor.Focus==IntPtr.Zero)return Manual("未检测到可靠的输入焦点，已继续听写；完成后自动复制。","MissingInitialFocus");
         var native=await InputSafety.RecoverInitialFocusAsync(() =>
         {
             if(Win32.ObserveWindow(anchor)==FocusObservation.Changed)return (FocusObservation.Changed,(NativeTarget?)null);
@@ -119,13 +137,13 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
             if(anchor.Focus!=IntPtr.Zero&&current.Focus!=anchor.Focus)return (FocusObservation.Unavailable,(NativeTarget?)null);
             return (FocusObservation.Stable,(NativeTarget?)current);
         },()=>activity.Matches(t.ActivityVersion)&&!t.Invalid,t.Cancel.Token,1000);
-        if(native==null)return Manual("输入位置暂不可用，已继续听写；完成后自动复制。");
+        if(native==null)return Manual("输入位置暂不可用，已继续听写；完成后自动复制。","InitialFocusUnavailable");
         t.Native=native;
         var result=await TextDelivery.CaptureAsync(native,()=>activity.Matches(t.ActivityVersion)&&!t.Invalid,t.Cancel.Token);
         if(result.Target!=null){t.TargetCaptured=true;return result;}
         if(result.Code=="Password")return result;
         t.Cancel.Token.ThrowIfCancellationRequested();
-        return Manual("当前输入位置不适合自动粘贴，已继续听写；完成后自动复制。");
+        return Manual("当前输入位置不适合自动粘贴，已继续听写；完成后自动复制。","TargetNotEditable");
     }
     private async Task Run(Turn t)
     {
@@ -136,8 +154,8 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
             var readyTask=targetTask.ContinueWith(x=>x.Status==TaskStatus.RanToCompletion&&(t.DictationOnly||x.Result.Target!=null||x.Result.Code=="DictationFallback")&&activity.Matches(t.ActivityVersion)&&!t.Invalid,TaskScheduler.Default);
             bool started=await controller.StartAsync(t.PressedAt,t.Cancel.Token,readyTask,t.Id);
             var capture=await targetTask;var target=capture.Target;capturedTarget=target;
-            if(target==null&&!t.DictationOnly&&!t.ManualDelivery){if(!t.Invalid)t.EndState="StartFailed";t.Invalid=true;if(t.Reason.Length==0)t.Reason=capture.Message;t.CancelInput();t.Released.TrySetResult();}
-            if(!started){if(!t.Invalid)t.EndState="StartFailed";t.Invalid=true;if(t.Reason.Length==0)t.Reason=(await controller.SnapshotAsync()).Status;t.Released.TrySetResult();}
+            if(target==null&&!t.DictationOnly&&!t.ManualDelivery){LogTurn("StartRejected",t,fields:[("Reason","TargetUnavailable")]);if(!t.Invalid)t.EndState="StartFailed";t.Invalid=true;if(t.Reason.Length==0)t.Reason=capture.Message;t.CancelInput();t.Released.TrySetResult();}
+            if(!started){LogTurn("StartRejected",t,fields:[("Reason","ControllerStartFailed")]);if(!t.Invalid)t.EndState="StartFailed";t.Invalid=true;if(t.Reason.Length==0)t.Reason=(await controller.SnapshotAsync()).Status;t.Released.TrySetResult();}
             if(started&&t.ManualDelivery)await controller.SetDeliveryAsync("Pending",t.ManualReason,turnId:t.Id);
             await t.Released.Task.WaitAsync(TimeSpan.FromSeconds(controller.Settings.MaxHoldSeconds+2));
             t.Stop??=controller.StopAsync(false);await t.Stop;
@@ -178,11 +196,17 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
         }
         catch(Exception e)
         {
+            LogTurn("RunFailed",t,e,fields:[("Cancelled",e is OperationCanceledException)]);
             string reason=t.Reason.Length>0?t.Reason:AppController.SafeError(e);
             try { await controller.StopAsync(false);await controller.SetDeliveryAsync(t.Invalid?t.EndState:"Blocked",reason,turnId:t.Id); }
             finally { await CompletePreviewAsync(t,reason); }
         }
-        finally{if(capturedTarget!=null)await TextDelivery.ReleaseAsync(capturedTarget);Listening?.Invoke(false);Interlocked.CompareExchange(ref active,null,t);t.Cancel.Dispose();t.Expedite.Dispose();}
+        finally
+        {
+            try{if(capturedTarget!=null)await TextDelivery.ReleaseAsync(capturedTarget);}
+            catch(Exception e){LogTurn("TargetReleaseFailed",t,e);throw;}
+            finally{Listening?.Invoke(false);Interlocked.CompareExchange(ref active,null,t);t.Cancel.Dispose();t.Expedite.Dispose();}
+        }
     }
     private void PublishNotice(string message)
         => Notice?.Invoke(new(message, Volatile.Read(ref active)?.Id));
@@ -201,6 +225,8 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
             }
         }
         catch { /* A controller being disposed cannot supply another snapshot. */ }
+        LogTurn("Completed",turn,fields:[("State",AppController.LogDeliveryState(deliveryState)),("Cancelled",turn.Invalid),
+            ("ManualDelivery",turn.ManualDelivery),("CharacterCount",text.Length),("ElapsedMs",Math.Max(0,Environment.TickCount64-turn.PressedAt))]);
         TurnCompleted?.Invoke(new(turn.Id, status, text) { DeliveryState = deliveryState });
     }
 
@@ -212,24 +238,25 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
             while(await timer.WaitForNextTickAsync(lifetime.Token))
             {
                 var t=Volatile.Read(ref active);if(t==null||t.Invalid||t.DeliveryDispatched)continue;
-                if(!activity.Matches(t.ActivityVersion)){Cancel("检测到其他操作，本轮改为手动复制。");continue;}
+                if(!activity.Matches(t.ActivityVersion)){QueueCancel("检测到其他操作，本轮改为手动复制。","OtherInputActivity");continue;}
                 if(t.TargetCaptured&&!t.ManualDelivery&&!t.DictationOnly&&t.Native is {} native&&
                     !t.Focus.Observe(Win32.ObserveWindow(native),Win32.Observe(native),Environment.TickCount64))
                 {
-                    t.UseManualDelivery("输入焦点已变化，已继续听写；完成后自动复制。");
+                    UseManualDelivery(t,"输入焦点已变化，已继续听写；完成后自动复制。","FocusChanged");
                     await controller.SetDeliveryAsync("Pending",t.ManualReason,turnId:t.Id);
                 }
-                if(t.ReleasedAt==0&&Environment.TickCount64-t.PressedAt>controller.Settings.MaxHoldSeconds*1000L)Cancel("已达到最长录音时间，确认文字可手动复制。");
+                if(t.ReleasedAt==0&&Environment.TickCount64-t.PressedAt>controller.Settings.MaxHoldSeconds*1000L)QueueCancel("已达到最长录音时间，确认文字可手动复制。","MaximumHoldDuration");
                 // GetAsyncKeyState can be false while another application's hook
                 // consumes Ctrl. Only the observed physical key-up ends a normal hold.
                 // The maximum-duration and explicit-cancel guards remain in force.
             }
         }
         catch(OperationCanceledException){}
+        catch(Exception e){LogTurn("WatchdogFailed",Volatile.Read(ref active),e);throw;}
     }
     public async ValueTask DisposeAsync()
     {
-        if(disposed)return;disposed=true;hook.Enable(false);Cancel("程序退出，自动输入已取消。");
+        if(disposed)return;disposed=true;hook.Enable(false);QueueCancel("程序退出，自动输入已取消。","Shutdown");
         try{if(running!=null)await running.WaitAsync(TimeSpan.FromSeconds(10));}catch{}
         controller.InputInterrupted-=Cancel;hook.Dispose();lifetime.Cancel();signals.Writer.TryComplete();try{await Task.WhenAll(loop,watchdog);}catch{}await TextDelivery.ShutdownAsync();lifetime.Dispose();
     }

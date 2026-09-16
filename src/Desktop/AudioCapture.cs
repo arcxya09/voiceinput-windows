@@ -20,6 +20,8 @@ public sealed class AudioCapture : IAudioCapture
     private readonly Func<byte[],CancellationToken,ValueTask> send;
     private readonly Action<string> fault;
     private readonly Action<float> level;
+    private readonly RuntimeLog? log;
+    private readonly string? turnId;
     private Task? processing;
     private int queuedBytes, faulted;
     private int stopRequested;
@@ -32,10 +34,14 @@ public sealed class AudioCapture : IAudioCapture
     public long SamplesSent { get; private set; }
     public string EndpointId { get; }
     public bool UsedDefaultFallback { get; }
-    public AudioCapture(string deviceId, Func<byte[],CancellationToken,ValueTask> send, Action<string> fault, Action<float> level)
+    public AudioCapture(string deviceId, Func<byte[],CancellationToken,ValueTask> send, Action<string> fault, Action<float> level,
+        RuntimeLog? log=null, string? turnId=null)
     {
+        this.log=log;this.turnId=turnId;
         this.send=send;this.fault=fault;this.level=level;
+        AudioLog.Write(log,"EnumeratorCreating",turnId);
         using var enumerator = new MMDeviceEnumerator();
+        AudioLog.Write(log,"EnumeratorCreated",turnId);
         var opened=AudioEndpointSelection.Open(deviceId,
             id=>OpenEndpoint(enumerator,id),()=>OpenEndpoint(enumerator,""),out bool fallback);
         device=opened.Device;capture=opened.Capture;UsedDefaultFallback=fallback;
@@ -52,29 +58,81 @@ public sealed class AudioCapture : IAudioCapture
             if(encoding is not (WaveFormatEncoding.Pcm or WaveFormatEncoding.IeeeFloat))throw new NotSupportedException("不支持此麦克风采样编码，请在 Windows 声音设置中选择 PCM 格式。");
             decoder=new(new(format.SampleRate,format.Channels,format.BitsPerSample,format.BlockAlign,encoding==WaveFormatEncoding.IeeeFloat?PcmEncoding.Float:PcmEncoding.Integer));
             maxQueuedBytes=checked(format.SampleRate*format.BlockAlign*2);
+            AudioLog.Write(log,"FormatValidated",turnId,null,("sampleRate",format.SampleRate),("channels",format.Channels),
+                ("bits",format.BitsPerSample),("blockAlign",format.BlockAlign),("encoding",encoding),
+                ("endpoint",AudioLog.DeviceKey(EndpointId)),("defaultFallback",fallback));
         }
-        catch{if(capture!=null)capture.DisposeAsync().AsTask().GetAwaiter().GetResult();device.Dispose();throw;}
+        catch(Exception e){AudioLog.Write(log,"FormatValidationFailed",turnId,e);if(capture!=null)capture.DisposeAsync().AsTask().GetAwaiter().GetResult();device.Dispose();throw;}
     }
     private (MMDevice Device,NativeWasapiCapture Capture) OpenEndpoint(MMDeviceEnumerator enumerator,string id)
     {
-        var endpoint=string.IsNullOrEmpty(id)
-            ?enumerator.GetDefaultAudioEndpoint(DataFlow.Capture,Role.Communications):enumerator.GetDevice(id);
+        string stage="FindEndpoint";
+        MMDevice? endpoint=null;
+        AudioLog.Write(log,"EndpointOpening",turnId,null,("selection",string.IsNullOrEmpty(id)?"CommunicationsDefault":"Explicit"),("endpoint",AudioLog.DeviceKey(id)));
         try
         {
-            if(endpoint.State!=DeviceState.Active)throw new AudioEndpointUnavailableException();
+            endpoint=string.IsNullOrEmpty(id)
+                ?enumerator.GetDefaultAudioEndpoint(DataFlow.Capture,Role.Communications):enumerator.GetDevice(id);
+            stage="ReadEndpointState";
+            var state=endpoint.State;
+            AudioLog.Write(log,"EndpointFound",turnId,null,("endpoint",AudioLog.DeviceKey(endpoint.ID)),("state",state));
+            if(state!=DeviceState.Active)throw new AudioEndpointUnavailableException();
+            stage="ActivateAudioClient";
             var native=new NativeWasapiCapture(endpoint,Data,e=>
             {
                 if(e!=null&&!abort.IsCancellationRequested)Fail(e is AudioCaptureIntegrityException?e.Message:"麦克风采集已中断，请重新选择设备。",e,"Capture");
                 queue.Writer.TryComplete();stopped.TrySetResult();
-            });
+            },log,turnId);
             return(endpoint,native);
         }
-        catch{endpoint.Dispose();throw;}
+        catch(Exception e){AudioLog.Write(log,"EndpointOpenFailed",turnId,e,("stage",stage),("endpoint",AudioLog.DeviceKey(id)));endpoint?.Dispose();throw;}
     }
-    public static List<AudioDevice> Devices()
+    public static List<AudioDevice> Devices()=>Devices(null);
+    public static List<AudioDevice> Devices(RuntimeLog? log)
     {
+        AudioLog.Write(log,"InventoryStarted");
+        try
+        {
         using var e=new MMDeviceEnumerator(); var result=new List<AudioDevice>{new("","跟随 Windows 默认通信麦克风")};
-        foreach(var d in e.EnumerateAudioEndPoints(DataFlow.Capture,DeviceState.Active)){result.Add(new(d.ID,d.FriendlyName));d.Dispose();}return result;
+        if(log!=null)
+        {
+            foreach(var role in new[]{Role.Communications,Role.Multimedia,Role.Console})
+            {
+                try{using var d=e.GetDefaultAudioEndpoint(DataFlow.Capture,role);AudioLog.Write(log,"InventoryDefault",null,null,("role",role),("endpoint",AudioLog.DeviceKey(d.ID)));}
+                catch(Exception error){AudioLog.Write(log,"InventoryDefaultFailed",null,error,("role",role));}
+            }
+            try
+            {
+                var all=e.EnumerateAudioEndPoints(DataFlow.Capture,DeviceState.All);
+                AudioLog.Write(log,"InventoryAllStates",null,null,("count",all.Count),("detailsLimit",64));
+                foreach(var d in all.Take(64))using(d)
+                {
+                    try{AudioLog.Write(log,"InventoryEndpointState",null,null,("endpoint",AudioLog.DeviceKey(d.ID)),("state",d.State),("dataFlow","Capture"));}
+                    catch(Exception error){AudioLog.Write(log,"InventoryEndpointStateFailed",null,error);}
+                }
+            }
+            catch(Exception error){AudioLog.Write(log,"InventoryAllStatesFailed",null,error);}
+        }
+        foreach(var d in e.EnumerateAudioEndPoints(DataFlow.Capture,DeviceState.Active))
+        {
+            using(d)
+            {
+                string id=d.ID;
+                AudioLog.Write(log,"InventoryEndpoint",null,null,("index",result.Count-1),("endpoint",AudioLog.DeviceKey(id)),("state",DeviceState.Active));
+                string name;
+                try{name=d.FriendlyName;}
+                catch(Exception error)when(error is COMException or InvalidOperationException)
+                {
+                    AudioLog.Write(log,"EndpointNameReadFailed",null,error,("endpoint",AudioLog.DeviceKey(id)));
+                    name=$"麦克风 {result.Count}（设备名称暂不可用）";
+                }
+                result.Add(new(id,name));
+            }
+        }
+        AudioLog.Write(log,"InventoryCompleted",null,null,("activeCount",result.Count-1));
+        return result;
+        }
+        catch(Exception error){AudioLog.Write(log,"InventoryFailed",null,error);throw;}
     }
     public void Start()
     {
@@ -106,6 +164,7 @@ public sealed class AudioCapture : IAudioCapture
         if(Interlocked.Exchange(ref faulted,1)!=0)return;
         FailureMessage=text;
         Diagnostic=$"stage={stage}; format={FormatDescription}; exception={error?.GetType().Name??"None"}; hresult=0x{error?.HResult??0:X8}; pcm_samples={SamplesSent}";
+        AudioLog.Write(log,"CaptureFailed",turnId,error,("stage",stage),("pcmSamples",SamplesSent),("queuedBytes",Volatile.Read(ref queuedBytes)));
         // Queue the controller's failure before publishing the stopped event. Delaying
         // this notification on another worker could make an incomplete turn look done.
         try{fault(text);}catch{}
@@ -146,6 +205,7 @@ public sealed class AudioCapture : IAudioCapture
         finally
         {
             while(queue.Reader.TryRead(out var b)){Interlocked.Add(ref queuedBytes,-b.Count);ArrayPool<byte>.Shared.Return(b.Buffer,true);}
+            AudioLog.Write(log,"ProcessingStopped",turnId,null,("pcmSamples",SamplesSent),("faulted",Volatile.Read(ref faulted)!=0),("cancelled",abort.IsCancellationRequested));
         }
     }
     public async Task StopAsync(CancellationToken token)

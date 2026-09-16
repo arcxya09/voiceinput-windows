@@ -89,8 +89,11 @@ public sealed partial class AppController
         var failedAudio = audio; audio = null;
         var failedClient = asr; asr = null;
         var cleanup = new StringBuilder();
-        void Failed(string operation, Exception error) => cleanup.AppendLine()
-            .Append("清理阶段：").AppendLine(operation).Append(ExceptionMetadata(error));
+        void Failed(string operation, Exception error)
+        {
+            LogEvent("CleanupFailed",error,fields:[("Operation",operation)]);
+            cleanup.AppendLine().Append("清理阶段：").AppendLine(operation).Append(ExceptionMetadata(error));
+        }
         try { failedAudio?.Abort(); } catch (Exception e) { Failed("AbortMicrophone", e); }
         try { failedClient?.Abort(); } catch (Exception e) { Failed("AbortRecognition", e); }
         if (failedAudio != null)
