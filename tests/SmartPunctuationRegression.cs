@@ -19,8 +19,9 @@ internal static class SmartPunctuationRegression
         });
         await test("2.1.12 旧默认提示词升级，自定义提示词原样保留",()=>
         {
-            Check(PolishRules.ResolvePrompt(PolishRules.PreviousSystemPrompt)==PolishRules.SystemPrompt);
-            Check(PolishRules.ResolvePrompt(PolishRules.PreviousSystemPrompt.Replace("\n","\r\n"))==PolishRules.SystemPrompt);
+            Check(PolishRules.ResolvePrompt(PolishRules.PreviousSystemPrompt)==PolishRules.SystemPrompt,"旧默认提示词未迁移");
+            foreach(string newline in new[]{"\n","\r\n","\r"})
+                Check(PolishRules.ResolvePrompt(PolishRules.PreviousSystemPrompt.ReplaceLineEndings(newline))==PolishRules.SystemPrompt,"不同换行符的旧默认提示词未迁移");
             string custom=PolishRules.PreviousSystemPrompt+"\n保留作者指定风格。";
             Check(PolishRules.ResolvePrompt(custom)==custom);
             Check(new AppSettings().SmartPunctuationEnabled);

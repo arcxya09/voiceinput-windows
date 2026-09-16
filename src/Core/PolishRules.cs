@@ -12,7 +12,7 @@ public static class PolishRules
     {
         if(string.IsNullOrWhiteSpace(prompt))return SystemPrompt;
         string value=prompt.Trim();
-        if(value.Replace("\r\n","\n")==PreviousSystemPrompt)return SystemPrompt;
+        if(value.ReplaceLineEndings("\n")==PreviousSystemPrompt.ReplaceLineEndings("\n"))return SystemPrompt;
         if(JsonCodec.Count(value)>MaxPromptLength||value.Any(c=>char.IsControl(c)&&c is not ('\r' or '\n' or '\t')))
             throw new ArgumentException("润色提示词最多 8,000 字，不能含有非法控制字符。");
         return value;
