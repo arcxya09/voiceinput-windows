@@ -42,3 +42,11 @@ CI 使用 windows-latest，不是 Win10 实机；没有真实麦克风和云端�
 - [SetWindowPos](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos)
 - [IsAlwaysOnTop](https://learn.microsoft.com/en-us/windows/windows-app-sdk/api/winrt/microsoft.ui.windowing.overlappedpresenter.isalwaysontop)
 - [Windows 麦克风权限](https://support.microsoft.com/en-us/windows/privacy/turn-on-app-permissions-for-your-microphone-in-windows)
+
+## 2.1.11 音频包兼容收尾
+
+`PacketMetadataAnomaly` 表示驱动位置或时间戳不符合精确收尾假设，应用继续读取 PCM，并使用 `CompatibilityDrainStarted` 的停止后排空路径。`TailClockFallback` 表示松键后迟迟未收到覆盖边界的时间戳，也进入该路径。`CaptureBuffer` 中的 `bufferFrames` 才是实际缓冲容量，首包帧数并不等于缓冲容量。
+
+详细异常包记录前 16 条，`NativeCaptureStopped` 汇总总异常数、报告缺口帧数、排空帧数。重复位置及不可信时钟本身不证明 PCM 丢失；正向位置缺口会提示用户核对复制结果。真实 COM、设备或数据队列故障仍会终止该轮，日志保留原始异常类型和 HRESULT。
+
+参考：[WASAPI 缓冲标记](https://learn.microsoft.com/en-us/windows/win32/api/audioclient/ne-audioclient-_audclnt_bufferflags)、[GetBuffer](https://learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudiocaptureclient-getbuffer)、[Stop](https://learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudioclient-stop)、[Reset 会清空缓冲](https://learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudioclient-reset)、[MMCSS](https://learn.microsoft.com/en-us/windows/win32/procthread/multimedia-class-scheduler-service)。共享事件模式继续使用两个零时长参数，遵守 [Initialize 文档](https://learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudioclient-initialize)。

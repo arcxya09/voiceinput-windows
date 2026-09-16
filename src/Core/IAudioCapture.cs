@@ -7,6 +7,7 @@ public interface IAudioCapture : IAsyncDisposable
     string FormatDescription { get; }
     string Diagnostic { get; }
     string? FailureMessage { get; }
+    string? QualityWarning => null;
     long SamplesSent { get; }
     void Start();
     void RequestStop();

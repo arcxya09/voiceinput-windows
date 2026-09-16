@@ -21,7 +21,8 @@ public sealed partial class AppController : IAsyncDisposable
     private TranscriptEngine? engine;
     private CaptureState state = CaptureState.Idle;
     private string status = "配置 Key 后即可开始录音。";
-    private string? captureFailure;
+    private string? captureFailure, captureWarning;
+    internal Task<string?> CaptureWarningAsync(string turnId) => OnActor(() => captureAttempt?.Id == turnId ? captureWarning : null);
     private string diagnostic="尚无录音诊断。";
     private readonly object diagnosticSync=new();
     private sealed class CaptureAttempt(string id,long pressedAt)
@@ -239,7 +240,7 @@ public sealed partial class AppController : IAsyncDisposable
             var allowed=await OnActor(()=>state is not (CaptureState.Recording or CaptureState.Connecting or CaptureState.Draining or CaptureState.Closing));
             if(!allowed){LogEvent("StartRejected",turnId:turnId,fields:[("Reason","CaptureBusy")]);return false;}
             var attempt=new CaptureAttempt(turnId,pressedAt);
-            await OnActor(()=>{captureAttempt=attempt;captureFailure=null;});
+            await OnActor(()=>{captureAttempt=attempt;captureFailure=null;captureWarning=null;});
             Stage("Configuration");
             Settings.AsrUri();if(Keys.BailianKey.Length==0)throw new ArgumentException("请先在设置页填写百炼 API Key。");
             startup=CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token,cancelled);startup.CancelAfter(15000);
@@ -291,8 +292,10 @@ public sealed partial class AppController : IAsyncDisposable
             // exception to preparation, without mislabelling a transport failure.
             if(preparation?.Exception is {} preparationError&&ExceptionChain(preparationError).Any(x=>ReferenceEquals(x,e)))
                 startStage="PreparingRecognition";
+            string? priorCaptureFailure=e is OperationCanceledException?await OnActor(()=>captureFailure):null;
+            if(priorCaptureFailure!=null)startStage="ReadingMicrophone";
             LogEvent("StartFailed",e,turnId,("FailureStage",startStage),("State",state.ToString()),("Cancelled",e is OperationCanceledException));
-            string error=IsMicrophoneStage(startStage)?MicrophoneError(e,startStage):asr?.FailureMessage??SafeError(e);
+            string error=priorCaptureFailure??(IsMicrophoneStage(startStage)?MicrophoneError(e,startStage):asr?.FailureMessage??SafeError(e));
             string audioDetail=audio?.Diagnostic.Length>0?audio.Diagnostic:audio?.FormatDescription??"音频格式尚未读取";
             CancelToken(startup);
             string cleanup=await CleanupFailedStartAsync();
@@ -301,7 +304,7 @@ public sealed partial class AppController : IAsyncDisposable
             {
                 if(IsMicrophoneStage(startStage)&&e is not OperationCanceledException)captureFailure=error;
                 if(engine?.Session.HotwordState=="Prepared")engine.UpdateSession(engine.Session with{HotwordState="Failed",Revision=engine.Session.Revision+1});
-                state=e is OperationCanceledException?CaptureState.Stopped:CaptureState.Faulted;Status(captureFailure??error);
+                state=e is OperationCanceledException&&captureFailure==null?CaptureState.Stopped:CaptureState.Faulted;Status(captureFailure??error);
             });
             return false;
         }
@@ -427,6 +430,8 @@ public sealed partial class AppController : IAsyncDisposable
                 if(audio!=null)
                 {
                     await audio.StopAsync(budget.Token);
+                    string? warning=audio.QualityWarning;
+                    await OnActor(()=>captureWarning=warning);
                     if(audio.FailureMessage is {} failure){gap=failure;await OnActor(()=>FailCapture(failure));}
                 }
                 await client.FinishAsync(budget.Token);

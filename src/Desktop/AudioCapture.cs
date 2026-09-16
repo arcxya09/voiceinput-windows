@@ -31,6 +31,8 @@ public sealed class AudioCapture : IAudioCapture
     public string FormatDescription=>decoder.Format.ToString()+(UsedDefaultFallback?"；已选麦克风不可用，使用 Windows 默认通信麦克风":"");
     public string Diagnostic { get; private set; }="";
     public string? FailureMessage { get; private set; }
+    public string? QualityWarning => capture.ReportedGapFrames > 0
+        ? "麦克风报告音频位置缺口，文字已复制，请核对后手动粘贴。" : null;
     public long SamplesSent { get; private set; }
     public string EndpointId { get; }
     public bool UsedDefaultFallback { get; }

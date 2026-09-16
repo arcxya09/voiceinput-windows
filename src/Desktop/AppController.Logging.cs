@@ -16,7 +16,7 @@ public sealed partial class AppController
     internal static string LogDeliveryState(string? state)=>state switch
     {
         "Pending" or "Copying" or "Sending" or "Copied" or "Sent" or "Blocked" or "Unknown" or
-        "Cancelled" or "StartFailed" or "Empty" or "NotRequested" or "PasteSent" or "CopyFailed" or "Partial" or "Dictated"=>state,
+        "Cancelled" or "Failed" or "StartFailed" or "Empty" or "NotRequested" or "PasteSent" or "CopyFailed" or "Partial" or "Dictated"=>state,
         _=>"Other"
     };
 }
