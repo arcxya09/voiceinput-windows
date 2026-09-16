@@ -461,6 +461,7 @@ await ClipboardPasteRegression.Run(Test);
 await ReleaseDeliveryRegression.Run(Test);
 await SmartPunctuationRegression.Run(Test);
 await AdaptiveAsrRegression.Run(Test);
+await UpdateRegression.Run(Test);
 await StartupCaptureRegression.RunInputCompatibility(Test);
 await StartupCaptureRegression.RunRepeatedInput(Test);
 await InputCompatibilityRegression.Run(Test);
