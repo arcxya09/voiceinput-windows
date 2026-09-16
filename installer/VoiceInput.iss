@@ -40,6 +40,7 @@ VersionInfoProductVersion={#AppVersion}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+LicenseFile={#PackageDir}\LICENSE.txt
 UsePreviousAppDir=yes
 UsePreviousTasks=yes
 ; A hidden tray application treats WM_CLOSE as hide. Never force close it:
@@ -57,6 +58,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 Source: "{#PackageDir}\VoiceInput.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\README.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PackageDir}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\app\*"; DestDir: "{app}\app"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#PackageDir}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs
 

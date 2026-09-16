@@ -25,12 +25,13 @@ try {
         Expand-Archive -LiteralPath $archive -DestinationPath $unpacked
         $Executable = Join-Path $unpacked 'VoiceInput.exe'
         $rootNames = @(Get-ChildItem -LiteralPath $unpacked | ForEach-Object Name | Sort-Object)
-        if (@(Compare-Object @('app', 'licenses', 'README.txt', 'VoiceInput.exe') $rootNames).Count -ne 0) {
+        if (@(Compare-Object @('app', 'licenses', 'README.txt', 'LICENSE.txt', 'VoiceInput.exe') $rootNames).Count -ne 0) {
             throw "The portable root is not organized as documented: $($rootNames -join ', ')"
         }
         foreach ($required in @('app/RealtimeTranscription.exe', 'app/RealtimeTranscription.pri', 'app/Microsoft.UI.Xaml.dll', 'app/coreclr.dll')) {
             if (!(Test-Path (Join-Path $unpacked $required) -PathType Leaf)) { throw "The portable app directory is missing $required" }
         }
+        if ([IO.File]::ReadAllText((Join-Path $unpacked 'LICENSE.txt')) -cne [IO.File]::ReadAllText((Join-Path $PSScriptRoot '../LICENSE.txt'))) { throw 'The portable personal-use license differs from the repository license.' }
         Write-Host "Testing the extracted release package: $([IO.Path]::GetFileName($archive))"
     }
     $path = (Resolve-Path $Executable).Path

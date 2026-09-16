@@ -68,16 +68,18 @@ if (Test-Path $PackageDirectory) { Remove-Item $PackageDirectory -Recurse -Force
 [IO.Directory]::CreateDirectory([IO.Path]::GetFullPath($PackageDirectory)) | Out-Null
 Copy-Item -LiteralPath $PublishDirectory -Destination (Join-Path $PackageDirectory 'app') -Recurse
 Copy-Item -LiteralPath 'licenses' -Destination (Join-Path $PackageDirectory 'licenses') -Recurse
+# Use a BOM for Inno Setup's license page; preserve the repository text verbatim.
+[IO.File]::WriteAllText([IO.Path]::GetFullPath((Join-Path $PackageDirectory 'LICENSE.txt')), [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'LICENSE.txt')), [Text.UTF8Encoding]::new($true))
 $PackageReadme = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'installer/README.txt')).Replace('@VERSION@', $AppVersion)
 [IO.File]::WriteAllText([IO.Path]::GetFullPath((Join-Path $PackageDirectory 'README.txt')), $PackageReadme, [Text.UTF8Encoding]::new($true))
 & (Join-Path $PSScriptRoot 'scripts/BuildLauncher.ps1') -OutputDirectory $PackageDirectory -Version $AppVersion
 
 # The user-facing root is intentionally small; all framework and application
 # resources remain together under app/ so WinUI's resource lookup stays intact.
-$ExpectedRoot = @('VoiceInput.exe','app','licenses','README.txt')
+$ExpectedRoot = @('VoiceInput.exe','app','licenses','README.txt','LICENSE.txt')
 $ActualRoot = @(Get-ChildItem -LiteralPath $PackageDirectory | Select-Object -ExpandProperty Name)
 if (@(Compare-Object $ExpectedRoot $ActualRoot).Count) { throw 'The portable root contains unexpected or missing files.' }
-foreach ($required in @('VoiceInput.exe','README.txt','app/RealtimeTranscription.exe','app/RealtimeTranscription.pri','app/Microsoft.UI.Xaml.dll','app/coreclr.dll','app/Assets/AppIcon.ico','app/Assets/Logo.png')) {
+foreach ($required in @('VoiceInput.exe','README.txt','LICENSE.txt','app/RealtimeTranscription.exe','app/RealtimeTranscription.pri','app/Microsoft.UI.Xaml.dll','app/coreclr.dll','app/Assets/AppIcon.ico','app/Assets/Logo.png')) {
     if (!(Test-Path (Join-Path $PackageDirectory $required))) { throw "The organized portable package is missing $required" }
 }
 $OutputZip = "artifacts/VoiceInput-Portable-x64-$AppVersion.zip"

@@ -87,9 +87,10 @@ function Invoke-InstallerProcess([string]$Path, [string[]]$Arguments) {
 
 function Invoke-TestInstall([string]$Suffix) {
     Invoke-InstallerProcess $setup @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$installDirectory", "/GROUP=$group", "/LOG=$(Join-Path $evidenceDirectory "installer-install$Suffix.log")")
-    foreach ($relative in @('VoiceInput.exe', 'app/RealtimeTranscription.exe', 'app/RealtimeTranscription.pri', 'app/Microsoft.UI.Xaml.dll')) {
+    foreach ($relative in @('VoiceInput.exe', 'LICENSE.txt', 'app/RealtimeTranscription.exe', 'app/RealtimeTranscription.pri', 'app/Microsoft.UI.Xaml.dll')) {
         if (!(Test-Path -LiteralPath (Join-Path $installDirectory $relative) -PathType Leaf)) { throw "The installer did not create $relative." }
     }
+    if ([IO.File]::ReadAllText((Join-Path $installDirectory 'LICENSE.txt')) -cne [IO.File]::ReadAllText((Join-Path $PSScriptRoot '../LICENSE.txt'))) { throw 'The installed personal-use license differs from the repository license.' }
     $registration = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($uninstallSubkey)
     try {
         if (!$registration -or $registration.GetValue('DisplayVersion') -ne $version) { throw 'The per-user uninstall registration has no matching application version.' }
