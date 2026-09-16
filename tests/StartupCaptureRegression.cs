@@ -401,7 +401,11 @@ static class StartupCaptureRegression
             await turn.Socket.FirstPcm.Task.WaitAsync(Budget);
             if(scenario=="audio-fault")
             {
+                var faultObserved=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                fixture.App.InputInterrupted+=_=>faultObserved.TrySetResult();
                 capture.EmitFault("麦克风设备已失效，请重新连接。");
+                await faultObserved.Task.WaitAsync(Budget);
+                PhysicalHook.Latest.Emit("up",downAt+10); // Late short release must retain the device failure.
                 var failed=await completed.Task.WaitAsync(Budget);
                 Check(failed.DeliveryState=="Failed"&&failed.Status.Contains("设备已失效"),"真实采集故障被普通取消掩盖。");
                 Check(CapsulePresentation.CompletionLabel(failed.DeliveryState)=="识别失败"&&TextDelivery.CopyAttempts==0&&TextDelivery.Sends==0,"故障状态或投递门禁错误。");

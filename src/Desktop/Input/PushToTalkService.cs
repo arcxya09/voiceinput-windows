@@ -113,7 +113,7 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
                         if(t.ReleasedAt!=0)continue;
                         t.ReleasedAt=s.At;controller.RequestStopCapture();Listening?.Invoke(false);
                         LogTurn("Released",t,fields:[("HeldMs",Math.Max(0,s.At-t.PressedAt))]);
-                        if(s.At-t.PressedAt<controller.Settings.HoldMs){LogTurn("Cancelled",t,fields:[("Reason","ShortPress")]);t.Invalid=true;t.Reason="短按已取消。";t.CancelInput();}
+                        if(!t.Invalid&&s.At-t.PressedAt<controller.Settings.HoldMs){LogTurn("Cancelled",t,fields:[("Reason","ShortPress")]);t.Invalid=true;t.Reason="短按已取消。";t.CancelInput();}
                         t.Stop=controller.StopAsync(false);t.Released.TrySetResult();
                     }
                     else if(s.Kind is "activity" or "escape" or "cancel"||s.Kind.StartsWith("cancel:"))
