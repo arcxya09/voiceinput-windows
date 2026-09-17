@@ -23,7 +23,7 @@ public record AppSettings
     public string ProjectId { get; init; } = "default";
     public bool PolishEnabled { get; init; } = true;
     public bool PreferFastDelivery { get; init; } = true;
-    public bool HighAccuracyEnabled { get; init; } = true;
+    public bool HighAccuracyEnabled { get; init; }
     public bool AdaptiveAsrEnabled { get; init; } = true;
     public bool SmartPunctuationEnabled { get; init; } = true;
     public string PolishPrompt { get; init; } = PolishRules.SystemPrompt;

@@ -33,3 +33,28 @@ WM_PASTE 可用于支持该消息的标准编辑控件，但不能假定所有�
 - [UI Automation 控件模式](https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-controlpatternsoverview)
 - [WM_PASTE 支持范围](https://learn.microsoft.com/en-us/windows/win32/dataxchg/wm-paste)
 - [ValuePattern.SetValue](https://learn.microsoft.com/en-us/windows/win32/api/uiautomationclient/nf-uiautomationclient-iuiautomationvaluepattern-setvalue)
+
+
+## 2026-09-17：无需剪贴板的上屏方案
+
+目标是避免其他进程占用、替换剪贴板影响输入。不存在对所有 Windows 应用均可靠的通用后台写入接口。下表为基于微软接口契约和当前代码结构的工程判断，尚未在用户反馈的目标软件中验证。
+
+| 方案 | 能否绕开剪贴板 | 适用范围与限制 |
+| --- | --- | --- |
+| TSF 文本服务 | 可以 | 在目标文档的读写编辑会话中向当前选区提交整段文字，适合长期输入法架构；需要注册、激活文本服务及管理目标上下文，不能仅在现有托盘进程调用一次接口就写入任意应用。仍需验证各编辑器兼容性。 |
+| 应用专用插件或编辑接口 | 可以 | 能按目标编辑器的插入与撤销规则提交内容，但需要逐个应用接入，无法覆盖未知软件。 |
+| 标准 Edit/RichEdit 的 EM_REPLACESEL | 可以 | 可替换选区或在插入点写入；仅适用于确认为支持该消息的标准控件，不能作为网页或自绘编辑器的通用接口。 |
+| UI Automation | 部分可以 | TextPattern 提供读取和选区操作，不能写入；ValuePattern.SetValue 可设置支持控件的值，但并非通用的光标位置插入接口，贸然设置可能替换整个输入框。 |
+| SendInput + KEYEVENTF_UNICODE | 可以 | 通过 VK_PACKET/WM_CHAR 发送字符，目标必须正确处理；仍受焦点、按键状态、UIPI 等影响。不能把接受输入事件等同于正文已完整插入。 |
+| 当前整段剪贴板粘贴 | 不可以 | 对各类编辑器覆盖较广，但依赖共享剪贴板；2.4.1 加强了占用恢复和失败提示。 |
+
+建议：长期以 TSF 文本服务为主方向，先制作独立原型验证常用应用、中文输入法候选态、选区替换和撤销；短期保留已验证的整段粘贴，可按明确支持的目标增加专用适配。任一路径可能已插入部分正文后，都不应盲目切换另一种方式重发，以免重复输入。此处为方案建议，本版没有切换上屏接口。
+
+微软资料：
+
+- [TSF 框架](https://learn.microsoft.com/en-us/windows/win32/tsf/about-text-services-framework)
+- [在选区提交文字与读写编辑会话](https://learn.microsoft.com/en-us/windows/win32/api/msctf/nf-msctf-itfinsertatselection-inserttextatselection)
+- [UI Automation TextPattern 与 TSF 的定位](https://learn.microsoft.com/en-us/dotnet/framework/ui-automation/ui-automation-textpattern-overview)
+- [Unicode 键盘输入的处理机制](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-keybdinput)
+- [SendInput 的权限和按键状态限制](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput)
+- [标准编辑控件 EM_REPLACESEL](https://learn.microsoft.com/en-us/windows/win32/controls/em-replacesel)
