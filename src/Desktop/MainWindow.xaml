@@ -480,8 +480,8 @@
                                         <TextBox x:Name="WorkspaceBox" Grid.Column="1" Header="Workspace ID" PlaceholderText="业务空间 ID"/>
                                     </Grid>
                                     <CheckBox x:Name="LegacyBox"><TextBlock Text="使用兼容地址（无需 Workspace ID）" TextWrapping="Wrap"/></CheckBox>
-                                    <CheckBox x:Name="HighAccuracyBox" Content="高精度模式：松开后复核整段语音（默认开启）"/>
-                                    <TextBlock Text="使用百炼再次识别完整录音，会增加一次识别费用和等待时间。单次最多复核 3 分钟，最长等待 12 秒；失败或超时使用实时结果。回车跳过等待，Esc 取消输入。音频仅暂存内存。" Style="{StaticResource SecondaryText}"/>
+                                    <CheckBox x:Name="HighAccuracyBox" Content="高精度模式：松开后复核整段语音（默认关闭）"/>
+                                    <TextBlock Text="按需开启后，使用百炼再次识别完整录音，会增加一次识别费用和等待时间。单次最多复核 3 分钟，最长等待 12 秒；失败或超时使用实时结果。回车跳过等待，Esc 取消输入。音频仅暂存内存。" Style="{StaticResource SecondaryText}"/>
                                     <CheckBox x:Name="AdaptiveAsrBox" Content="根据音量和背景噪声自动调整识别灵敏度"/>
                                     <CheckBox x:Name="SmartPunctuationBox" Content="智能标点：短输入省略句末句号"/>
                                     <TextBlock Text="适用于单词、短语和简短单句；保留问号、感叹号、多句及专业符号。关闭润色或润色超时也会生效。" Style="{StaticResource SecondaryText}"/>

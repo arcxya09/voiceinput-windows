@@ -20,10 +20,30 @@ static partial class StartupCaptureRegression
     }
     public static async Task RunAsrReview(Func<string, Func<Task>, Task> test)
     {
-        await test("高精度：新配置和旧配置缺省开启，显式关闭保持", () =>
+        await test("高精度：新配置和旧配置缺省关闭，显式开关保持", () =>
         {
-            Check(new AppSettings().HighAccuracyEnabled && JsonSerializer.Deserialize<AppSettings>("{}", JsonCodec.Options)!.HighAccuracyEnabled, "缺省未开启");
+            Check(!new AppSettings().HighAccuracyEnabled && !JsonSerializer.Deserialize<AppSettings>("{}", JsonCodec.Options)!.HighAccuracyEnabled, "缺省未关闭");
+            Check(JsonSerializer.Deserialize<AppSettings>("{\"highAccuracyEnabled\":true}", JsonCodec.Options)!.HighAccuracyEnabled, "显式开启设置丢失");
             Check(!JsonSerializer.Deserialize<AppSettings>("{\"highAccuracyEnabled\":false}", JsonCodec.Options)!.HighAccuracyEnabled, "关闭设置丢失");
+            return Task.CompletedTask;
+        });
+        await test("高精度：磁盘缺省关闭，保存和重启保留显式开关", () =>
+        {
+            string folder = Path.Combine(Path.GetTempPath(), "VoiceInput-ReviewDefaults-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                var store = new SettingsStore(folder, new TestProtector());
+                Check(!store.Load().HighAccuracyEnabled, "首次安装仍开启复核");
+                File.WriteAllText(Path.Combine(folder, "settings.json"), "{\"schemaVersion\":4,\"legacyEndpoint\":true}");
+                Check(!store.Load().HighAccuracyEnabled, "旧配置缺少字段仍开启复核");
+                foreach (bool enabled in new[] { true, false })
+                {
+                    store.Save(store.Load() with { HighAccuracyEnabled = enabled }, new());
+                    Check(new SettingsStore(folder, new TestProtector()).Load().HighAccuracyEnabled == enabled,
+                        "重启覆盖用户保存的开关");
+                }
+            }
+            finally { if (Directory.Exists(folder)) Directory.Delete(folder, true); }
             return Task.CompletedTask;
         });
         await test("高精度：WAV 保留所有首尾PCM，超限整段回退且缓存只消费一次", () =>
@@ -122,15 +142,15 @@ static partial class StartupCaptureRegression
             if (scenario == "edit") Check(TranscriptText.Render(snapshot) == "保留手动编辑。", "用户编辑丢失");
             if (scenario != "next-turn") Check(snapshot.Session!.AsrReviewState == "Fallback", "回退状态丢失");
         });
-        await test("高精度：关闭、取消、空白、缺口和超长录音不发起复核", async () =>
+        await test("高精度：默认、关闭、取消、空白、缺口和超长录音不发起复核", async () =>
         {
-            foreach (string scenario in new[] { "disabled", "cancelled", "empty", "gap", "long" })
+            foreach (string scenario in new[] { "default", "disabled", "cancelled", "empty", "gap", "long" })
             {
                 int calls = 0; var turn = new Turn();
                 if (scenario == "empty") turn.Socket.FinalText = "";
                 if (scenario == "gap") turn.Socket.IncompleteTail = true;
                 await using var f = await Fixture.Create([turn], (_, _) => { calls++; return Task.FromResult(ReviewReply("不应请求")); });
-                await f.App.SaveSettingsAsync(f.App.Settings with { HighAccuracyEnabled = scenario != "disabled" }, f.App.Keys);
+                await f.App.SaveSettingsAsync(f.App.Settings with { HighAccuracyEnabled = scenario == "default" ? new AppSettings().HighAccuracyEnabled : scenario != "disabled" }, f.App.Keys);
                 Check(await f.Start(), "启动失败"); var capture = await turn.StartedCapture();
                 int count = scenario == "long" ? AsrReviewBuffer.MaxBytes / 3200 + 1 : 1;
                 for (int i = 0; i < count; i++) { await capture.EmitPcm(new byte[3200]); if (i % 10 == 0) await Task.Delay(1); }
