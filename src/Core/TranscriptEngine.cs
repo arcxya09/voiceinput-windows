@@ -18,12 +18,13 @@ public sealed partial class TranscriptEngine
     public event Action<SegmentData>? Changed;
     public IReadOnlyList<SegmentData> Segments => segments.Values.OrderBy(s => s.TaskOrder).ThenBy(s => s.SentenceId).ToArray();
     private readonly bool wholeTurn;
-    public int Pending => pending.Count+(Session.WholePolishState=="Waiting"?1:0);
+    public int Pending => pending.Count+(Session.WholePolishState=="Waiting"?1:0)+(Session.AsrReviewState=="Waiting"?1:0);
     public TranscriptEngine(SessionData session, Func<long>? clock = null,bool wholeTurn=false) { Session = session; this.clock = clock ?? (() => Environment.TickCount64); this.wholeTurn=wholeTurn; }
     public void Restore(IEnumerable<SegmentData> saved)
     {
         // Loading history must never reinterpret old text using today's mappings.
         appliedConfirmedCorrections = true;
+        if(Session.AsrReviewState=="Waiting")Session=Session with{AsrReviewState="Fallback",AsrReviewReason="Interrupted",Revision=Session.Revision+1};
         if(Session.WholePolishState=="Waiting")Session=Session with{WholePolishState="Fallback",WholePolishReason="上次全文润色未完成，保留原文",Revision=Session.Revision+1};
         foreach (var value in saved)
         {

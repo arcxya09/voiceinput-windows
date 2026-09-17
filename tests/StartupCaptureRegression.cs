@@ -5,7 +5,7 @@ using RealtimeTranscription.Desktop.Input;
 using RealtimeTranscription.Desktop;
 using RealtimeTranscription.Infrastructure;
 
-static class StartupCaptureRegression
+static partial class StartupCaptureRegression
 {
     private static readonly TimeSpan Budget = TimeSpan.FromSeconds(5);
     private static void Check(bool value, string message) { if (!value) throw new Exception(message); }
@@ -654,7 +654,7 @@ static class StartupCaptureRegression
             var protector = new TestProtector();
             new SettingsStore(f.folder, protector).Save(new()
             {
-                LegacyEndpoint = true, DictationOnly = true, SaveMemory = false, AllowLearning = false,
+                LegacyEndpoint = true, DictationOnly = true, HighAccuracyEnabled = false, SaveMemory = false, AllowLearning = false,
                 LearnCorrections = false, DynamicLexicon = false, PolishEnabled = false, UseLexicon = false
             }, new("TEST_ONLY", ""));
             var pending = new Queue<Turn>(turns);

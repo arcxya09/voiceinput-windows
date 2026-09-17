@@ -29,6 +29,9 @@ public sealed partial class AppController : IAsyncDisposable
     {
         public readonly string Id=id;
         public readonly AudioEnvironmentAnalyzer EnvironmentAnalysis = new();
+        public AppSettings Options = new();
+        public AsrReviewBuffer? ReviewAudio;
+        public bool ReviewAudioComplete, ReviewStarted;
         public readonly long PressedAt=pressedAt;
         public long FirstAudioAt,AsrReadyAt,FirstRecognitionAt;
         public long StopRequestedAt,AudioStoppedAt,AsrStoppedAt,PolishStartedAt,PolishFinishedAt;
@@ -100,7 +103,7 @@ public sealed partial class AppController : IAsyncDisposable
     {
         Log=log??new RuntimeLog(Path.Combine(folder,"logs"));ownsLog=log==null;
         captureFactory=(device,send,fault,level)=>new AudioCapture(device,send,fault,level,Log,captureAttempt?.Id);
-        protector??=new WindowsProtector();deepseek=new(provider);settingsStore = new(folder,protector); Repository = new(Path.Combine(folder,"sessions.db"),protector);
+        protector??=new WindowsProtector();deepseek=new(provider);asrReview=new(provider);settingsStore = new(folder,protector); Repository = new(Path.Combine(folder,"sessions.db"),protector);
         eventLoop = Task.Run(async()=>{await foreach(var action in events.Reader.ReadAllAsync()){try{action();}catch(Exception e){LogEvent("ActorFailed",e);Message?.Invoke("操作未完成，已保留现有文字。");}}});
         timer = Task.Run(TimerLoop);
         maintenance = Task.Run(MaintenanceLoop);
@@ -141,6 +144,8 @@ public sealed partial class AppController : IAsyncDisposable
     private void Status(string text){status=text;Notify();}
     private void NewEngine(SessionData session,IEnumerable<SegmentData>? saved=null)
     {
+        CancelToken(reviewCancellation);
+        captureAttempt?.ReviewAudio?.Dispose();
         var next=new TranscriptEngine(session,wholeTurn:true);
         next.Changed+=s=>Persist(next,s);
         engine=next;if(saved!=null)next.Restore(saved);
@@ -245,8 +250,9 @@ public sealed partial class AppController : IAsyncDisposable
         {
             var allowed=await OnActor(()=>state is not (CaptureState.Recording or CaptureState.Connecting or CaptureState.Draining or CaptureState.Closing));
             if(!allowed){LogEvent("StartRejected",turnId:turnId,fields:[("Reason","CaptureBusy")]);return false;}
-            var attempt=new CaptureAttempt(turnId,pressedAt);
             var turnSettings=Settings;
+            captureAttempt?.ReviewAudio?.Dispose();
+            var attempt=new CaptureAttempt(turnId,pressedAt) { Options=turnSettings };
             await OnActor(()=>{captureAttempt=attempt;captureFailure=null;captureWarning=null;});
             Stage("Configuration");
             Settings.AsrUri();if(Keys.BailianKey.Length==0)throw new ArgumentException("请先在设置页填写百炼 API Key。");
@@ -260,6 +266,7 @@ public sealed partial class AppController : IAsyncDisposable
             await OnActor(()=>
             {
                 CancelToken(extraction);NewEngine(new SessionData{Id=turnId,ProjectId=Settings.ProjectId,AllowLearning=Settings.AllowLearning});
+                attempt.ReviewAudio=turnSettings.HighAccuracyEnabled?new AsrReviewBuffer():null;
                 state=CaptureState.Connecting;
                 lastResponse=lastVoice=lastProgress=Environment.TickCount64;voiceSeen=false;billedSeconds=0;
                 Status("正在准备麦克风…");
@@ -269,7 +276,7 @@ public sealed partial class AppController : IAsyncDisposable
             // Local capture precedes database refresh and the cloud handshake. Startup PCM
             // is bounded to the same fifteen seconds as the overall startup deadline.
             Stage("OpeningMicrophone");
-            var capture=await Task.Run(()=>captureFactory(turnSettings.DeviceId,(pcm,token)=>{attempt.EnvironmentAnalysis.Add(pcm);return client.AudioAsync(pcm,token);},text=>AudioFault(client.TaskId,text),value=>AudioLevel(attempt,client.TaskId,value)),startupToken);audio=capture;
+            var capture=await Task.Run(()=>captureFactory(turnSettings.DeviceId,(pcm,token)=>{attempt.EnvironmentAnalysis.Add(pcm);var sent=client.AudioAsync(pcm,token);attempt.ReviewAudio?.Add(pcm);return sent;},text=>AudioFault(client.TaskId,text),value=>AudioLevel(attempt,client.TaskId,value)),startupToken);audio=capture;
             // A release can arrive while the device is being constructed and audio
             // is still null. Forward it before Start so no post-release PCM is read.
             Stage("StartingMicrophone");
@@ -315,6 +322,7 @@ public sealed partial class AppController : IAsyncDisposable
             string error=priorCaptureFailure??(IsMicrophoneStage(startStage)?MicrophoneError(e,startStage):asr?.FailureMessage??SafeError(e));
             string audioDetail=audio?.Diagnostic.Length>0?audio.Diagnostic:audio?.FormatDescription??"音频格式尚未读取";
             CancelToken(startup);
+            captureAttempt?.ReviewAudio?.Dispose();
             string cleanup=await CleanupFailedStartAsync();
             SetDiagnostic("StartFailed",e,$"失败阶段：{startStage}（{StageLabel(startStage)}）\n{audioDetail}\n错误：{error}{cleanup}");
             await OnActor(()=>
@@ -493,6 +501,11 @@ public sealed partial class AppController : IAsyncDisposable
             }
             if(billedSeconds>0){_=RecordUsage(new("asr",0,0,false,DateTimeOffset.UtcNow,billedSeconds));billedSeconds=0;}
             completed=gate;
+            if(captureAttempt is {} reviewedAttempt)
+            {
+                reviewedAttempt.ReviewAudioComplete=gate&&!emergency&&gap.Length==0&&captureFailure==null&&captureWarning==null;
+                if(!reviewedAttempt.ReviewAudioComplete)reviewedAttempt.ReviewAudio?.Dispose();
+            }
             }
             catch(Exception e){LogEvent("StopCleanupFailed",e);throw;}
             finally
@@ -503,7 +516,7 @@ public sealed partial class AppController : IAsyncDisposable
             }
         }
     }
-    public void Suspend(){CancelToken(startup);audio?.Abort();asr?.Abort();CancelToken(extraction);_=StopAsync(true,true);}
+    public void Suspend(){CancelToken(reviewCancellation);captureAttempt?.ReviewAudio?.Dispose();CancelToken(startup);audio?.Abort();asr?.Abort();CancelToken(extraction);_=StopAsync(true,true);}
     private async Task TimerLoop()
     {
         using var clock=new PeriodicTimer(TimeSpan.FromMilliseconds(250));
@@ -517,6 +530,8 @@ public sealed partial class AppController : IAsyncDisposable
     }
     public async Task FinishCurrentAsync(string? turnId=null,bool allowPolish=true,CancellationToken token=default,bool forDelivery=false,CancellationToken expedite=default)
     {
+        turnId ??= (await SnapshotAsync()).Session?.Id;
+        if(turnId!=null)await ReviewCurrentAsync(turnId,allowPolish,token,expedite);
         long processingAt=Environment.TickCount64;
         var prepared=await OnActor(()=>
         {
@@ -817,7 +832,7 @@ public sealed partial class AppController : IAsyncDisposable
         catch(Exception e){LogEvent("PersistenceFailed",e,fields:[("Operation","ShutdownCheckpoint")]);}
         // Keep the actor alive until provider completions have observed cancellation.
         long end=Environment.TickCount64+1500;while(Volatile.Read(ref activePolish)>0&&Environment.TickCount64<end)await Task.Delay(20);
-        deepseek.Dispose();events.Writer.TryComplete();await eventLoop;await Repository.DisposeAsync();lifetime.Dispose();
+        captureAttempt?.ReviewAudio?.Dispose();asrReview.Dispose();deepseek.Dispose();events.Writer.TryComplete();await eventLoop;await Repository.DisposeAsync();lifetime.Dispose();
         LogEvent("DisposeCompleted");
         }
         catch(Exception e){LogEvent("DisposeFailed",e);throw;}

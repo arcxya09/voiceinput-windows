@@ -23,6 +23,7 @@ public record AppSettings
     public string ProjectId { get; init; } = "default";
     public bool PolishEnabled { get; init; } = true;
     public bool PreferFastDelivery { get; init; } = true;
+    public bool HighAccuracyEnabled { get; init; } = true;
     public bool AdaptiveAsrEnabled { get; init; } = true;
     public bool SmartPunctuationEnabled { get; init; } = true;
     public string PolishPrompt { get; init; } = PolishRules.SystemPrompt;
@@ -91,6 +92,8 @@ public record SessionData
     public int AppliedCorrectionCount { get; init; }
     public List<string> AppliedCorrectionTerms { get; init; } = [];
     public List<AppliedCorrectionRecord> AppliedCorrections { get; init; } = [];
+    public string AsrReviewState { get; init; } = "None";
+    public string AsrReviewReason { get; init; } = "";
     public string WholePolishState { get; init; } = "None";
     public string WholePolishText { get; init; } = "";
     public bool OmitTerminalFullStop { get; init; }
@@ -135,6 +138,7 @@ public record SegmentData
     public long EditRevision { get; init; }
     public long Operation { get; init; }
     public bool UserLocked { get; init; }
+    public bool SupersededByAsrReview { get; init; }
     public bool ParagraphBefore { get; init; }
     public int? Sequence { get; init; }
     public string Reason { get; init; } = "";
