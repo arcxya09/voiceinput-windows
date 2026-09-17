@@ -153,6 +153,20 @@ internal static class InputDeliverySmoke
                     ownedClipboardSequence = GetClipboardSequenceNumber();
                     Respond(Current(clipboardText: request.Text));
                 }
+                else if (request.Operation == "HoldClipboard")
+                {
+                    // A real competing process holds the native lock without
+                    // replacing the previous result. A pipe reply confirms the
+                    // lock is acquired before production CopyAsync starts.
+                    if (request.Start is < 1 or > 2000 || !OpenClipboard(form.Handle))
+                        throw new InvalidOperationException("Cannot acquire the fixture clipboard lock.");
+                    try
+                    {
+                        Respond(Current("Held"));
+                        Thread.Sleep(request.Start);
+                    }
+                    finally { CloseClipboard(); }
+                }
                 else if (request.Operation == "Exit") form.Close();
                 else Respond(new("Invalid"));
             }
@@ -225,6 +239,36 @@ internal static class InputDeliverySmoke
             var initial = await Read();
             Require(initial.Code == "Ready" && initial.Process == (uint)process.Id, "The fixture identity is not the child process.");
             await TextDelivery.InitializeAsync();
+            foreach (int lockMs in new[] { 600, 1800 })
+            {
+                const string previous = "上一条识别结果";
+                const string current = "本轮新的完整识别结果🧪\n第二行";
+                var prepared = await Query(new("Prepare", "no-focus", "保持不变"));
+                Require(prepared.Code == "Ready", "Cannot prepare contention fixture.");
+                Require((await Query(new("ReplaceClipboard", Text: previous))).Code == "Ready", "Cannot seed the previous result.");
+                uint before = GetClipboardSequenceNumber();
+                Require((await Query(new("HoldClipboard", Start: lockMs))).Code == "Held", "The other process must hold the clipboard.");
+                var clock = Stopwatch.StartNew();
+                var copied = await TextDelivery.CopyAsync(current, () => !process.HasExited, token);
+                clock.Stop();
+                bool releasedInTime = lockMs == 600;
+                Require(copied.State == (releasedInTime ? "Copied" : "CopyFailed"),
+                    "Clipboard contention returned " + copied.State + " / " + copied.Diagnostic);
+                Require(releasedInTime || (copied.Diagnostic == "ClipboardWriteBusy" && clock.ElapsedMilliseconds < 1700),
+                    "Persistent contention must fail within a bounded time with the native reason.");
+                string expected = releasedInTime ? ClipboardLines(current) : previous;
+                var readback = await Query(new("Read", Text: expected));
+                Require(readback.ClipboardText == expected && readback.Text == "保持不变" && NoInput(readback),
+                    "Transient contention must replace the old result completely; failed copying must send no input.");
+                Require(releasedInTime ? copied.ClipboardSequence == GetClipboardSequenceNumber()
+                    : before == GetClipboardSequenceNumber(), "Clipboard sequence does not match the copy result.");
+                if (!releasedInTime)
+                {
+                    var recovered = await TextDelivery.CopyAsync(current, () => !process.HasExited, token);
+                    Require(recovered.State == "Copied" && (await Query(new("Read", Text: ClipboardLines(current)))).ClipboardText == ClipboardLines(current),
+                        "The next explicit copy must recover after persistent contention clears.");
+                }
+            }
             const string sentence = "感觉好像就不太准确。";
             const string twoSentences = "测试一下这次的输入是否准确。看起来没有什么问题。";
             // Run before any CaptureAsync call: neither a native input target nor
@@ -398,7 +442,8 @@ internal static class InputDeliverySmoke
                     "Changing focus must leave both the new control and clipboard unchanged.");
             }
             finally { await TextDelivery.ReleaseAsync(originalCapture.Target!); }
-            return ["Copy without UIA capture succeeds with no native focus and with a read-only control, preserving complete Chinese text, emoji and multiple lines while leaving controls, focus and input-message counters unchanged",
+            return ["Native clipboard contention: a 600 ms competing lock recovers with the current full text; a 1800 ms lock fails within budget, preserves the previous result, sends no input, and permits the next explicit copy",
+                "Copy without UIA capture succeeds with no native focus and with a read-only control, preserving complete Chinese text, emoji and multiple lines while leaving controls, focus and input-message counters unchanged",
                 "A prepared copy is pasted once into independent plain and rich controls without another clipboard write, including a native-only target without UIA capture; a newer clipboard prevents all paste input and remains untouched",
                 "Production full-text clipboard delivery reads back both reported Chinese examples in independent plain and rich edit controls, including selection replacement, emoji, long text, multiple lines and delayed paste; each receives exactly one Ctrl+V, zero Unicode packet keys, and retains the complete result on the clipboard",
                 "Changing focus to another isolated control blocks delivery before changing the clipboard or sending a paste gesture"];
@@ -413,6 +458,8 @@ internal static class InputDeliverySmoke
         }
     }
 
+    [DllImport("user32.dll")] private static extern bool OpenClipboard(IntPtr owner);
+    [DllImport("user32.dll")] private static extern bool CloseClipboard();
     [DllImport("user32.dll")] private static extern bool AllowSetForegroundWindow(uint process);
     [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr window);
     [DllImport("user32.dll")] private static extern short GetKeyState(int key);

@@ -229,6 +229,8 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
                 long copyingAt=Environment.TickCount64;
                 result=await TextDelivery.CopyAsync(text,Valid,t.Cancel.Token);
                 t.CopyMs=Math.Max(0,Environment.TickCount64-copyingAt);
+                LogTurn("CopyCompleted",t,fields:[("State",AppController.LogDeliveryState(result.State)),
+                    ("Diagnostic",result.Diagnostic),("ElapsedMs",t.CopyMs)]);
                 if(result.State=="Copied"&&captureWarning!=null)result=result with{Message=captureWarning};
                 if(result.State=="Copied"&&Valid()&&activity.Matches(t.ActivityVersion)&&!t.ManualDelivery&&!t.DictationOnly&&target!=null)
                 {
@@ -237,6 +239,8 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
                     var pasted=await TextDelivery.SendAsync(target,text,()=>Valid()&&activity.Matches(t.ActivityVersion)&&!t.ManualDelivery,t.Cancel.Token,
                         ()=>t.DeliveryDispatched=true,preparedSequence:result.ClipboardSequence);
                     t.PasteMs=Math.Max(0,Environment.TickCount64-pastingAt);
+                    LogTurn("PasteCompleted",t,fields:[("State",AppController.LogDeliveryState(pasted.State)),
+                        ("Diagnostic",pasted.Diagnostic),("AcceptedInputEvents",pasted.Accepted),("ElapsedMs",t.PasteMs)]);
                     // A blocked paste does not undo the successful copy. A changed
                     // clipboard must not be described as still containing our text.
                     result=pasted.State=="Blocked"&&result.ClipboardSequence==Win32.GetClipboardSequenceNumber()

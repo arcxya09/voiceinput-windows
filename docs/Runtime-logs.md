@@ -44,3 +44,7 @@
 `PacketMetadataAnomaly` 新增取包间隔、持包处理耗时、批次序号和阶段（FirstSecond / Recording / Draining），日志最多保留每轮前 16 个详细异常包。`NativeCaptureStopped` 汇总最大取包间隔、超过实际缓冲时长的间隔数、最大处理耗时、批次数、最大批次包数和空唤醒次数。取包间隔同时包含设备生产、等待和线程调度时间，不能单独当作 CPU 调度延迟。连续读出的包数用于观察积压，不等于某一时刻的完整设备队列深度。
 
 `AsrTuning` 记录本轮实际发送的 VAD 参数与 Current/Recent/Default/Disabled 来源；`ObservedMs`、`NoiseDbFS`、`ActiveDbFS`、`ContrastDb` 和 `ClippedFraction` 始终描述当前轮启动时已观察音频（Recent 表示参数取自近期同设备统计）。`AudioEnvironment` 记录本轮结束时最近最多 8 秒的估计。分位数电平差不等于真实信噪比；日志不记录 PCM、识别正文和设备名称。
+
+## 2.4.1 复制与粘贴诊断
+
+`CopyCompleted` 和 `PasteCompleted` 分别记录本轮阶段的 State、Diagnostic 和 ElapsedMs。`ClipboardWriteBusy` 表示等待期间仍无法打开剪贴板；`ClipboardReadBusy` 表示写入后的回读未确认；`ClipboardChangedBeforeWrite` / `ClipboardChangedAfterCopy` 表示其他复制改变了剪贴板；`CopyWorkerUnavailable` 表示辅助进程未返回有效结果。只有 `ClipboardCopied` 才确认本轮复制成功。诊断代码不包含识别文字或剪贴板正文。
