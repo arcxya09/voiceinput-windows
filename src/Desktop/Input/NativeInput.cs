@@ -210,7 +210,7 @@ public static class TextDelivery
 
     public static async Task<DeliveryResult> CopyAsync(string text,Func<bool> valid,CancellationToken token)
     {
-        DeliveryResult Failed(string diagnostic)=>new("CopyFailed","未能确认正文已复制，识别文字已保留在程序中，可手动复制。") {Diagnostic=diagnostic};
+        DeliveryResult Failed(string diagnostic)=>new("CopyFailed","本轮文字未确认复制，剪贴板可能仍是旧内容。请在程序中复制本轮识别文字。") {Diagnostic=diagnostic};
         if(!ClipboardPaste.IsSupportedText(text))return Failed("ClipboardTextUnsupported");
         try
         {

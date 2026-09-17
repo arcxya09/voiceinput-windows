@@ -9,6 +9,7 @@ namespace RealtimeTranscription.Desktop.Input;
 internal static class NativeClipboard
 {
     private const uint UnicodeText = 13;
+    private const int AccessBudgetMs = 1000;
 
     internal static uint? Prepare(string text, NativeTarget target, uint expectedSequence, out string diagnostic)
         => WriteAndVerify(text, target, expectedSequence, out diagnostic);
@@ -27,17 +28,18 @@ internal static class NativeClipboard
         string windowsText = text.Replace("\r\n", "\n", StringComparison.Ordinal)
             .Replace('\r', '\n').Replace("\n", "\r\n", StringComparison.Ordinal);
         byte[] bytes = Encoding.Unicode.GetBytes(windowsText + '\0');
-        if (!Write(bytes, target, expectedSequence, out diagnostic)) return null;
+        long deadline = Environment.TickCount64 + AccessBudgetMs;
+        if (!Write(bytes, target, expectedSequence, deadline, out diagnostic)) return null;
 
         // Closing the write and destroying its temporary owner can finalize
         // native clipboard bookkeeping. Reopen read-only and verify our exact
         // payload before taking the final sequence; never blindly adopt a newer
         // sequence that might belong to somebody else's copy.
         diagnostic = "ClipboardReadBusy";
-        for (int attempt = 0; attempt < 6; attempt++)
+        for (int attempt = 0; attempt == 0 || Environment.TickCount64 < deadline; attempt++)
         {
             if (!Safe(target)) { diagnostic = "ClipboardTargetChangedAfterWrite"; return null; }
-            if (!OpenClipboard(IntPtr.Zero)) { if (attempt < 5) Thread.Sleep(20); continue; }
+            if (!OpenClipboard(IntPtr.Zero)) { Thread.Sleep(20); continue; }
             try
             {
                 diagnostic = "ClipboardPayloadChanged";
@@ -64,7 +66,7 @@ internal static class NativeClipboard
         return null;
     }
 
-    private static bool Write(byte[] bytes, NativeTarget? target, uint expectedSequence, out string diagnostic)
+    private static bool Write(byte[] bytes, NativeTarget? target, uint expectedSequence, long deadline, out string diagnostic)
     {
         diagnostic = "ClipboardAllocationFailed";
         IntPtr memory = GlobalAlloc(2, (UIntPtr)bytes.Length);
@@ -81,14 +83,17 @@ internal static class NativeClipboard
                 new IntPtr(-3), IntPtr.Zero, Win32.GetModuleHandle(null), IntPtr.Zero);
             diagnostic = "ClipboardOwnerUnavailable";
             if (owner == IntPtr.Zero) return false;
-            // Clipboard contention may clear briefly. Do not overwrite a newer
-            // copy or continue when focus/key state changes during these waits.
-            for (int attempt = 0; attempt < 6; attempt++)
+            // Clipboard managers may hold the clipboard longer than 100 ms.
+            // Share a bounded access budget with readback, retry only opening,
+            // and never repeat a committed write or a paste gesture.
+            // Do not overwrite a newer copy or continue when focus/key state
+            // changes during these waits.
+            for (int attempt = 0; attempt == 0 || Environment.TickCount64 < deadline; attempt++)
             {
                 diagnostic = "ClipboardChangedBeforeWrite";
                 if (!Safe(target) || Win32.GetClipboardSequenceNumber() != expectedSequence) return false;
                 diagnostic = "ClipboardWriteBusy";
-                if (!OpenClipboard(owner)) { if (attempt < 5) Thread.Sleep(20); continue; }
+                if (!OpenClipboard(owner)) { Thread.Sleep(20); continue; }
                 try
                 {
                     diagnostic = "ClipboardChangedBeforeWrite";

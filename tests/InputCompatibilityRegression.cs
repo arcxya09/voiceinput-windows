@@ -24,7 +24,7 @@ internal static class InputCompatibilityRegression
             Check(CapsulePresentation.EmptyPreview("麦克风不可用",true,"StartFailed")=="麦克风不可用");
             Check(CapsulePresentation.CompletionLabel("StartFailed")=="未开始");
             Check(CapsulePresentation.CompletionLabel("Copied")=="已复制");
-            Check(CapsulePresentation.CompletionLabel("CopyFailed")=="待复制");
+            Check(CapsulePresentation.CompletionLabel("CopyFailed")=="复制失败");
             var model=new VoicePreviewState();model.Begin("input");
             var snap=new TranscriptSnapshot(new(){Id="input",DeliveryState="Pending",DeliveryReason=reason},[],CaptureState.Recording,0,0,"正在听");
             Check(model.Snapshot(snap,true,true,false)!.Status.Contains("完成后复制"));
