@@ -212,10 +212,10 @@ PRAGMA user_version=3;
         {
             // Ordinary ASR persistence must not scan/decrypt the full vocabulary.
             InvalidateDomainProfiles(c, e => e.SegmentId == data.Id && (data.OutputState != OutputState.Published || e.SourceRevision != data.SourceRevision || e.EditRevision != data.EditRevision));
-            if(data.EditRevision>0)
+            if(data.EditRevision>0||data.SupersededByAsrReview)
             {
-                RemoveEvidence(c, e => e.SegmentId == data.Id && (data.OutputState == OutputState.Deleted || e.SourceRevision != data.SourceRevision || e.EditRevision != data.EditRevision));
-                SyncCorrections(c,session,data,learnCorrections);
+                RemoveEvidence(c, e => e.SegmentId == data.Id && (data.SupersededByAsrReview || data.OutputState == OutputState.Deleted || e.SourceRevision != data.SourceRevision || e.EditRevision != data.EditRevision));
+                if(data.EditRevision>0)SyncCorrections(c,session,data,learnCorrections);
             }
             SyncTermObservations(c,session,data,learnUsage);
         }

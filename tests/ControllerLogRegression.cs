@@ -187,7 +187,7 @@ static class ControllerLogRegression
             var protector = new TestProtector();
             new SettingsStore(f.folder, protector).Save(new()
             {
-                LegacyEndpoint = true, DictationOnly = true, SaveMemory = false, AllowLearning = false,
+                HighAccuracyEnabled = false, LegacyEndpoint = true, DictationOnly = true, SaveMemory = false, AllowLearning = false,
                 LearnCorrections = false, DynamicLexicon = false, PolishEnabled = false, UseLexicon = false
             }, new(Secret + "API_KEY", ""));
             f.log = new RuntimeLog(Path.Combine(f.folder, "logs"));

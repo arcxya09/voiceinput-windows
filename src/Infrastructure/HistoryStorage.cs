@@ -33,7 +33,7 @@ public sealed partial class MemoryRepository
                 var snapshot=slice.Segment;SegmentData? live=null;
                 using(var cmd=Command(c,"SELECT payload FROM segments WHERE id=$id AND session=$session",("$id",snapshot.Id),("$session",expected.Id)))
                     if(cmd.ExecuteScalar() is byte[] bytes)live=Unpack<SegmentData>(bytes);
-                if(live==null||live.AsrState!=AsrState.Confirmed||live.OutputState is not(OutputState.Published or OutputState.Suppressed)||live.SourceRevision!=snapshot.SourceRevision||live.EditRevision!=snapshot.EditRevision)
+                if(live==null||live.SupersededByAsrReview||live.AsrState!=AsrState.Confirmed||live.OutputState is not(OutputState.Published or OutputState.Suppressed)||live.SourceRevision!=snapshot.SourceRevision||live.EditRevision!=snapshot.EditRevision)
                     throw new InvalidOperationException("历史原文已编辑或删除，请重新整理。");
                 string text=string.Concat((live.EditRevision>0?live.FinalText:live.RawText).EnumerateRunes().Skip(slice.Start).Take(slice.Length).Select(r=>r.ToString()));
                 if(text!=snapshot.RawText)throw new InvalidOperationException("历史原文版本已变化，请重新整理。");

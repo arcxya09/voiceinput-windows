@@ -5,7 +5,7 @@ public static class ExtractionPlanner
     public static List<ExtractionSlice> Pending(SessionData session,IEnumerable<SegmentData> segments)
     {
         var result=new List<ExtractionSlice>();var done=session.LearnedVersions.ToHashSet(StringComparer.Ordinal);
-        foreach(var s in segments.Where(s=>s.AsrState==AsrState.Confirmed&&s.OutputState is OutputState.Published or OutputState.Suppressed&&s.SaveState==SaveState.Saved))
+        foreach(var s in segments.Where(s=>!s.SupersededByAsrReview&&s.AsrState==AsrState.Confirmed&&s.OutputState is OutputState.Published or OutputState.Suppressed&&s.SaveState==SaveState.Saved))
         {
             string version=$"{s.Id}:{s.SourceRevision}:{s.EditRevision}";if(done.Contains(version))continue;
             var runes=(s.EditRevision>0?s.FinalText:s.RawText).EnumerateRunes().ToArray();
