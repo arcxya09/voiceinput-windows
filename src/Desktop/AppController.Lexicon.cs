@@ -10,7 +10,12 @@ public sealed partial class AppController
         if(!MemoryAvailable||!Settings.UseLexicon)return [];
         var at=DateTimeOffset.UtcNow;
         IEnumerable<TermData> candidates=Settings.DynamicLexicon?terms:terms.Select(t=>t with{UsageCount=0,CorrectionCount=0,LastUsedAt=null,LastCorrectedAt=null});
-        return Lexicon.Select(candidates,Settings.ProjectId,at).Select(t=>t with{Weight=Settings.DynamicLexicon?Lexicon.EffectiveWeight(t,at):t.Weight}).ToArray();
+        var manual=Lexicon.Select(candidates.Where(t=>t.Origin!="Predicted"),Settings.ProjectId,at);
+        var predicted=Settings.DomainLexiconEnabled&&Settings.SaveMemory&&Settings.AllowLearning
+            ? terms.Where(t=>t.Origin=="Predicted"&&t.State==TermState.Enabled&&DomainLexicon.Active(t,domainProfile,at))
+                .OrderByDescending(DomainLexicon.Score).ThenBy(t=>t.Text,StringComparer.Ordinal).Take(20).Select(t=>t with{Weight=1}).ToArray():[];
+        var selected=manual.Take(200-predicted.Length).Select(t=>t with{Weight=Settings.DynamicLexicon?Lexicon.EffectiveWeight(t,at):t.Weight});
+        return selected.Concat(predicted).DistinctBy(t=>Lexicon.WordKey(t.Text)).ToArray();
     }
     private int EligibleHotwords()=>terms.Where(t=>t.State==TermState.Enabled&&(t.Scope=="*"||t.Scope==Settings.ProjectId))
         .Select(t=>TermGenerationRules.Normalize(t.Text)).Distinct(StringComparer.Ordinal).Count();

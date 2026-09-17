@@ -35,6 +35,7 @@ public record AppSettings
     public int? RetentionDays { get; init; }
     public bool AllowLearning { get; init; } = true;
     public bool AutoExtract { get; init; }
+    public bool DomainLexiconEnabled { get; init; }
     public bool LearnCorrections { get; init; } = true;
     public bool UseLexicon { get; init; } = true;
     public bool DynamicLexicon { get; init; } = true;
@@ -148,6 +149,15 @@ public enum TermState { Candidate, Enabled, Disabled }
 public record TermEvidence(string SessionId, string SegmentId, long SourceRevision, long EditRevision, string Quote, bool Influenced, int SliceStart = 0);
 public record TermData
 {
+    public string PredictionTopic { get; init; } = "";
+    public string PredictionReason { get; init; } = "";
+    public string PredictionRelation { get; init; } = "";
+    public string PredictionConfusion { get; init; } = "";
+    public string PredictionRisk { get; init; } = "";
+    public int PredictionRelevance { get; init; }
+    public int PredictionDifficulty { get; init; }
+    public bool PredictionExtended { get; init; }
+    [JsonIgnore] public string OriginLabel => Origin == "Predicted" ? "AI 预测易错词 · 低权重试用" : Origin == "Extracted" ? "历史提取" : "个人词条";
     [JsonIgnore] public long UsageCount { get; init; }
     [JsonIgnore] public long CorrectionCount { get; init; }
     [JsonIgnore] public DateTimeOffset? LastUsedAt { get; init; }

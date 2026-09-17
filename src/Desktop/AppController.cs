@@ -202,8 +202,8 @@ public sealed partial class AppController : IAsyncDisposable
         long request=Interlocked.Increment(ref termReloadSequence);
         try
         {
-            string project=Settings.ProjectId;var t=await Repository.TermsAsync(project);var s=await Repository.SuppressedAsync(project);var mappings=await Repository.ActiveCorrectionTermsAsync(project);
-            await OnActor(()=>{if(!MemoryAvailable||Settings.ProjectId!=project||request<appliedTermReload)return;appliedTermReload=request;terms=t;suppressed=s;approvedCorrections=mappings;TermsUpdated?.Invoke();CorrectionsUpdated?.Invoke();});
+            string project=Settings.ProjectId;var t=await Repository.TermsAsync(project);var s=await Repository.SuppressedAsync(project);var mappings=await Repository.ActiveCorrectionTermsAsync(project);var profile=await Repository.DomainProfileAsync(project);
+            await OnActor(()=>{if(!MemoryAvailable||Settings.ProjectId!=project||request<appliedTermReload)return;appliedTermReload=request;terms=t;suppressed=s;approvedCorrections=mappings;domainProfile=profile;TermsUpdated?.Invoke();CorrectionsUpdated?.Invoke();});
         }
         catch(Exception e){await DisableMemoryAsync(e);}
     }
@@ -592,7 +592,7 @@ public sealed partial class AppController : IAsyncDisposable
         // Next StartAsync awaits the repository barrier and refreshes memory.
         // Do not put a redundant vocabulary reload ahead of automatic delivery.
         if(!forDelivery)await RefreshMemoryBeforeRecognitionAsync();
-        if(MemoryAvailable&&Settings.AutoExtract&&!token.IsCancellationRequested&&allowPolish)_=AutoExtractWhenReady();
+        if(MemoryAvailable&&(Settings.AutoExtract||Settings.DomainLexiconEnabled)&&!token.IsCancellationRequested&&allowPolish)_=AutoExtractWhenReady();
     }
     private async Task ObserveLatePolishAsync(Task<string> request,string? turnId)
     {
@@ -703,7 +703,7 @@ public sealed partial class AppController : IAsyncDisposable
     }
     private async Task AutoExtractWhenReady()
     {
-        try{for(int i=0;i<120;i++){var snap=await SnapshotAsync();if(snap.State!=CaptureState.Stopped)return;if(snap.Pending==0&&Volatile.Read(ref activePolish)==0){await Repository.BarrierAsync();await ExtractAsync(true);return;}await Task.Delay(100);}}catch{Message?.Invoke("自动词条整理未完成，可稍后手动整理。");}
+        try{for(int i=0;i<120;i++){var snap=await SnapshotAsync();if(snap.State!=CaptureState.Stopped)return;if(snap.Pending==0&&Volatile.Read(ref activePolish)==0){await Repository.BarrierAsync();if(Settings.DomainLexiconEnabled)await RefreshDomainLexiconAsync(false);if(Settings.AutoExtract)await ExtractAsync(true);return;}await Task.Delay(100);}}catch{Message?.Invoke("自动词条整理未完成，可稍后手动整理。");}
     }
     public async Task ExtractAsync(bool automatic=false)
     {
