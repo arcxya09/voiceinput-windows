@@ -68,6 +68,10 @@ static partial class StartupCaptureRegression
             await using var f = await Fixture.Create([turn], (_, _) => { calls++; return Task.FromResult(ReviewReply("核天体物理实验。")); });
             await f.App.SaveSettingsAsync(f.App.Settings with { SaveMemory = true }, f.App.Keys);
             string id = await PrepareReview(f, turn);
+            await f.App.Repository.BarrierAsync();
+            var streaming = (await f.App.SnapshotAsync()).Segments.Single();
+            await f.App.Repository.SaveTermAsync(new() { Text = "完整结果", Origin = "Extracted",
+                Evidence = [new(id, streaming.Id, streaming.SourceRevision, streaming.EditRevision, streaming.RawText, false)] });
             await f.App.FinishCurrentAsync(id, forDelivery: true);
             var snapshot = await f.App.SnapshotAsync();
             Check(snapshot.Session!.AsrReviewState == "Completed" && TranscriptText.Render(snapshot) == "核天体物理实验", "复核未应用或标点路径遗漏");
@@ -75,6 +79,7 @@ static partial class StartupCaptureRegression
             Check(TranscriptComparison.Original(snapshot.Segments) == "核天体物理实验。", "对照正文重复");
             await f.App.Repository.BarrierAsync();
             var saved = (await f.App.Repository.LoadSessionAsync(id))!;
+            Check(!(await f.App.Repository.TermsAsync("default")).Any(t => t.Text == "完整结果"), "被替代原文的旧证据未清理");
             Check(ExtractionPlanner.Pending(saved.Session, saved.Segments).All(s => !s.Segment.SupersededByAsrReview), "学习了已替代的流式原文");
             await f.App.FinishCurrentAsync(id, forDelivery: true); Check(calls == 1, "重复扣费");
             await f.App.LoadSessionAsync(saved.Session); Check(TranscriptText.Render(await f.App.SnapshotAsync()) == "核天体物理实验", "重载正文改变");
