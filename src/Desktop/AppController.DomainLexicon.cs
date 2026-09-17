@@ -6,13 +6,17 @@ public sealed partial class AppController
 {
     private DomainProfile? domainProfile;
     private DateTimeOffset lastDomainAttempt;
+    // A late database read must not restore hints derived from text already edited in memory.
+    private bool ProfileMatchesCurrentEdits(DomainProfile? profile) => profile == null || engine == null
+        || !profile.Sources.Any(e => e.SessionId == engine.Session.Id && (!engine.Session.AllowLearning
+            || engine.Segments.Any(s => s.Id == e.SegmentId && (s.EditRevision != e.EditRevision || s.SourceRevision != e.SourceRevision || s.OutputState != OutputState.Published))));
     public string DomainReport()
     {
         var profile = domainProfile;
         if (profile == null) return "尚无领域分析。启用智能领域词库后，积累历史输入即可在后台分析，也可点击立即更新。";
         return $"最近分析：{profile.UpdatedAt.ToLocalTime():g}\n当前项目的领域：\n" + string.Join("\n", profile.Topics.Select(t => $"{t.Name} · 近期相关等级 {t.Relevance}/5"))
-            + $"\n\n本次保留 {profile.ActiveTerms.Count} 个预测易错词，下一轮最多使用 20 个，权重为 1。\n"
-            + "等级是 AI 预测，不代表实测识别错误率。普通历史提取仍需确认；预测词不用于自动文字替换。\n关闭智能领域词库可停止分析和注入；确认词条可转为长期个人词条。\n\n"
+            + $"\n\n本次生成后保留 {profile.ActiveTerms.Count} 个预测易错词，权重为 1。禁用、删除、确认后的实际选词以“查看下轮热词”为准。\n"
+            + "超过 14 天未更新暂停注入。词库中的旧预测词可能已退出当前话题。\n等级是 AI 预测，不代表实测识别错误率。普通历史提取仍需确认；预测词不用于自动文字替换。\n关闭智能领域词库可停止分析和注入；确认词条可转为长期个人词条。\n\n"
             + string.Join("、", profile.ActiveTerms);
     }
 

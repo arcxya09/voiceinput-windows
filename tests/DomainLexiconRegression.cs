@@ -1,5 +1,6 @@
 using System.Text.Json;
 using RealtimeTranscription.Core;
+using RealtimeTranscription.Infrastructure;
 
 static class DomainLexiconRegression
 {
@@ -121,7 +122,7 @@ static class DomainLexiconRegression
             await using var f = await ControllerFixture.Create(); await f.Seed(Text);
             await f.App.SaveTermAsync(new() { Text = "JUNA" });
             await f.App.SaveSettingsAsync(f.App.Settings with { DomainLexiconEnabled = true, DailyExtractionTokens = 1000 }, f.App.Keys);
-            bool failed = false; try { await f.App.RefreshDomainLexiconAsync(); } catch (InvalidOperationException) { failed = true; }
+            bool failed = false; try { await f.App.RefreshDomainLexiconAsync(); } catch (ProviderException) { failed = true; }
             Check(failed && f.Calls == 0 && f.App.NextHotwords().Single().Text == "JUNA");
         });
         await test("预测来源修订后立即停止注入，数据库事务失败不留下半批结果", async () =>
@@ -129,10 +130,10 @@ static class DomainLexiconRegression
             await using var f = await ControllerFixture.Create(async (r,t) => ControllerFixture.Reply(await Respond(r,t)));
             var source = await f.Seed(Text); await Enable(f); await f.App.RefreshDomainLexiconAsync();
             await f.App.LoadSessionAsync(source.Session); await f.App.EditAsync(source.Segment.Id, Text + "修改。"); await f.Settle();
-            Check(f.App.NextHotwords().Count == 0);
+            Check(f.App.NextHotwords().Count == 0, "修订后仍选择旧预测词");
             f.Protector.Fail = e => e.TryGetProperty("fingerprint", out _);
             bool failed = false; try { await f.App.RefreshDomainLexiconAsync(); } catch (System.IO.IOException) { failed = true; }
-            Check(failed && await f.App.Repository.DomainProfileAsync("default") == null);
+            Check(failed, "未触发预期的事务写入故障"); Check(await f.App.Repository.DomainProfileAsync("default") == null, "事务失败后残留领域分析");
         });
     }
 }

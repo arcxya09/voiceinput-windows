@@ -203,7 +203,7 @@ public sealed partial class AppController : IAsyncDisposable
         try
         {
             string project=Settings.ProjectId;var t=await Repository.TermsAsync(project);var s=await Repository.SuppressedAsync(project);var mappings=await Repository.ActiveCorrectionTermsAsync(project);var profile=await Repository.DomainProfileAsync(project);
-            await OnActor(()=>{if(!MemoryAvailable||Settings.ProjectId!=project||request<appliedTermReload)return;appliedTermReload=request;terms=t;suppressed=s;approvedCorrections=mappings;domainProfile=profile;TermsUpdated?.Invoke();CorrectionsUpdated?.Invoke();});
+            await OnActor(()=>{if(!MemoryAvailable||Settings.ProjectId!=project||request<appliedTermReload)return;appliedTermReload=request;terms=t;suppressed=s;approvedCorrections=mappings;domainProfile=ProfileMatchesCurrentEdits(profile)?profile:null;TermsUpdated?.Invoke();CorrectionsUpdated?.Invoke();});
         }
         catch(Exception e){await DisableMemoryAsync(e);}
     }
@@ -605,7 +605,7 @@ public sealed partial class AppController : IAsyncDisposable
     public Task ParagraphAsync()=>OnActor(()=>{engine?.Paragraph();Status("将在下一个识别片段开始时换段。");});
     public Task EditAsync(string id,string text,string action="编辑")=>OnActor(()=>
     {
-        if(engine==null)return;engine.Edit(id,text,action,CanSaveMemory&&Settings.AllowLearning&&Settings.LearnCorrections&&engine.Session.AllowLearning);knowledgeEpoch++;CancelToken(extraction);Notify();
+        if(engine==null)return;engine.Edit(id,text,action,CanSaveMemory&&Settings.AllowLearning&&Settings.LearnCorrections&&engine.Session.AllowLearning);if(domainProfile?.Sources.Any(e=>e.SegmentId==id)==true)domainProfile=null;knowledgeEpoch++;CancelToken(extraction);Notify();
     });
     public Task UndoAsync(string id)=>EditAsync(id,"","撤销");
     public async Task<string> StopAndTextAsync(){await StopAsync(false);await FinishCurrentAsync();return TranscriptText.Render(await SnapshotAsync());}
