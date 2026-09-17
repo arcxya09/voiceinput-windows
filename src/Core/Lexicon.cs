@@ -40,6 +40,7 @@ public static class Lexicon
     /// </summary>
     public static int EffectiveWeight(TermData term, DateTimeOffset? now = null)
     {
+        if (term.Origin == "Predicted") return 1;
         double learned = LearningScore(term, now ?? DateTimeOffset.UtcNow);
         return Math.Clamp(Math.Clamp(term.Weight, 1, 5) + (learned >= 32 ? 2 : learned >= 18 ? 1 : 0), 1, 5);
     }

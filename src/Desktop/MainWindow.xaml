@@ -256,7 +256,9 @@
                                 <local:ResponsivePanel Grid.Row="1" Spacing="8">
                                     <Button x:Name="ExtractButton" Content="整理当前会话词条" Click="Extract_Click"/>
                                     <Button Content="取消整理" Click="ExtractCancel_Click"/>
-                                    <TextBlock MaxWidth="420" Text="候选词确认后参与识别，录音中的变更在下一轮生效。" Style="{StaticResource SecondaryText}" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                                    <Button Content="更新领域词库" Click="DomainRefresh_Click"/>
+                                    <Button Content="查看领域分析" Click="DomainReport_Click"/>
+                                    <TextBlock MaxWidth="420" Text="历史提取词需确认；智能预测词低权重试用，下轮生效。" Style="{StaticResource SecondaryText}" VerticalAlignment="Center" Margin="8,0,0,0"/>
                                 </local:ResponsivePanel>
                                 <Border Grid.Row="2" Style="{StaticResource Card}" Padding="4">
                                     <ListView x:Name="TermsGrid" SelectionChanged="UiSelection_Changed" SelectionMode="Multiple" IsMultiSelectCheckBoxEnabled="True" DoubleTapped="TermEdit_Click" ItemContainerStyle="{StaticResource StretchListItem}" AutomationProperties.Name="词库词条">
@@ -290,6 +292,7 @@
                                                         <Run Text="{Binding SuggestedWeight}"/>
                                                     </TextBlock>
                                                     <StackPanel Grid.Row="2" Grid.ColumnSpan="3" Orientation="Horizontal" Spacing="16">
+                                                        <TextBlock Text="{Binding OriginLabel}" Style="{StaticResource SecondaryText}" VerticalAlignment="Center"/>
                                                         <CheckBox Content="保护写法" IsChecked="{Binding Protect, Mode=OneWay}" IsHitTestVisible="False" IsTabStop="False" MinHeight="24" FontSize="12"/>
                                                         <CheckBox Content="置顶" IsChecked="{Binding Pinned, Mode=OneWay}" IsHitTestVisible="False" IsTabStop="False" MinHeight="24" FontSize="12"/>
                                                     </StackPanel>
@@ -585,7 +588,9 @@
                                     <CheckBox x:Name="UseTermsBox"><TextBlock Text="启用词库（识别热词、保护与确认纠错）" TextWrapping="Wrap"/></CheckBox>
                                     <CheckBox x:Name="DynamicTermsBox"><TextBlock Text="根据使用与人工纠错调整热词优先级（需允许本地学习）" TextWrapping="Wrap"/></CheckBox>
                                     <CheckBox x:Name="CorrectionLearningBox"><TextBlock Text="从手动修订中发现纠错候选（本地比较，确认后学习）" TextWrapping="Wrap"/></CheckBox>
-                                    <CheckBox x:Name="AutoExtractBox" Content="停止后自动整理词条"/>
+                                    <CheckBox x:Name="AutoExtractBox" Content="停止后自动提取原文词条（待确认）"/>
+                                    <CheckBox x:Name="DomainLexiconBox"><TextBlock Text="智能领域词库：根据历史预测易错词，后台更新并低权重试用" TextWrapping="Wrap"/></CheckBox>
+                                    <TextBlock Text="开启后，将本项目近期及较早的部分历史文本发送给 DeepSeek，识别话题并生成少量相关易错词。模型预测不代表实测错误；不依赖其他软件中的修改记录。可在词库查看依据、禁用或删除，关闭此项即停止预测词注入。" Style="{StaticResource SecondaryText}"/>
                                     <CheckBox x:Name="AsrContextBox" Content="向 ASR 提供已选领域词上下文"/>
                                     <Grid ColumnSpacing="16" Margin="0,4,0,4">
                                         <Grid.ColumnDefinitions>
@@ -595,7 +600,7 @@
                                         <TextBox x:Name="RetentionBox" Header="保留天数" PlaceholderText="留空为长期保留"/>
                                         <TextBox x:Name="BudgetBox" Grid.Column="1" Header="每日词库 AI Token 预算（UTC）"/>
                                     </Grid>
-                                    <TextBlock Text="已有会话可在“听写”页面单独设置整理许可。词条整理将已选文本发送给 DeepSeek，只生成待确认候选。默认不保存录音，每日预算按 UTC 日期重置。" Style="{StaticResource SecondaryText}"/>
+                                    <TextBlock Text="已有会话可在“听写”页面单独设置整理许可。原文提取生成待确认候选；智能领域词库自动低权重试用。两者共用每日预算。默认不保存录音，每日预算按 UTC 日期重置。" Style="{StaticResource SecondaryText}"/>
                                 </StackPanel>
                             </Border>
                             <Expander Header="从全部历史提取词条" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">

@@ -7,10 +7,12 @@ public partial class MainWindow
     private async void NextHotwords_Click(object sender,RoutedEventArgs e)
     {
         var chosen=controller.NextHotwords();
-        await Dialogs.TextAsync(this,"下一轮热词",$"下一轮将提交 {chosen.Count} 个热词。只选择已启用词条，最多 200 个。\n"+
-            (controller.Settings.DynamicLexicon?"按手动权重、近期使用、人工纠正、项目与置顶综合排序。":"动态调整已关闭，使用手动权重。")+
+        await Dialogs.TextAsync(this,"下一轮热词",$"下一轮将提交 {chosen.Count} 个热词。只选择已启用词条，最多 200 个，其中动态预测词最多 20 个。\n"+
+            (controller.Settings.DynamicLexicon?"个人词按权重、使用和纠正等排序；预测词按近期话题和预计识别难度选择，权重保持 1。":"动态调整已关闭，使用手动权重。")+
             "\n统计按当前项目的不同会话计数，修改与删除来源会更新统计。\n\n"+string.Join("\n",chosen.Select((t,i)=>$"{i+1}. {t.Text}    实际权重 {t.Weight}    使用 {t.UsageCount} / 人工纠正 {t.CorrectionCount}")));
     }
+    private async void DomainRefresh_Click(object sender,RoutedEventArgs e)=>await Safe(()=>controller.RefreshDomainLexiconAsync());
+    private async void DomainReport_Click(object sender,RoutedEventArgs e)=>await Safe(()=>Dialogs.TextAsync(this,"智能领域词库",controller.DomainReport()));
     private async void CorrectionEnableReplacement_Click(object sender,RoutedEventArgs e)=>await Safe(()=>WithCorrection(async candidate=>
     {
         var term=controller.Terms.FirstOrDefault(t=>t.Id==candidate.TermId);

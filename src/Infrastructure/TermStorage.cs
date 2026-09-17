@@ -32,8 +32,8 @@ public sealed partial class MemoryRepository
             saved = requested with
             {
                 Revision = (old?.Revision ?? 0) + 1, UpdatedAt = DateTimeOffset.UtcNow,
-                Evidence = old?.Evidence.Where(e => e.Quote.Contains(requested.Text, StringComparison.Ordinal)).ToList() ?? [],
-                Origin = renamed ? "UserCorrection" : old?.Origin ?? requested.Origin,
+                Evidence = old?.Evidence.Where(e => !renamed && old.Origin == "Predicted" || e.Quote.Contains(requested.Text, StringComparison.Ordinal)).ToList() ?? [],
+                Origin = renamed ? "UserCorrection" : old?.Origin == "Predicted" && requested.State == TermState.Enabled ? "Manual" : old?.Origin ?? requested.Origin,
                 GenerationRequirement = old?.GenerationRequirement ?? requested.GenerationRequirement
             };
             SaveTerm(c, saved); tx.Commit();
@@ -76,7 +76,7 @@ public sealed partial class MemoryRepository
             {
                 Revision = group.Max(t => t.Revision) + 1,
                 State = group.Any(t => t.State == TermState.Disabled) ? TermState.Disabled : group.Any(t => t.State == TermState.Enabled) ? TermState.Enabled : TermState.Candidate,
-                Evidence = group.SelectMany(t => t.Evidence).Where(e => e.Quote.Contains(winner.Text, StringComparison.Ordinal)).DistinctBy(e => (e.SegmentId,e.SourceRevision,e.EditRevision,e.SliceStart)).ToList()
+                Evidence = group.SelectMany(t => t.Evidence).Where(e => winner.Origin == "Predicted" || e.Quote.Contains(winner.Text, StringComparison.Ordinal)).DistinctBy(e => (e.SegmentId,e.SourceRevision,e.EditRevision,e.SliceStart)).ToList()
             };
             SaveTerm(c, merged);
             foreach (var duplicate in group.Where(t => t.Id != winner.Id))

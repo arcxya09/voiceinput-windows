@@ -138,6 +138,7 @@ CREATE TABLE IF NOT EXISTS segments(id TEXT PRIMARY KEY, session TEXT NOT NULL R
 CREATE INDEX IF NOT EXISTS segments_session ON segments(session,task_order,sentence);
 CREATE TABLE IF NOT EXISTS terms(id TEXT PRIMARY KEY, scope TEXT NOT NULL, revision INTEGER NOT NULL, payload BLOB NOT NULL);
 CREATE INDEX IF NOT EXISTS terms_scope ON terms(scope);
+CREATE TABLE IF NOT EXISTS domain_profiles(project TEXT PRIMARY KEY,payload BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, revision INTEGER NOT NULL, payload BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS tombstones(kind TEXT NOT NULL,id TEXT NOT NULL, PRIMARY KEY(kind,id));
 CREATE TABLE IF NOT EXISTS suppression(id TEXT PRIMARY KEY, scope TEXT NOT NULL,payload BLOB NOT NULL);
@@ -196,6 +197,7 @@ PRAGMA user_version=3;
             }
         using var cmd = Command(c, "INSERT INTO sessions(id,project,created,revision,payload) VALUES($id,$p,$at,$v,$b) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,payload=excluded.payload WHERE excluded.revision>=sessions.revision", ("$id",data.Id),("$p",data.ProjectId),("$at",data.CreatedAt.ToString("O")),("$v",data.Revision),("$b",Pack(data))); if(cmd.ExecuteNonQuery()>0&&!data.AllowLearning)
         {
+            RemoveEvidence(c,e=>e.SessionId==data.Id);
             RemoveCorrectionSession(c,data.Id);
             RemoveTermObservationSession(c,data.Id);
         }
@@ -208,6 +210,8 @@ PRAGMA user_version=3;
         using var cmd = Command(c, "INSERT INTO segments(id,session,task,task_order,sentence,revision,payload) VALUES($id,$s,$t,$o,$n,$v,$b) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,payload=excluded.payload WHERE excluded.revision>=segments.revision AND segments.session=excluded.session", ("$id",data.Id),("$s",data.SessionId),("$t",data.TaskId),("$o",data.TaskOrder),("$n",data.SentenceId),("$v",data.Revision),("$b",Pack(data)));
         if (cmd.ExecuteNonQuery() > 0)
         {
+            // Ordinary ASR persistence must not scan/decrypt the full vocabulary.
+            InvalidateDomainProfiles(c, e => e.SegmentId == data.Id && (data.OutputState != OutputState.Published || e.SourceRevision != data.SourceRevision || e.EditRevision != data.EditRevision));
             if(data.EditRevision>0)
             {
                 RemoveEvidence(c, e => e.SegmentId == data.Id && (data.OutputState == OutputState.Deleted || e.SourceRevision != data.SourceRevision || e.EditRevision != data.EditRevision));
@@ -278,11 +282,12 @@ PRAGMA user_version=3;
     public Task RemoveSegmentEvidenceAsync(string id) => WriteAsync(c => { using var tx=c.BeginTransaction();RemoveEvidence(c,e=>e.SegmentId==id);tx.Commit(); });
     private void RemoveEvidence(SqliteConnection c,Func<TermEvidence,bool> remove)
     {
+        InvalidateDomainProfiles(c,remove);
         var all=new List<TermData>();using(var cmd=Command(c,"SELECT payload FROM terms"))using(var r=cmd.ExecuteReader())while(r.Read())all.Add(Unpack<TermData>((byte[])r[0]));
         foreach(var term in all.Where(t=>t.Evidence.Any(remove)))
         {
             var keep=term.Evidence.Where(e=>!remove(e)).ToList();
-            if(keep.Count==0&&term.Origin=="Extracted"){Tombstone(c,"term",term.Id);using var cmd=Command(c,"DELETE FROM terms WHERE id=$id",("$id",term.Id));cmd.ExecuteNonQuery();}
+            if(keep.Count==0&&term.Origin is ("Extracted" or "Predicted")){Tombstone(c,"term",term.Id);using var cmd=Command(c,"DELETE FROM terms WHERE id=$id",("$id",term.Id));cmd.ExecuteNonQuery();}
             else{var changed=term with{Evidence=keep,Revision=term.Revision+1};using var cmd=Command(c,"UPDATE terms SET payload=$b,revision=$v WHERE id=$id",("$b",Pack(changed)),("$v",changed.Revision),("$id",term.Id));cmd.ExecuteNonQuery();}
         }
     }
@@ -292,7 +297,7 @@ PRAGMA user_version=3;
         // Mark the project first, so delayed saves cannot recreate any of its sessions.
         await WriteAsync(c=>Tombstone(c,"project",project));
         while(sessions.Count>0){foreach(var s in sessions)await DeleteSessionAsync(s.Session.Id);sessions=await SearchAsync(project,"",null,CancellationToken.None);}
-        await WriteAsync(c=>{using var tx=c.BeginTransaction();using(var cmd=Command(c,"DELETE FROM corrections WHERE project=$p",("$p",project)))cmd.ExecuteNonQuery();using(var cmd=Command(c,"DELETE FROM terms WHERE scope=$p",("$p",project)))cmd.ExecuteNonQuery();using(var cmd=Command(c,"DELETE FROM projects WHERE id=$p",("$p",project)))cmd.ExecuteNonQuery();using(var cmd=Command(c,"DELETE FROM suppression WHERE scope=$p",("$p",project)))cmd.ExecuteNonQuery();tx.Commit();});
+        await WriteAsync(c=>{using var tx=c.BeginTransaction();using(var profile=Command(c,"DELETE FROM domain_profiles WHERE project=$p",("$p",project)))profile.ExecuteNonQuery();using(var cmd=Command(c,"DELETE FROM corrections WHERE project=$p",("$p",project)))cmd.ExecuteNonQuery();using(var cmd=Command(c,"DELETE FROM terms WHERE scope=$p",("$p",project)))cmd.ExecuteNonQuery();using(var cmd=Command(c,"DELETE FROM projects WHERE id=$p",("$p",project)))cmd.ExecuteNonQuery();using(var cmd=Command(c,"DELETE FROM suppression WHERE scope=$p",("$p",project)))cmd.ExecuteNonQuery();tx.Commit();});
     }
     public async Task RetainAsync(int? days,CancellationToken token=default,Func<string,Task>? onDeleted=null)
     {
