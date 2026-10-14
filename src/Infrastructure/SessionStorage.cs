@@ -9,7 +9,7 @@ public sealed partial class MemoryRepository
 {
     public Task<StoredSession?> LoadSessionAsync(string id) => Task.Run(() =>
     {
-        using var c = Open(); using var tx = c.BeginTransaction();
+        using var c = Open(); using var tx = c.BeginTransaction(deferred: true);
         using var sessionQuery = Command(c, "SELECT payload FROM sessions WHERE id=$id", ("$id", id));
         if (sessionQuery.ExecuteScalar() is not byte[] bytes) return null;
         var session = Unpack<SessionData>(bytes);

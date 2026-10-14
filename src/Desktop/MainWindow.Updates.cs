@@ -18,6 +18,9 @@ public partial class MainWindow
     private UpdateKind updateKind;
     private string? portableRoot;
     private bool updateBusy, updateInstalling, autoInstallPaused, updateBalloon;
+    // Set when this launch is the old copy reopened after a failed portable swap. A failure
+    // that repeats (a locked folder) would otherwise exit and relaunch every idle minute.
+    private bool autoInstallFailedBefore;
     private DateTimeOffset nextUpdateCheck = DateTimeOffset.MinValue;
     private DateTimeOffset idleUpdateSince = DateTimeOffset.UtcNow;
     // Automatic installs wait for this much keyboard and mouse silence, so a restart never lands mid-dictation.
@@ -59,6 +62,7 @@ public partial class MainWindow
         {
             UpdateStatusText.Text = "上次便携版更新未完成，已保留原版本：" + failure;
             controller.Log.Write("Update", "PortableApplyFailed");
+            autoInstallFailedBefore = true;
         }
         AutoInstallUpdateBox.IsEnabled = updateKind != UpdateKind.Unsupported;
         updateTimer.Tick += UpdateTimer_Tick; updateTimer.Start(); RefreshUpdateButtons();
@@ -69,7 +73,7 @@ public partial class MainWindow
         if (ManagementBusy || AppWindow.IsVisible || trayMenu?.IsOpen == true) idleUpdateSince = DateTimeOffset.UtcNow;
         if (controller.Settings.AutoCheckUpdates && DateTimeOffset.UtcNow >= nextUpdateCheck && !updateBusy)
             await CheckUpdatesAsync(true);
-        if (downloadedUpdate != null && updateKind != UpdateKind.Unsupported && controller.Settings.AutoInstallUpdates && !autoInstallPaused && !updateBusy &&
+        if (downloadedUpdate != null && updateKind != UpdateKind.Unsupported && controller.Settings.AutoInstallUpdates && !autoInstallPaused && !autoInstallFailedBefore && !updateBusy &&
             !ManagementBusy && !AppWindow.IsVisible && trayMenu?.IsOpen != true && DateTimeOffset.UtcNow - idleUpdateSince >= TimeSpan.FromSeconds(60) &&
             InputIdle() >= AutoInstallInputIdle)
         {

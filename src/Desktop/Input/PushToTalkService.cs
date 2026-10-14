@@ -94,7 +94,7 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
                 // input fills the queue. A lost control signal cancels safely.
                 if(s.Kind!="activity"){LogTurn("SignalQueueFull",current);activity.Advance();cancellations.Advance();controller.RequestStopCapture();}
             }
-        },()=>Volatile.Read(ref active) is {PhysicalReleased:true,DeliveryDispatched:false,Invalid:false,DictationOnly:false});
+        },()=>Volatile.Read(ref active) is {PhysicalReleased:true,DeliveryDispatched:false,Invalid:false,DictationOnly:false,ManualDelivery:false});
         loop=Task.Run(Loop);watchdog=Task.Run(Watchdog);
     }
     public async Task InitializeAsync()

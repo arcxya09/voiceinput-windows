@@ -71,10 +71,13 @@ public static class PortableUpdate
                 copied.Add(item); Copy(source, destination);
             }
         }
-        catch
+        catch (Exception error)
         {
+            bool restored = true;
             foreach (string item in copied) { try { Delete(Path.Combine(target, item)); } catch { } }
-            foreach (string item in moved) { try { Retry(() => Move(Path.Combine(backup, item), Path.Combine(target, item))); } catch { } }
+            foreach (string item in moved) { try { Retry(() => Move(Path.Combine(backup, item), Path.Combine(target, item))); } catch { restored = false; } }
+            // The backup may hold the only intact copy of the old program; keep it unless every item went back.
+            if (!restored) throw new IOException($"更新失败，且未能完全恢复原文件。原文件保留在 {backup}，请手动移回或重新下载便携包。", error);
             DeleteDirectory(backup);
             throw;
         }
