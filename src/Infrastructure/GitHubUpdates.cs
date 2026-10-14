@@ -106,9 +106,12 @@ public sealed class GitHubUpdates : IDisposable
         if (matches.Length != 1) throw new InvalidDataException("安装包 SHA-256 校验信息缺失或重复。");
         return matches[0].Groups[1].Value.ToUpperInvariant();
     }
+    private static readonly TimeSpan DownloadStall = TimeSpan.FromMinutes(2);
     public async Task<DownloadedUpdate> DownloadAsync(GitHubRelease release, string directory, IProgress<double>? progress, CancellationToken token)
     {
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token); timeout.CancelAfter(TimeSpan.FromMinutes(15)); token = timeout.Token;
+        // Bound stalls rather than total time: a slow but steady connection must still finish,
+        // while a connection that stops delivering data is abandoned.
+        using var stall = CancellationTokenSource.CreateLinkedTokenSource(token); stall.CancelAfter(DownloadStall); token = stall.Token;
         string hash = ReadChecksum(await TextAsync(release.ChecksumsUrl, 64 * 1024, token), release.PackageName);
         if (release.Digest != null && hash != release.Digest) throw new InvalidDataException("GitHub 摘要与校验清单不一致，已停止更新。");
         Directory.CreateDirectory(directory);
@@ -134,7 +137,7 @@ public sealed class GitHubUpdates : IDisposable
                 byte[] buffer = new byte[81920]; long total = 0; int count;
                 while ((count = await input.ReadAsync(buffer, token)) > 0)
                 {
-                    total += count;
+                    stall.CancelAfter(DownloadStall); total += count;
                     if (total > release.Size) throw new InvalidDataException("安装包超过预期大小。");
                     sha.AppendData(buffer, 0, count); await output.WriteAsync(buffer.AsMemory(0, count), token); progress?.Report(100d * total / release.Size);
                 }

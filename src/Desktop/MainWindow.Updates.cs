@@ -18,8 +18,9 @@ public partial class MainWindow
     private UpdateKind updateKind;
     private string? portableRoot;
     private bool updateBusy, updateInstalling, autoInstallPaused, updateBalloon;
-    // Set when this launch is the old copy reopened after a failed portable swap. A failure
-    // that repeats (a locked folder) would otherwise exit and relaunch every idle minute.
+    // Set when this launch is the old copy reopened after a failed update (portable swap or
+    // silent installer). A failure that repeats (a locked folder, a full disk) would otherwise
+    // exit and relaunch every idle minute. Manual and exit installs remain available.
     private bool autoInstallFailedBefore;
     private DateTimeOffset nextUpdateCheck = DateTimeOffset.MinValue;
     private DateTimeOffset idleUpdateSince = DateTimeOffset.UtcNow;
@@ -49,7 +50,7 @@ public partial class MainWindow
         string root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, ".."));
         updateKind = InstalledUpdateDirectory() != null ? UpdateKind.Installed : PortableUpdate.IsRoot(root) ? UpdateKind.Portable : UpdateKind.Unsupported;
         portableRoot = updateKind == UpdateKind.Portable ? root : null;
-        try { PortableUpdate.Cleanup(UpdatesDirectory, portableRoot); }
+        try { PortableUpdate.Cleanup(UpdatesDirectory, portableRoot, CurrentVersion); }
         catch (Exception error) { controller.Log.Write("Update", "CleanupFailed", exception: error); }
         UpdateVersionText.Text = $"当前版本 {CurrentVersion.ToString(3)} · GitHub 正式版";
         UpdateModeText.Text = updateKind switch
@@ -64,6 +65,19 @@ public partial class MainWindow
             controller.Log.Write("Update", "PortableApplyFailed");
             autoInstallFailedBefore = true;
         }
+        // VoiceInput.iss writes this marker when an in-app silent install stops before installing.
+        string installerFailure = Path.Combine(UpdatesDirectory, PortableUpdate.InstallerFailureFile);
+        try
+        {
+            if (File.Exists(installerFailure))
+            {
+                File.Delete(installerFailure);
+                UpdateStatusText.Text = "上次后台安装新版未完成，已保留原版本。可从托盘菜单或本页手动安装，安装失败时请改用安装向导。";
+                controller.Log.Write("Update", "InstallerFailed");
+                autoInstallFailedBefore = true;
+            }
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { autoInstallFailedBefore = true; }
         AutoInstallUpdateBox.IsEnabled = updateKind != UpdateKind.Unsupported;
         updateTimer.Tick += UpdateTimer_Tick; updateTimer.Start(); RefreshUpdateButtons();
     }
@@ -176,6 +190,8 @@ public partial class MainWindow
                         foreach (string argument in new[] { "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", $"/UPDATEWAIT={Environment.ProcessId}", "/DIR=" + directory })
                             start.ArgumentList.Add(argument);
                         if (restart) start.ArgumentList.Add("/UPDATERELAUNCH=1");
+                        // An automatic install must not pop a window up on an idle (possibly presenting) screen.
+                        if (restart && automatic) start.ArgumentList.Add("/UPDATEQUIET=1");
                     }
                     else
                     {
@@ -185,9 +201,12 @@ public partial class MainWindow
                         string staging = await PortableUpdate.StageAsync(update, UpdatesDirectory, CancellationToken.None);
                         string helper = Path.Combine(staging, "app", "RealtimeTranscription.exe");
                         start = new(helper) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(helper)! };
-                        foreach (string argument in PortableUpdate.HelperArguments(Environment.ProcessId, root, restart)) start.ArgumentList.Add(argument);
+                        foreach (string argument in PortableUpdate.HelperArguments(Environment.ProcessId, root, restart, quiet: automatic)) start.ArgumentList.Add(argument);
                     }
                     if (shuttingDown || closed) return;
+                    // Start the updater only when RequestExitAsync below will exit. Otherwise it would
+                    // wait for this process, give up silently and VoiceInput would keep running.
+                    if (Dialogs.IsOpen || pickerOpen || closingPrompt) throw new InvalidOperationException("请先关闭当前对话框，再安装新版。");
                     using var process = Process.Start(start) ?? throw new InvalidOperationException("更新程序未能启动，请重试。");
                 }
                 finally { if (verified != null) await verified.DisposeAsync(); }
@@ -196,7 +215,16 @@ public partial class MainWindow
                 await RequestExitAsync(true);
             });
         }
-        catch (Exception error) { UpdateFailure(error); autoInstallPaused = true; }
+        catch (Exception error)
+        {
+            UpdateFailure(error); autoInstallPaused = true;
+            // Tray and idle installs run with the manager window hidden; surface the reason there too.
+            if (!shuttingDown && !closed && !AppWindow.IsVisible)
+            {
+                updateBalloon = false;
+                tray?.ShowBalloonTip(6000, "VoiceInput 新版未安装", UpdateStatusText.Text, System.Windows.Forms.ToolTipIcon.Warning);
+            }
+        }
         finally { updateInstalling = false; if (!closed) RefreshUpdateButtons(); }
     }
     private async void UpdateBalloon_Clicked(object? sender, EventArgs e)

@@ -279,6 +279,9 @@ public sealed partial class AppController : IAsyncDisposable
             var capture=await OpenCaptureAsync(()=>captureFactory(turnSettings.DeviceId,(pcm,token)=>{attempt.EnvironmentAnalysis.Add(pcm);var sent=client.AudioAsync(pcm,token);attempt.ReviewAudio?.Add(pcm);return sent;},text=>AudioFault(client.TaskId,text),value=>AudioLevel(attempt,client.TaskId,value)),startupToken);audio=capture;
             // A release can arrive while the device is being constructed and audio
             // is still null. Forward it before Start so no post-release PCM is read.
+            // The full fence keeps the audio store ahead of the flag read; RequestStopCapture
+            // writes the flag under a lock before reading audio, so one side always sees the other.
+            Interlocked.MemoryBarrier();
             Stage("StartingMicrophone");
             if(captureReleased)capture.RequestStop();
             startupToken.ThrowIfCancellationRequested();capture.Start();Stage("PreparingRecognition");
@@ -450,7 +453,7 @@ public sealed partial class AppController : IAsyncDisposable
         try
         {
             await captureGate.WaitAsync(budget.Token);gate=true;
-            if(asr==null){await OnActor(()=>{if(state!=CaptureState.Closing)state=requestedPause?CaptureState.Paused:CaptureState.Stopped;Notify();});return;}
+            if(asr==null){await OnActor(()=>{if(state is not (CaptureState.Closing or CaptureState.Faulted))state=requestedPause?CaptureState.Paused:CaptureState.Stopped;Notify();});return;}
             var client=asr;await OnActor(()=>{state=CaptureState.Draining;Status(captureFailure??"正在收齐尾部语音…");});
             if(emergency){audioEnvironmentMemory.Remember("",AudioEnvironment.Empty,Environment.TickCount64);audio?.Abort();client.Abort();gap="系统挂起，尾部可能不完整";}
             else

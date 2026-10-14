@@ -69,7 +69,8 @@ Name: "{autodesktop}\VoiceInput"; Filename: "{app}\VoiceInput.exe"; WorkingDir: 
 [Run]
 Filename: "{app}\VoiceInput.exe"; Description: "{cm:LaunchProgram,VoiceInput}"; Flags: nowait postinstall skipifsilent
 ; An in-app update runs silently with /UPDATERELAUNCH=1 and reopens the updated application.
-Filename: "{app}\VoiceInput.exe"; WorkingDir: "{app}"; Flags: nowait; Check: UpdateRelaunchRequested
+; /UPDATEQUIET=1 (automatic idle installs) reopens it in the tray like a logon start.
+Filename: "{app}\VoiceInput.exe"; Parameters: "{code:UpdateRelaunchParameters}"; WorkingDir: "{app}"; Flags: nowait; Check: UpdateRelaunchRequested
 
 [CustomMessages]
 chinesesimplified.CloseVoiceInput=请先在 VoiceInput 托盘菜单中选择“退出”，再继续安装或卸载。请先保存正在识别的内容。
@@ -101,6 +102,14 @@ var
 function UpdateRelaunchRequested: Boolean;
 begin
   Result := ExpandConstant('{param:UPDATERELAUNCH|0}') = '1';
+end;
+
+function UpdateRelaunchParameters(Param: String): String;
+begin
+  if ExpandConstant('{param:UPDATEQUIET|0}') = '1' then
+    Result := '--startup'
+  else
+    Result := '';
 end;
 
 function InitializeSetup: Boolean;
@@ -164,12 +173,19 @@ var
   Previous: String;
   ResultCode: Integer;
 begin
-  if UpdateInstalled or not UpdateParentExited or not UpdateRelaunchRequested then Exit;
+  { UpdateParentExited is set only for an in-app update (/UPDATEWAIT). }
+  if UpdateInstalled or not UpdateParentExited then Exit;
+  { The marker beside the downloaded package tells the reopened application not to
+    retry this install by itself; a failure that repeats would otherwise exit and
+    reopen VoiceInput every idle minute (MainWindow.Updates.cs). }
+  if not SaveStringToFile(AddBackslash(ExpandConstant('{src}')) + 'install-update-error.txt', 'incomplete', False) then
+    Log('Could not record the incomplete VoiceInput update.');
+  if not UpdateRelaunchRequested then Exit;
   Previous := AddBackslash(ExpandConstant('{param:DIR|}')) + 'VoiceInput.exe';
   if (ExpandConstant('{param:DIR|}') <> '') and FileExists(Previous) then
   begin
     Log('VoiceInput update did not complete; reopening the previous version.');
-    Exec(Previous, '', ExtractFileDir(Previous), SW_SHOWNORMAL, ewNoWait, ResultCode);
+    Exec(Previous, UpdateRelaunchParameters(''), ExtractFileDir(Previous), SW_SHOWNORMAL, ewNoWait, ResultCode);
   end;
 end;
 

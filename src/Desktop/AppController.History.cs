@@ -30,7 +30,12 @@ public sealed partial class AppController
                     var at=DateTimeOffset.UtcNow;
                     await Repository.ReserveTermBudgetAsync(reserve,Settings.DailyExtractionTokens,at,budget.Token);UsageData? actual=null;
                     try{return await deepseek.ExtractAsync(batch,key,budget.Token,u=>actual=u);}
-                    catch(ProviderException e)when(e.Retry&&attempt==0&&deadline-Environment.TickCount64>e.RetryMs+500){await Task.Delay(e.RetryMs,budget.Token);}
+                    catch(ProviderException e)when(e.Retry&&attempt==0&&deadline-Environment.TickCount64>e.RetryMs+500)
+                    {
+                        // A rejected attempt reported no usage; return its reservation so the retry is not charged twice.
+                        if(actual==null)await Repository.SaveUsageAsync(new("term_budget",-reserve,0,false,at));
+                        await Task.Delay(e.RetryMs,budget.Token);
+                    }
                     finally{if(actual is{Unknown:false})await Repository.SaveUsageAsync(new("term_budget",actual.InputTokens+actual.OutputTokens-reserve,0,false,at));}
                 }
             },CommitHistoryBatchAsync);

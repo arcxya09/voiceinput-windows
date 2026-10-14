@@ -11,7 +11,7 @@ public static class TermExchange
         if(extension.Equals(".json",StringComparison.OrdinalIgnoreCase))
         {
             using var doc=JsonDocument.Parse(text,new JsonDocumentOptions{MaxDepth=20});var root=doc.RootElement;
-            var list=root.ValueKind==JsonValueKind.Array?root:root.GetProperty("terms");
+            var list=root.ValueKind==JsonValueKind.Array?root:root.ValueKind==JsonValueKind.Object&&root.TryGetProperty("terms",out var terms)&&terms.ValueKind==JsonValueKind.Array?terms:throw new ArgumentException("JSON 需要词条数组，或包含 terms 数组的对象。");
             foreach(var item in list.EnumerateArray())
             {
                 var term=JsonSerializer.Deserialize<TermData>(item.GetRawText(),JsonCodec.Options)??throw new ArgumentException("词条格式无效。");
@@ -25,7 +25,8 @@ public static class TermExchange
             var rows=Csv(text);if(rows.Count==0)return result;
             var header=rows[0].Select(s=>s.Trim().TrimStart('\uFEFF').ToLowerInvariant()).ToArray();
             int column=Array.FindIndex(header,x=>x is "text" or "词条");if(column<0)throw new ArgumentException("CSV 第一行需要 text 或 词条 列。");
-            string Read(string[] row,string en,string zh,string fallback=""){int index=Array.FindIndex(header,x=>x==en||x==zh);return index>=0&&index<row.Length?row[index]:fallback;}
+            // A blank cell means "not specified", like a missing column.
+            string Read(string[] row,string en,string zh,string fallback=""){int index=Array.FindIndex(header,x=>x==en||x==zh);return index>=0&&index<row.Length&&!string.IsNullOrWhiteSpace(row[index])?row[index].Trim():fallback;}
             foreach(var row in rows.Skip(1))
             {
                 if(row.All(string.IsNullOrWhiteSpace))continue;

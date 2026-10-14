@@ -187,17 +187,20 @@ PRAGMA user_version=3;
     private void SaveSession(SqliteConnection c, SessionData data)
     {
         if (Dead(c, "session", data.Id) || Dead(c, "project", data.ProjectId)) throw new InvalidOperationException("已删除会话的旧保存已拒绝。");
+        bool wasLearning = false;
         using (var existing = Command(c, "SELECT payload FROM sessions WHERE id=$id", ("$id", data.Id)))
             if (existing.ExecuteScalar() is byte[] bytes)
             {
-                var saved = Unpack<SessionData>(bytes);
+                var saved = Unpack<SessionData>(bytes); wasLearning = saved.AllowLearning;
                 data = data with { LearnedVersions = saved.LearnedVersions.Concat(data.LearnedVersions).Distinct().ToList() };
                 if (saved.LearningRevision > data.LearningRevision)
                     data = data with { AllowLearning = saved.AllowLearning, LearningRevision = saved.LearningRevision };
             }
         using var cmd = Command(c, "INSERT INTO sessions(id,project,created,revision,payload) VALUES($id,$p,$at,$v,$b) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,payload=excluded.payload WHERE excluded.revision>=sessions.revision", ("$id",data.Id),("$p",data.ProjectId),("$at",data.CreatedAt.ToString("O")),("$v",data.Revision),("$b",Pack(data))); if(cmd.ExecuteNonQuery()>0&&!data.AllowLearning)
         {
-            RemoveEvidence(c,e=>e.SessionId==data.Id);
+            // Evidence is only ever added while the stored session allows learning, so the full
+            // vocabulary scan is needed only when learning was just turned off, not on every save.
+            if(wasLearning)RemoveEvidence(c,e=>e.SessionId==data.Id);
             RemoveCorrectionSession(c,data.Id);
             RemoveTermObservationSession(c,data.Id);
         }
@@ -283,7 +286,7 @@ PRAGMA user_version=3;
     private void RemoveEvidence(SqliteConnection c,Func<TermEvidence,bool> remove)
     {
         InvalidateDomainProfiles(c,remove);
-        var all=new List<TermData>();using(var cmd=Command(c,"SELECT payload FROM terms"))using(var r=cmd.ExecuteReader())while(r.Read())all.Add(Unpack<TermData>((byte[])r[0]));
+        var all=ReadTermsCached(c,null);
         foreach(var term in all.Where(t=>t.Evidence.Any(remove)))
         {
             var keep=term.Evidence.Where(e=>!remove(e)).ToList();
