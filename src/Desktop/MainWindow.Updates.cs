@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using Microsoft.UI.Xaml;
 using Microsoft.Win32;
 using RealtimeTranscription.Core;
@@ -8,15 +9,29 @@ namespace RealtimeTranscription.Desktop;
 
 public partial class MainWindow
 {
+    private enum UpdateKind { Unsupported, Installed, Portable }
     private readonly GitHubUpdates updateClient = new();
     private readonly DispatcherTimer updateTimer = new() { Interval = TimeSpan.FromSeconds(10) };
     private CancellationTokenSource? updateCancellation;
     private GitHubRelease? availableUpdate;
     private DownloadedUpdate? downloadedUpdate;
-    private bool updateBusy, updateInstalling, autoInstallPaused;
+    private UpdateKind updateKind;
+    private string? portableRoot;
+    private bool updateBusy, updateInstalling, autoInstallPaused, updateBalloon;
     private DateTimeOffset nextUpdateCheck = DateTimeOffset.MinValue;
     private DateTimeOffset idleUpdateSince = DateTimeOffset.UtcNow;
+    // Automatic installs wait for this much keyboard and mouse silence, so a restart never lands mid-dictation.
+    private static readonly TimeSpan AutoInstallInputIdle = TimeSpan.FromMinutes(3);
     private static Version CurrentVersion => typeof(Program).Assembly.GetName().Version ?? new Version(2, 2, 0);
+    private static string UpdatesDirectory => Path.Combine(Program.DataDirectory, "updates");
+
+    [StructLayout(LayoutKind.Sequential)] private struct LastInputInfo { public uint Size; public uint Time; }
+    [DllImport("user32.dll")] private static extern bool GetLastInputInfo(ref LastInputInfo info);
+    private static TimeSpan InputIdle()
+    {
+        var info = new LastInputInfo { Size = (uint)Marshal.SizeOf<LastInputInfo>() };
+        return GetLastInputInfo(ref info) ? TimeSpan.FromMilliseconds(unchecked((uint)Environment.TickCount - info.Time)) : TimeSpan.Zero;
+    }
 
     private static string? InstalledUpdateDirectory()
     {
@@ -28,11 +43,24 @@ public partial class MainWindow
     }
     private void InitializeUpdates()
     {
+        string root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, ".."));
+        updateKind = InstalledUpdateDirectory() != null ? UpdateKind.Installed : PortableUpdate.IsRoot(root) ? UpdateKind.Portable : UpdateKind.Unsupported;
+        portableRoot = updateKind == UpdateKind.Portable ? root : null;
+        try { PortableUpdate.Cleanup(UpdatesDirectory, portableRoot); }
+        catch (Exception error) { controller.Log.Write("Update", "CleanupFailed", exception: error); }
         UpdateVersionText.Text = $"当前版本 {CurrentVersion.ToString(3)} · GitHub 正式版";
-        UpdateModeText.Text = InstalledUpdateDirectory() != null
-            ? "安装包校验通过后，退出 VoiceInput 并打开安装向导；设置、词库和历史记录保留。"
-            : "当前为便携版。更新将打开安装版向导，原便携目录不会被替换；安装后请使用新版快捷方式。";
-        AutoInstallUpdateBox.IsEnabled = InstalledUpdateDirectory() != null;
+        UpdateModeText.Text = updateKind switch
+        {
+            UpdateKind.Installed => "安装版：新版校验通过后在后台静默安装，完成后自动重新打开 VoiceInput；设置、词库和历史记录保留。",
+            UpdateKind.Portable => "便携版：下载新版便携包并校验后，在原文件夹替换程序文件，完成后自动重新打开；数据目录不受影响。",
+            _ => "未识别安装位置，只能检查新版，请从 GitHub 下载。"
+        };
+        if (PortableUpdate.TakeFailure(UpdatesDirectory) is string failure)
+        {
+            UpdateStatusText.Text = "上次便携版更新未完成，已保留原版本：" + failure;
+            controller.Log.Write("Update", "PortableApplyFailed");
+        }
+        AutoInstallUpdateBox.IsEnabled = updateKind != UpdateKind.Unsupported;
         updateTimer.Tick += UpdateTimer_Tick; updateTimer.Start(); RefreshUpdateButtons();
     }
     private async void UpdateTimer_Tick(object? sender, object e)
@@ -41,14 +69,15 @@ public partial class MainWindow
         if (ManagementBusy || AppWindow.IsVisible || trayMenu?.IsOpen == true) idleUpdateSince = DateTimeOffset.UtcNow;
         if (controller.Settings.AutoCheckUpdates && DateTimeOffset.UtcNow >= nextUpdateCheck && !updateBusy)
             await CheckUpdatesAsync(true);
-        if (downloadedUpdate != null && controller.Settings.AutoOpenUpdateInstaller && !autoInstallPaused && !updateBusy &&
-            !ManagementBusy && !AppWindow.IsVisible && trayMenu?.IsOpen != true && DateTimeOffset.UtcNow - idleUpdateSince >= TimeSpan.FromSeconds(60))
+        if (downloadedUpdate != null && updateKind != UpdateKind.Unsupported && controller.Settings.AutoInstallUpdates && !autoInstallPaused && !updateBusy &&
+            !ManagementBusy && !AppWindow.IsVisible && trayMenu?.IsOpen != true && DateTimeOffset.UtcNow - idleUpdateSince >= TimeSpan.FromSeconds(60) &&
+            InputIdle() >= AutoInstallInputIdle)
         {
-            // Auto-open only for this registered installation. Unsaved text must never disappear silently.
+            // Unsaved text must never disappear silently.
             try
             {
                 var snapshot = await controller.SnapshotAsync();
-                if (InstalledUpdateDirectory() != null && (controller.Settings.SaveMemory || snapshot.Segments.Count == 0))
+                if (controller.Settings.SaveMemory || snapshot.Segments.Count == 0)
                     await InstallUpdateAsync(true);
             }
             catch (Exception error) { UpdateFailure(error); autoInstallPaused = true; }
@@ -57,9 +86,10 @@ public partial class MainWindow
     private void RefreshUpdateButtons()
     {
         UpdateCheckButton.IsEnabled = !updateBusy && !updateInstalling;
-        UpdateDownloadButton.IsEnabled = availableUpdate != null && !updateBusy && !updateInstalling;
-        UpdateInstallButton.IsEnabled = downloadedUpdate != null && !updateBusy && !updateInstalling;
+        UpdateDownloadButton.IsEnabled = availableUpdate != null && updateKind != UpdateKind.Unsupported && !updateBusy && !updateInstalling;
+        UpdateInstallButton.IsEnabled = downloadedUpdate != null && updateKind != UpdateKind.Unsupported && !updateBusy && !updateInstalling;
         UpdateCancelButton.IsEnabled = updateBusy;
+        trayMenu?.SetUpdate(UpdateInstallButton.IsEnabled ? $"安装新版 {downloadedUpdate!.Release.Tag} 并重启" : null);
     }
     private void UpdateFailure(Exception error)
     {
@@ -76,12 +106,13 @@ public partial class MainWindow
         bool download = false;
         try
         {
-            var release = await updateClient.CheckAsync(CurrentVersion, updateCancellation.Token);
+            var release = await updateClient.CheckAsync(CurrentVersion, updateCancellation.Token, updateKind == UpdateKind.Portable);
             if (shuttingDown) return;
             if (availableUpdate?.Tag != release?.Tag) downloadedUpdate = null;
             availableUpdate = release;
-            UpdateStatusText.Text = release == null ? "当前已是最新正式版本。" : downloadedUpdate != null ? $"{release.Tag} 已下载并校验，可退出并安装。" : $"发现新版 {release.Tag}（{release.Size / 1048576d:F1} MB）。";
-            download = release != null && downloadedUpdate == null && controller.Settings.AutoDownloadUpdates;
+            UpdateStatusText.Text = release == null ? "当前已是最新正式版本。" : downloadedUpdate != null ? $"{release.Tag} 已下载并校验，可安装并重启。" :
+                updateKind == UpdateKind.Unsupported ? $"发现新版 {release.Tag}，请点击“版本说明”下载。" : $"发现新版 {release.Tag}（{release.Size / 1048576d:F1} MB）。";
+            download = release != null && downloadedUpdate == null && updateKind != UpdateKind.Unsupported && controller.Settings.AutoDownloadUpdates;
             if (!automatic) autoInstallPaused = false;
         }
         catch (Exception error) { UpdateFailure(error); }
@@ -90,25 +121,34 @@ public partial class MainWindow
     }
     private async Task DownloadUpdateAsync()
     {
-        if (availableUpdate == null || updateBusy || updateInstalling || shuttingDown) return;
+        if (availableUpdate == null || updateKind == UpdateKind.Unsupported || updateBusy || updateInstalling || shuttingDown) return;
         var release = availableUpdate; updateBusy = true; updateCancellation = new(); RefreshUpdateButtons();
         UpdateProgress.Value = 0; UpdateProgress.Visibility = Visibility.Visible;
         UpdateStatusText.Text = $"正在下载 {release.Tag}，可继续使用语音输入…";
         try
         {
             var progress = new Progress<double>(value => { if (!closed && updateBusy) UpdateProgress.Value = value; });
-            downloadedUpdate = await updateClient.DownloadAsync(release, Path.Combine(Program.DataDirectory, "updates"), progress, updateCancellation.Token);
+            downloadedUpdate = await updateClient.DownloadAsync(release, UpdatesDirectory, progress, updateCancellation.Token);
             if (shuttingDown) return;
             autoInstallPaused = false; idleUpdateSince = DateTimeOffset.UtcNow;
-            UpdateStatusText.Text = $"{release.Tag} 已下载并通过 SHA-256 校验，点击“退出并安装”开始更新。";
-            tray?.ShowBalloonTip(4000, "VoiceInput 新版已准备好", $"{release.Tag} 已下载，可在设置 → 软件更新中安装。", System.Windows.Forms.ToolTipIcon.Info);
+            UpdateStatusText.Text = $"{release.Tag} 已下载并通过 SHA-256 校验，点击“安装并重启”或从托盘菜单安装。";
+            updateBalloon = true;
+            tray?.ShowBalloonTip(6000, "VoiceInput 新版已准备好", $"{release.Tag} 已下载并校验。点击此提示安装并重启" +
+                (controller.Settings.AutoInstallUpdates ? "，或等电脑空闲、退出程序时自动安装。" : "，也可从托盘菜单安装。"), System.Windows.Forms.ToolTipIcon.Info);
         }
         catch (Exception error) { UpdateFailure(error); }
         finally { updateCancellation.Dispose(); updateCancellation = null; updateBusy = false; UpdateProgress.Visibility = Visibility.Collapsed; RefreshUpdateButtons(); }
     }
-    private async Task InstallUpdateAsync(bool automatic)
+    /// <summary>Tray Exit installs a downloaded update without restarting. Returns true when the application is exiting for it.</summary>
+    private async Task<bool> InstallUpdateOnExitAsync()
     {
-        if (downloadedUpdate == null || updateBusy || updateInstalling || shuttingDown) return;
+        if (downloadedUpdate == null || updateKind == UpdateKind.Unsupported || !controller.Settings.AutoInstallUpdates || controller.FailedSaveCount > 0) return false;
+        await InstallUpdateAsync(true, restart: false);
+        return shuttingDown || closed;
+    }
+    private async Task InstallUpdateAsync(bool automatic, bool restart = true)
+    {
+        if (downloadedUpdate == null || updateKind == UpdateKind.Unsupported || updateBusy || updateInstalling || shuttingDown) return;
         if (SettingsHaveUnsavedChanges()) { UpdateStatusText.Text = "设置页仍有未保存修改，请先保存设置再安装。"; return; }
         if (ManagementBusy || trayMenu?.IsOpen == true) { UpdateStatusText.Text = "请等待本轮输入或管理操作完成后安装。"; return; }
         updateInstalling = true; RefreshUpdateButtons();
@@ -116,24 +156,50 @@ public partial class MainWindow
         {
             await RunManagementOperationAsync(async () =>
             {
-                string? directory = InstalledUpdateDirectory();
-                if (automatic && directory == null) return;
-                if (!automatic && (directory == null || !controller.Settings.SaveMemory))
-                    if (!await Dialogs.ConfirmAsync(this, "退出并安装新版", (directory == null ? "当前为便携版，将打开安装版向导，原便携文件保留。\n" : "") +
-                        (!controller.Settings.SaveMemory ? "文本记忆保存已关闭，退出前请确认需要的正文已复制或导出。\n" : "") + "继续将退出 VoiceInput 并打开安装程序。", "退出并安装")) return;
+                if (!automatic && !controller.Settings.SaveMemory &&
+                    !await Dialogs.ConfirmAsync(this, "安装新版", "文本记忆保存已关闭，退出前请确认需要的正文已复制或导出。\n继续将退出 VoiceInput，更新完成后自动重新打开。", "安装并重启")) return;
                 await controller.PrepareUpdateAsync();
-                await using var verified = await GitHubUpdates.OpenVerifiedAsync(downloadedUpdate, CancellationToken.None);
-                if (shuttingDown || closed) return;
-                var start = new ProcessStartInfo(downloadedUpdate.Path) { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(downloadedUpdate.Path)! };
-                start.ArgumentList.Add($"/UPDATEWAIT={Environment.ProcessId}"); start.ArgumentList.Add("/NORESTART");
-                if (directory != null) start.ArgumentList.Add("/DIR=" + directory);
-                using var process = Process.Start(start) ?? throw new InvalidOperationException("安装程序未能启动，请重试。");
-                UpdateStatusText.Text = "安装程序已启动，正在保存并退出…";
+                var update = downloadedUpdate ?? throw new InvalidOperationException("更新包已失效，请重新下载。");
+                ProcessStartInfo start; FileStream? verified = null;
+                try
+                {
+                    if (updateKind == UpdateKind.Installed)
+                    {
+                        string directory = InstalledUpdateDirectory() ?? throw new InvalidOperationException("未找到安装位置，请从 GitHub 下载安装包。");
+                        verified = await GitHubUpdates.OpenVerifiedAsync(update, CancellationToken.None);
+                        start = new(update.Path) { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(update.Path)! };
+                        // The installer waits for this process, installs silently and reopens VoiceInput (VoiceInput.iss).
+                        foreach (string argument in new[] { "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", $"/UPDATEWAIT={Environment.ProcessId}", "/DIR=" + directory })
+                            start.ArgumentList.Add(argument);
+                        if (restart) start.ArgumentList.Add("/UPDATERELAUNCH=1");
+                    }
+                    else
+                    {
+                        string root = portableRoot!;
+                        PortableUpdate.EnsureWritable(root);
+                        UpdateStatusText.Text = "正在解压新版便携包…";
+                        string staging = await PortableUpdate.StageAsync(update, UpdatesDirectory, CancellationToken.None);
+                        string helper = Path.Combine(staging, "app", "RealtimeTranscription.exe");
+                        start = new(helper) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(helper)! };
+                        foreach (string argument in PortableUpdate.HelperArguments(Environment.ProcessId, root, restart)) start.ArgumentList.Add(argument);
+                    }
+                    if (shuttingDown || closed) return;
+                    using var process = Process.Start(start) ?? throw new InvalidOperationException("更新程序未能启动，请重试。");
+                }
+                finally { if (verified != null) await verified.DisposeAsync(); }
+                controller.Log.Write("Update", "InstallStarted", fields: new Dictionary<string, object?> { ["version"] = update.Release.Version.ToString(3), ["portable"] = update.Release.Portable, ["restart"] = restart });
+                UpdateStatusText.Text = restart ? "正在退出并后台安装新版，完成后自动重新打开…" : "正在退出并后台安装新版…";
                 await RequestExitAsync(true);
             });
         }
         catch (Exception error) { UpdateFailure(error); autoInstallPaused = true; }
         finally { updateInstalling = false; if (!closed) RefreshUpdateButtons(); }
+    }
+    private async void UpdateBalloon_Clicked(object? sender, EventArgs e)
+    {
+        if (!updateBalloon) return;
+        updateBalloon = false;
+        await InstallUpdateAsync(false);
     }
     private async void UpdateCheck_Click(object sender, RoutedEventArgs e) => await CheckUpdatesAsync(false);
     private async void UpdateDownload_Click(object sender, RoutedEventArgs e) => await DownloadUpdateAsync();

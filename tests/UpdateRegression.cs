@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
@@ -14,9 +15,9 @@ internal static class UpdateRegression
     private static string Hash => Convert.ToHexString(SHA256.HashData(Payload));
     private static string Metadata(string tag = "v2.2.1", bool prerelease = false, bool draft = false, string? url = null, string? digest = null, long? size = null)
     {
-        string name = $"VoiceInput-Setup-{tag.TrimStart('v')}.exe";
+        string name = $"VoiceInput-Setup-{tag.TrimStart('v')}.exe", portable = $"VoiceInput-Portable-x64-{tag.TrimStart('v')}.zip";
         object Asset(string n, long length, string? hash) => new { name = n, state = "uploaded", size = length, digest = hash, browser_download_url = url ?? $"https://github.com/{GitHubUpdates.Repository}/releases/download/{tag}/{n}" };
-        return JsonSerializer.Serialize(new { tag_name = tag, prerelease, draft, assets = new[] { Asset(name, size ?? Payload.Length, digest), Asset("SHA256SUMS.txt", 100, null) } });
+        return JsonSerializer.Serialize(new { tag_name = tag, prerelease, draft, assets = new[] { Asset(name, size ?? Payload.Length, digest), Asset(portable, size ?? Payload.Length, digest), Asset("SHA256SUMS.txt", 100, null) } });
     }
     private static GitHubRelease Release() => GitHubUpdates.ParseRelease(Metadata(digest: "sha256:" + Hash.ToLowerInvariant()), new(2, 2, 0))!;
     private sealed class Handler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> response) : HttpMessageHandler
@@ -30,7 +31,33 @@ internal static class UpdateRegression
     private static GitHubUpdates Client(Func<HttpRequestMessage, HttpResponseMessage> response) => new(new Handler((r, _) => Task.FromResult(response(r))));
     private static HttpResponseMessage Ok(string text) => new(HttpStatusCode.OK) { Content = new StringContent(text) };
     private static HttpResponseMessage Bytes(byte[] bytes) => new(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
-    private static string Sums => $"\uFEFF{Hash}  {Release().InstallerName}\r\n";
+    private static string Sums => $"\uFEFF{Hash}  {Release().PackageName}\r\n";
+    private static readonly string[] PortableFiles = ["VoiceInput.exe", "README.txt", "LICENSE.txt", "app/RealtimeTranscription.exe", "app/Assets/AppIcon.ico", "licenses/NOTICE.md"];
+    private static void WritePortable(string root, string marker, IEnumerable<string>? files = null)
+    {
+        foreach (string file in files ?? PortableFiles)
+        {
+            string path = Path.Combine(root, file); Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, marker + ":" + file);
+        }
+    }
+    private static async Task<DownloadedUpdate> PortablePackage(string directory, Action<ZipArchive> fill)
+    {
+        string path = Path.Combine(directory, Guid.NewGuid().ToString("N") + ".zip");
+        using (var zip = ZipFile.Open(path, ZipArchiveMode.Create)) fill(zip);
+        byte[] bytes = await File.ReadAllBytesAsync(path); string hash = Convert.ToHexString(SHA256.HashData(bytes));
+        var release = GitHubUpdates.ParseRelease(Metadata(size: bytes.Length), new(2, 2, 0), portable: true)!;
+        return new(release, path, hash);
+    }
+    private static void AddEntries(ZipArchive zip, string prefix, string marker, IEnumerable<string>? files = null)
+    {
+        foreach (string file in files ?? PortableFiles)
+        {
+            using var writer = new StreamWriter(zip.CreateEntry(prefix + file).Open());
+            writer.Write(marker + ":" + file);
+        }
+    }
+    private static string Read(string root, string file) => File.ReadAllText(Path.Combine(root, file));
     private static async Task InDirectory(Func<string, Task> action)
     {
         string directory = Path.Combine(Path.GetTempPath(), "VoiceInputUpdateTests-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(directory);
@@ -53,7 +80,7 @@ internal static class UpdateRegression
         });
         await test("更新：缺失或重复资源、错误仓库及大小均拒绝", async () =>
         {
-            foreach (string metadata in new[] { Metadata(url: "https://evil.example/setup.exe"), Metadata(size: 0), Metadata(size: GitHubUpdates.MaximumInstallerBytes + 1), Metadata(digest: "md5:bad"), Metadata().Replace("SHA256SUMS.txt", "other.txt"), Metadata().Replace("uploaded", "new") })
+            foreach (string metadata in new[] { Metadata(url: "https://evil.example/setup.exe"), Metadata(size: 0), Metadata(size: GitHubUpdates.MaximumPackageBytes + 1), Metadata(digest: "md5:bad"), Metadata().Replace("SHA256SUMS.txt", "other.txt"), Metadata().Replace("uploaded", "new") })
                 await Reject<InvalidDataException>(() => Task.FromResult(GitHubUpdates.ParseRelease(metadata, new(2, 2, 0))));
             var root = System.Text.Json.Nodes.JsonNode.Parse(Metadata())!; var assets = root["assets"]!.AsArray(); assets.Add(assets[0]!.DeepClone());
             await Reject<InvalidDataException>(() => Task.FromResult(GitHubUpdates.ParseRelease(root.ToJsonString(), new(2, 2, 0))));
@@ -88,7 +115,7 @@ internal static class UpdateRegression
             byte[] large = new byte[200000]; string hash = Convert.ToHexString(SHA256.HashData(large));
             var release = Release() with { Size = large.Length, Digest = hash };
             using var cancellation = new CancellationTokenSource();
-            using var client = Client(r => r.RequestUri!.AbsolutePath.EndsWith(".txt") ? Ok($"{hash}  {release.InstallerName}\n") : Bytes(large));
+            using var client = Client(r => r.RequestUri!.AbsolutePath.EndsWith(".txt") ? Ok($"{hash}  {release.PackageName}\n") : Bytes(large));
             await Reject<OperationCanceledException>(() => client.DownloadAsync(release, directory, new ImmediateProgress<double>(_ => cancellation.Cancel()), cancellation.Token));
             Check(Directory.GetFiles(directory).Length == 0);
         }));
@@ -146,13 +173,56 @@ internal static class UpdateRegression
             using var loop = Client(_ => { calls++; var response = new HttpResponseMessage(HttpStatusCode.Redirect); response.Headers.Location = new("https://github.com/loop"); return response; });
             await Reject<InvalidDataException>(() => loop.CheckAsync(new(2, 2, 0), CancellationToken.None)); Check(calls == 6);
         });
+        await test("更新：便携版选择便携包，安装版选择安装包", () =>
+        {
+            var installed = GitHubUpdates.ParseRelease(Metadata(), new(2, 2, 0))!; var portable = GitHubUpdates.ParseRelease(Metadata(), new(2, 2, 0), portable: true)!;
+            Check(installed.PackageName == "VoiceInput-Setup-2.2.1.exe" && !installed.Portable);
+            Check(portable.PackageName == "VoiceInput-Portable-x64-2.2.1.zip" && portable.Portable && portable.PackageUrl.AbsoluteUri.EndsWith("/v2.2.1/VoiceInput-Portable-x64-2.2.1.zip"));
+            var args = PortableUpdate.HelperArguments(42, "C:/VoiceInput", false);
+            Check(PortableUpdate.IsApply(args) && args.Length == 4 && args[1] == "42" && args[3] == "0" && !PortableUpdate.IsApply(["--startup"]));
+            return Task.CompletedTask;
+        });
+        await test("更新：便携版原地替换程序文件、保留其他文件并清理备份", () => InDirectory(async directory =>
+        {
+            string target = Path.Combine(directory, "Portable Copy 便携"); WritePortable(target, "old");
+            File.WriteAllText(Path.Combine(target, "app", "stale.dll"), "stale"); File.WriteAllText(Path.Combine(target, "我的笔记.txt"), "keep");
+            var update = await PortablePackage(directory, zip => AddEntries(zip, "", "new"));
+            string staging = await PortableUpdate.StageAsync(update, Path.Combine(directory, "updates"), CancellationToken.None);
+            Check(PortableUpdate.IsRoot(staging) && Read(staging, "app/RealtimeTranscription.exe") == "new:app/RealtimeTranscription.exe");
+            PortableUpdate.Apply(staging, target);
+            foreach (string file in PortableFiles) Check(Read(target, file) == "new:" + file, file);
+            Check(!File.Exists(Path.Combine(target, "app", "stale.dll")) && Read(target, "我的笔记.txt") == "keep");
+            Check(!Directory.EnumerateDirectories(target, ".update-backup-*").Any());
+            PortableUpdate.Cleanup(Path.Combine(directory, "updates"), target); Check(!Directory.Exists(staging));
+        }));
+        await test("更新：便携版替换中途失败时恢复原文件", () => InDirectory(async directory =>
+        {
+            string target = Path.Combine(directory, "target"), staging = Path.Combine(directory, "staging");
+            WritePortable(target, "old"); WritePortable(staging, "new", PortableFiles.Where(x => !x.StartsWith("licenses/")));
+            await Reject<IOException>(() => Task.Run(() => PortableUpdate.Apply(staging, target)));
+            foreach (string file in PortableFiles) Check(Read(target, file) == "old:" + file, file);
+            Check(!Directory.EnumerateDirectories(target, ".update-backup-*").Any());
+        }));
+        await test("更新：便携包结构异常或已被修改时拒绝解压", () => InDirectory(async directory =>
+        {
+            string updates = Path.Combine(directory, "updates");
+            var wrapped = await PortablePackage(directory, zip => AddEntries(zip, "VoiceInput/", "new"));
+            await Reject<InvalidDataException>(() => PortableUpdate.StageAsync(wrapped, updates, CancellationToken.None));
+            var extra = await PortablePackage(directory, zip => { AddEntries(zip, "", "new"); AddEntries(zip, "", "new", ["autorun.inf"]); });
+            await Reject<InvalidDataException>(() => PortableUpdate.StageAsync(extra, updates, CancellationToken.None));
+            var changed = await PortablePackage(directory, zip => AddEntries(zip, "", "new"));
+            await File.AppendAllTextAsync(changed.Path, "x");
+            await Reject<InvalidDataException>(() => PortableUpdate.StageAsync(changed, updates, CancellationToken.None));
+            Check(!Directory.Exists(updates) || !Directory.EnumerateFileSystemEntries(updates).Any());
+            await Reject<InvalidOperationException>(() => PortableUpdate.StageAsync(changed with { Release = changed.Release with { Portable = false } }, updates, CancellationToken.None));
+        }));
         await test("更新：设置兼容旧配置、保存后重启保留", async () =>
         {
             var old = JsonSerializer.Deserialize<AppSettings>("{}", JsonCodec.Options)!;
-            Check(old.AutoCheckUpdates && old.AutoDownloadUpdates && !old.AutoOpenUpdateInstaller);
+            Check(old.AutoCheckUpdates && old.AutoDownloadUpdates && old.AutoInstallUpdates);
             await using var fixture = await ControllerFixture.Create();
-            await fixture.App.SaveSettingsAsync(fixture.App.Settings with { AutoCheckUpdates = false, AutoDownloadUpdates = false, AutoOpenUpdateInstaller = true }, fixture.App.Keys);
-            await fixture.Reopen(); Check(!fixture.App.Settings.AutoCheckUpdates && !fixture.App.Settings.AutoDownloadUpdates && fixture.App.Settings.AutoOpenUpdateInstaller);
+            await fixture.App.SaveSettingsAsync(fixture.App.Settings with { AutoCheckUpdates = false, AutoDownloadUpdates = false, AutoInstallUpdates = false }, fixture.App.Keys);
+            await fixture.Reopen(); Check(!fixture.App.Settings.AutoCheckUpdates && !fixture.App.Settings.AutoDownloadUpdates && !fixture.App.Settings.AutoInstallUpdates);
         });
         await test("更新：保存失败禁止退出安装、恢复后持久化再放行", async () =>
         {

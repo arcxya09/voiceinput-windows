@@ -178,6 +178,37 @@ try {
         }
         if (Test-Path -LiteralPath $gate) { Remove-Item -LiteralPath $gate -Force }
     }
+    # The in-app updater passes /UPDATERELAUNCH=1 so the silent upgrade reopens VoiceInput.
+    $relaunchLog = Join-Path $evidenceDirectory 'installer-update-relaunch.log'
+    $exitedStart = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
+    $exitedStart.UseShellExecute = $false
+    foreach ($arg in @('-NoProfile', '-Command', 'exit 0')) { $exitedStart.ArgumentList.Add($arg) }
+    $exitedParent = [Diagnostics.Process]::Start($exitedStart)
+    try { if (!$exitedParent.WaitForExit(30000)) { throw 'The short-lived update parent did not exit.' }; $exitedParentId = $exitedParent.Id } finally { $exitedParent.Dispose() }
+    $appExecutable = [IO.Path]::GetFullPath((Join-Path $installDirectory 'app/RealtimeTranscription.exe'))
+    function Get-InstalledAppProcesses {
+        @(Get-CimInstance Win32_Process -Filter "Name = 'RealtimeTranscription.exe' OR Name = 'VoiceInput.exe'" | Where-Object {
+            $_.ExecutablePath -and $_.ExecutablePath.StartsWith([IO.Path]::GetFullPath($installDirectory), [StringComparison]::OrdinalIgnoreCase)
+        })
+    }
+    try {
+        Invoke-InstallerProcess $setup @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/UPDATEWAIT=$exitedParentId", '/UPDATERELAUNCH=1', "/DIR=$installDirectory", "/GROUP=$group", "/LOG=$relaunchLog")
+        $deadline = [DateTime]::UtcNow.AddSeconds(60)
+        do {
+            $relaunched = @(Get-InstalledAppProcesses | Where-Object { [string]::Equals($_.ExecutablePath, $appExecutable, [StringComparison]::OrdinalIgnoreCase) })
+            if ($relaunched.Count -gt 0) { break }
+            Start-Sleep -Milliseconds 250
+        } while ([DateTime]::UtcNow -lt $deadline)
+        if ($relaunched.Count -eq 0) { throw 'The silent update did not reopen the installed application.' }
+        Assert-UserDataPreserved
+        Add-Check 'A silent in-app update with /UPDATERELAUNCH=1 reopens the installed application after upgrading.'
+    }
+    finally {
+        foreach ($process in Get-InstalledAppProcesses) { Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue }
+        $deadline = [DateTime]::UtcNow.AddSeconds(15)
+        while ((Get-InstalledAppProcesses).Count -gt 0 -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
+    }
+
     $invalidStart = [Diagnostics.ProcessStartInfo]::new($setup)
     $invalidStart.UseShellExecute = $false
     foreach ($arg in @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/UPDATEWAIT=invalid')) { $invalidStart.ArgumentList.Add($arg) }

@@ -95,7 +95,8 @@ public partial class MainWindow : Window
                 case TrayMenuCommand.ToggleDictation: await SetDictationMode(!controller.Settings.DictationOnly); break;
                 case TrayMenuCommand.Copy: await CopyCurrent(); break;
                 case TrayMenuCommand.Settings: OpenManager(); ShowPage(3); break;
-                case TrayMenuCommand.Exit: await RequestExitAsync(true); break;
+                case TrayMenuCommand.InstallUpdate: await InstallUpdateAsync(false); break;
+                case TrayMenuCommand.Exit: if(!await InstallUpdateOnExitAsync())await RequestExitAsync(true); break;
             }
         }));
         tray=new Forms.NotifyIcon{Icon=trayIcon,Text="语音输入法 · 按住说话",Visible=true};
@@ -110,6 +111,7 @@ public partial class MainWindow : Window
             });
         };
         tray.DoubleClick+=(_,_)=>UI(()=>{trayMenu.HideMenu();OpenManager();});
+        tray.BalloonTipClicked+=(_,_)=>UI(()=>UpdateBalloon_Clicked(null,EventArgs.Empty));
     }
     public void OpenManager(){Show();if(AppWindow.Presenter is OverlappedPresenter presenter)presenter.Restore();Activate();}
     private void EnsureIdle(){if(Volatile.Read(ref managementOperations)>0)throw new InvalidOperationException("管理操作尚未完成，请稍候。");if(correctionBusy)throw new InvalidOperationException("纠错学习操作尚未完成，请稍候。");if(savingSettings||changingProject||changingLearning)throw new InvalidOperationException("设置或项目切换正在保存，请稍候。");if(extractingHistory)throw new InvalidOperationException("全部历史词条提取尚未结束，请先取消或等待完成。");if(generatingTerms||importingGenerated)throw new InvalidOperationException("词库生成或导入尚未结束，请稍候或先取消生成。");if(testingPrompt)throw new InvalidOperationException("提示词试用尚未结束，请稍候。");if(testingConnection)throw new InvalidOperationException("连接测试尚未结束，请稍候。");if(microphoneTesting)throw new InvalidOperationException("麦克风测试尚未结束，请稍候。");if(ptt?.Busy==true)throw new InvalidOperationException("当前输入尚未完成，请松开快捷键并等待结果后再操作。");}
@@ -245,7 +247,7 @@ public partial class MainWindow : Window
     private async Task FillSettings()
     {
         var s=controller.Settings;BailianKeyBox.Password=controller.Keys.BailianKey;DeepSeekKeyBox.Password=controller.Keys.DeepSeekKey;WorkspaceBox.Text=s.WorkspaceId;RegionBox.SelectedIndex=s.Region=="cn-beijing"?0:1;LegacyBox.IsChecked=s.LegacyEndpoint;
-        AutoCheckUpdateBox.IsChecked=s.AutoCheckUpdates;AutoDownloadUpdateBox.IsChecked=s.AutoDownloadUpdates;AutoInstallUpdateBox.IsChecked=s.AutoOpenUpdateInstaller;
+        AutoCheckUpdateBox.IsChecked=s.AutoCheckUpdates;AutoDownloadUpdateBox.IsChecked=s.AutoDownloadUpdates;AutoInstallUpdateBox.IsChecked=s.AutoInstallUpdates;
         SmartPunctuationBox.IsChecked=s.SmartPunctuationEnabled;
         HighAccuracyBox.IsChecked=s.HighAccuracyEnabled;
         AdaptiveAsrBox.IsChecked=s.AdaptiveAsrEnabled;
@@ -281,7 +283,7 @@ public partial class MainWindow : Window
     private AppSettings ReadSettings()
     {
         int Parse(TextBox box,string name){if(!int.TryParse(box.Text.Trim(),out int value))throw new ArgumentException(name+"应为整数。");return value;}
-        return controller.Settings with{SchemaVersion=4,AutoCheckUpdates=AutoCheckUpdateBox.IsChecked==true,AutoDownloadUpdates=AutoDownloadUpdateBox.IsChecked==true,AutoOpenUpdateInstaller=AutoInstallUpdateBox.IsChecked==true,Region=RegionBox.SelectedIndex==0?"cn-beijing":"ap-southeast-1",WorkspaceId=WorkspaceBox.Text.Trim(),LegacyEndpoint=LegacyBox.IsChecked==true,DeviceId=DeviceBox.SelectedValue as string??"",SmartPunctuationEnabled=SmartPunctuationBox.IsChecked==true,HighAccuracyEnabled=HighAccuracyBox.IsChecked==true,AdaptiveAsrEnabled=AdaptiveAsrBox.IsChecked==true,PolishEnabled=PolishBox.IsChecked==true,PreferFastDelivery=FastDeliveryBox.IsChecked==true,DirectInput=DirectInputBox.IsChecked==true,PolishPrompt=PolishRules.ResolvePrompt(PolishPromptBox.Text),GenerationRequirement=GenerationRequirementBox.Text.Trim(),GenerationCount=Parse(GenerationCountBox,"目标词数"),GenerationGlobal=GenerationScopeBox.SelectedIndex==1,GenerationMaxThinking=GenerationMaxThinkingBox.IsChecked==true,PreviousContext=PreviousBox.IsChecked==true,SaveMemory=MemoryBox.IsChecked==true,AllowLearning=LearningBox.IsChecked==true,LearnCorrections=CorrectionLearningBox.IsChecked==true,UseLexicon=UseTermsBox.IsChecked==true,DynamicLexicon=DynamicTermsBox.IsChecked==true,AutoExtract=AutoExtractBox.IsChecked==true,DomainLexiconEnabled=DomainLexiconBox.IsChecked==true,AsrContext=AsrContextBox.IsChecked==true,AutoParagraph=ParagraphBox.IsChecked==true,CloseToTray=TrayBox.IsChecked==true,RetentionDays=string.IsNullOrWhiteSpace(RetentionBox.Text)?null:Parse(RetentionBox,"保留天数"),DailyExtractionTokens=Parse(BudgetBox,"整理预算"),SilenceMs=Parse(SilenceBox,"断句停顿"),HoldMs=Parse(HoldBox,"长按阈值"),MaxHoldSeconds=Parse(MaxHoldBox,"最长按住时间"),Hotkey=HotkeyBox.SelectedIndex switch{1=>"F8",2=>"F9",_=>"RightCtrl"}};
+        return controller.Settings with{SchemaVersion=4,AutoCheckUpdates=AutoCheckUpdateBox.IsChecked==true,AutoDownloadUpdates=AutoDownloadUpdateBox.IsChecked==true,AutoInstallUpdates=AutoInstallUpdateBox.IsChecked==true,Region=RegionBox.SelectedIndex==0?"cn-beijing":"ap-southeast-1",WorkspaceId=WorkspaceBox.Text.Trim(),LegacyEndpoint=LegacyBox.IsChecked==true,DeviceId=DeviceBox.SelectedValue as string??"",SmartPunctuationEnabled=SmartPunctuationBox.IsChecked==true,HighAccuracyEnabled=HighAccuracyBox.IsChecked==true,AdaptiveAsrEnabled=AdaptiveAsrBox.IsChecked==true,PolishEnabled=PolishBox.IsChecked==true,PreferFastDelivery=FastDeliveryBox.IsChecked==true,DirectInput=DirectInputBox.IsChecked==true,PolishPrompt=PolishRules.ResolvePrompt(PolishPromptBox.Text),GenerationRequirement=GenerationRequirementBox.Text.Trim(),GenerationCount=Parse(GenerationCountBox,"目标词数"),GenerationGlobal=GenerationScopeBox.SelectedIndex==1,GenerationMaxThinking=GenerationMaxThinkingBox.IsChecked==true,PreviousContext=PreviousBox.IsChecked==true,SaveMemory=MemoryBox.IsChecked==true,AllowLearning=LearningBox.IsChecked==true,LearnCorrections=CorrectionLearningBox.IsChecked==true,UseLexicon=UseTermsBox.IsChecked==true,DynamicLexicon=DynamicTermsBox.IsChecked==true,AutoExtract=AutoExtractBox.IsChecked==true,DomainLexiconEnabled=DomainLexiconBox.IsChecked==true,AsrContext=AsrContextBox.IsChecked==true,AutoParagraph=ParagraphBox.IsChecked==true,CloseToTray=TrayBox.IsChecked==true,RetentionDays=string.IsNullOrWhiteSpace(RetentionBox.Text)?null:Parse(RetentionBox,"保留天数"),DailyExtractionTokens=Parse(BudgetBox,"整理预算"),SilenceMs=Parse(SilenceBox,"断句停顿"),HoldMs=Parse(HoldBox,"长按阈值"),MaxHoldSeconds=Parse(MaxHoldBox,"最长按住时间"),Hotkey=HotkeyBox.SelectedIndex switch{1=>"F8",2=>"F9",_=>"RightCtrl"}};
     }
     internal bool SettingsHaveUnsavedChanges()
     {

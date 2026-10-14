@@ -19,6 +19,8 @@ internal static class Program
     private static int Main(string[] args)
     {
         if (InputDeliverySmoke.IsTarget(args)) return InputDeliverySmoke.RunTarget(args);
+        // A staged portable update runs this copy only to replace the old files.
+        if (PortableUpdate.IsApply(args)) return PortableUpdate.Run(args);
         // Handle the private worker before creating WinUI, a window, credentials,
         // or a mutex. UI Automation must run on the dedicated MTA task thread.
         if (UiaWorker.IsWorker(args))

@@ -113,7 +113,7 @@ public partial class MainWindow
 
     internal void NotifyStartupError(string message)
     {
-        StatusText.Text = message;
+        StatusText.Text = message; updateBalloon = false;
         tray?.ShowBalloonTip(5000, "VoiceInput 启动提示", message, Forms.ToolTipIcon.Warning);
     }
 

@@ -68,6 +68,8 @@ Name: "{autodesktop}\VoiceInput"; Filename: "{app}\VoiceInput.exe"; WorkingDir: 
 
 [Run]
 Filename: "{app}\VoiceInput.exe"; Description: "{cm:LaunchProgram,VoiceInput}"; Flags: nowait postinstall skipifsilent
+; An in-app update runs silently with /UPDATERELAUNCH=1 and reopens the updated application.
+Filename: "{app}\VoiceInput.exe"; WorkingDir: "{app}"; Flags: nowait; Check: UpdateRelaunchRequested
 
 [CustomMessages]
 chinesesimplified.CloseVoiceInput=请先在 VoiceInput 托盘菜单中选择“退出”，再继续安装或卸载。请先保存正在识别的内容。
@@ -91,6 +93,15 @@ function WaitForSingleObject(Handle: THandle; Milliseconds: LongWord): LongWord;
   external 'WaitForSingleObject@kernel32.dll stdcall';
 function GetLastError: LongWord;
   external 'GetLastError@kernel32.dll stdcall';
+
+var
+  UpdateParentExited: Boolean;
+  UpdateInstalled: Boolean;
+
+function UpdateRelaunchRequested: Boolean;
+begin
+  Result := ExpandConstant('{param:UPDATERELAUNCH|0}') = '1';
+end;
 
 function InitializeSetup: Boolean;
 var
@@ -116,6 +127,7 @@ begin
       if Result then Log('VoiceInput update parent exited.');
     end;
   end;
+  UpdateParentExited := Result;
   if not Result then
     SuppressibleMsgBox('VoiceInput update could not wait for the application to exit. Please exit VoiceInput and open the installer again.', mbError, MB_OK, IDOK);
 end;
@@ -138,6 +150,27 @@ function ApplicationIsInUse: Boolean;
 begin
   Result := FileIsInUse(ExpandConstant('{app}\app\RealtimeTranscription.exe')) or
     FileIsInUse(ExpandConstant('{app}\VoiceInput.exe'));
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then UpdateInstalled := True;
+end;
+
+{ A silent in-app update that stops early must not leave the user without
+  VoiceInput: reopen the previous copy the application asked us to replace. }
+procedure DeinitializeSetup;
+var
+  Previous: String;
+  ResultCode: Integer;
+begin
+  if UpdateInstalled or not UpdateParentExited or not UpdateRelaunchRequested then Exit;
+  Previous := AddBackslash(ExpandConstant('{param:DIR|}')) + 'VoiceInput.exe';
+  if (ExpandConstant('{param:DIR|}') <> '') and FileExists(Previous) then
+  begin
+    Log('VoiceInput update did not complete; reopening the previous version.');
+    Exec(Previous, '', ExtractFileDir(Previous), SW_SHOWNORMAL, ewNoWait, ResultCode);
+  end;
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
