@@ -31,7 +31,7 @@ internal static class InputDeliverySmoke
             DelayPaste = delayPaste;
             PasteDown = PasteUp = PacketKeys = PasteMessages = DelayedPastes = 0;
         }
-        internal bool Observe(Forms.Message message, Forms.TextBoxBase editor)
+        internal bool Observe(Forms.Message message, Forms.TextBoxBase? editor)
         {
             if (message.Msg == 0x0302) PasteMessages++; // WM_PASTE, if emitted by this control.
             if (DelayPaste && message.Msg == 0x0102 && message.WParam.ToInt64() == 0x16) return true; // WM_CHAR Ctrl+V.
@@ -47,7 +47,7 @@ internal static class InputDeliverySmoke
             {
                 delayedPaste?.Stop();
                 DelayedPastes++;
-                editor.Paste();
+                editor?.Paste();
             };
             delayedPaste.Start();
             return true;
@@ -67,6 +67,22 @@ internal static class InputDeliverySmoke
         { if (!probe.Observe(message, this)) base.WndProc(ref message); }
     }
 
+    // A self-drawn editor that only understands WM_CHAR, like many custom and
+    // browser-hosted editors: it is not a standard edit control, so direct input
+    // reaches it as Unicode key events rather than EM_REPLACESEL.
+    private sealed class CustomEditor : Forms.Control
+    {
+        private readonly InputProbe probe;
+        internal readonly System.Text.StringBuilder Typed = new();
+        internal CustomEditor(InputProbe probe) { this.probe = probe; SetStyle(Forms.ControlStyles.Selectable, true); TabStop = true; }
+        protected override void WndProc(ref Forms.Message message)
+        {
+            if (probe.Observe(message, null)) return;
+            if (message.Msg == 0x0102) { Typed.Append((char)message.WParam.ToInt64()); return; } // WM_CHAR
+            base.WndProc(ref message);
+        }
+    }
+
     internal static bool IsTarget(string[] args) => args.Length == 2 && args[0] == TargetArgument
         && int.TryParse(args[1], out int parent) && parent > 0;
 
@@ -77,8 +93,10 @@ internal static class InputDeliverySmoke
         using var probe = new InputProbe();
         using var plain = new PlainEditor(probe) { Multiline = true, Dock = Forms.DockStyle.Fill };
         using var rich = new RichEditor(probe) { Dock = Forms.DockStyle.Fill, Visible = false, DetectUrls = false };
-        form.Controls.Add(plain); form.Controls.Add(rich);
+        using var custom = new CustomEditor(probe) { Dock = Forms.DockStyle.Fill, Visible = false };
+        form.Controls.Add(plain); form.Controls.Add(rich); form.Controls.Add(custom);
         Forms.TextBoxBase editor = plain;
+        bool customActive = false;
         // Smoke tests run on an isolated Windows desktop. Preserve an initial
         // empty/text clipboard, and refuse richer formats instead of discarding
         // them if somebody launches this fixture on their own desktop.
@@ -110,8 +128,8 @@ internal static class InputDeliverySmoke
         Reply Current(string code = "Ready", string clipboardText = "")
         {
             uint thread = Win32.GetWindowThreadProcessId(form.Handle, out uint process);
-            return new(code, form.Handle.ToInt64(), GetFocus().ToInt64(), thread, process, editor.Text,
-                clipboardText, probe.PasteDown, probe.PasteUp, probe.PacketKeys, probe.PasteMessages, probe.DelayedPastes, editor.ReadOnly);
+            return new(code, form.Handle.ToInt64(), GetFocus().ToInt64(), thread, process, customActive ? custom.Typed.ToString() : editor.Text,
+                clipboardText, probe.PasteDown, probe.PasteUp, probe.PacketKeys, probe.PasteMessages, probe.DelayedPastes, !customActive && editor.ReadOnly);
         }
         void Dispatch(Request request)
         {
@@ -124,10 +142,14 @@ internal static class InputDeliverySmoke
                     ownedClipboardSequence = GetClipboardSequenceNumber();
                     probe.Reset(request.DelayPaste);
                     editor = request.Mode == "rich" ? rich : plain;
-                    plain.Visible = ReferenceEquals(editor, plain); rich.Visible = ReferenceEquals(editor, rich);
+                    customActive = request.Mode == "custom";
+                    plain.Visible = !customActive && ReferenceEquals(editor, plain); rich.Visible = !customActive && ReferenceEquals(editor, rich);
+                    custom.Visible = customActive;
                     editor.ReadOnly = request.Mode == "readonly";
-                    editor.BringToFront(); editor.Text = request.Text;
-                    editor.Select(request.Start, request.Length); form.Activate(); editor.Focus();
+                    editor.Text = request.Text; editor.Select(request.Start, request.Length);
+                    custom.Typed.Clear(); custom.Typed.Append(request.Text);
+                    if (customActive) { custom.BringToFront(); form.Activate(); custom.Focus(); }
+                    else { editor.BringToFront(); form.Activate(); editor.Focus(); }
                     if (request.Mode == "no-focus")
                     {
                         // Remove focus only from this disposable child process.
@@ -421,32 +443,83 @@ internal static class InputDeliverySmoke
                 }
                 finally { await TextDelivery.ReleaseAsync(capture.Target!); }
             }
+            foreach (var (mode, body) in new[]
+            {
+                ("plain", sentence + "\n" + twoSentences + "🧪e\u0301"),
+                ("rich", twoSentences + "e\u0301👩🏽‍🔬"),
+                ("custom", "🧪" + sentence + twoSentences + "e\u0301👩🏽‍🔬")
+            })
+            {
+                const string original = "原有正文";
+                var prepared = await Query(new("Prepare", mode, original, Start: original.Length));
+                Require(prepared.Code == "Ready" && prepared.Process == (uint)process.Id && prepared.Window == initial.Window && prepared.Focus != 0,
+                    "The direct-input fixture could not prepare " + mode + ": " + prepared.Text);
+                uint seedSequence = GetClipboardSequenceNumber();
+                var native = new NativeTarget(new IntPtr(prepared.Window), new IntPtr(prepared.Focus), prepared.Thread, prepared.Process);
+                _ = SetForegroundWindow(native.Window);
+                for (int i = 0; Win32.Observe(native) != RealtimeTranscription.Core.FocusObservation.Stable && i < 50; i++)
+                    await Task.Delay(20, token);
+                Require(Win32.Current() == native, "The direct-input control could not obtain foreground focus.");
+                var typed = await TextDelivery.TypeAsync(new InputTarget(native, "", ""), body, () => !process.HasExited, token);
+                Require(typed.State == "Sent" && typed.Diagnostic == (mode == "custom" ? "UnicodeInput" : "EditReplaceSelection"),
+                    mode + " direct input returned " + typed.State + " / " + typed.Diagnostic);
+                string expected = original + body;
+                Reply readback = new("Pending");
+                for (int i = 0; i < 50; i++)
+                {
+                    readback = await Query(new("Read", Text: ClipboardSeed));
+                    Require(readback.Code == "Ready", "The direct-input fixture read failed: " + readback.Text);
+                    if (Lines(readback.Text) == Lines(expected)) break;
+                    await Task.Delay(20, token);
+                }
+                Require(Lines(readback.Text) == Lines(expected), mode + " direct input mismatch. Expected=" + JsonSerializer.Serialize(expected)
+                    + "; actual=" + JsonSerializer.Serialize(readback.Text));
+                Require(readback.ClipboardText == ClipboardSeed && GetClipboardSequenceNumber() == seedSequence,
+                    mode + " direct input must leave the clipboard untouched.");
+                Require(readback.PasteDown == 0 && readback.PasteUp == 0 && readback.PasteMessages == 0
+                    && readback.PacketKeys == (mode == "custom" ? body.Length : 0),
+                    mode + " direct input used the wrong channel: " + $"down={readback.PasteDown}, packets={readback.PacketKeys}, WM_PASTE={readback.PasteMessages}");
+            }
+            // Multi-line text is never typed as keys into a non-edit control: it must
+            // report that nothing was sent so the caller can use whole-text paste.
+            {
+                var prepared = await Query(new("Prepare", "custom", ""));
+                var native = new NativeTarget(new IntPtr(prepared.Window), new IntPtr(prepared.Focus), prepared.Thread, prepared.Process);
+                _ = SetForegroundWindow(native.Window);
+                for (int i = 0; Win32.Observe(native) != RealtimeTranscription.Core.FocusObservation.Stable && i < 50; i++)
+                    await Task.Delay(20, token);
+                var skipped = await TextDelivery.TypeAsync(new InputTarget(native, "", ""), sentence + "\n" + twoSentences, () => !process.HasExited, token);
+                var untouched = await Query(new("Read", Text: ClipboardSeed));
+                Require(skipped.State == "Unsupported" && skipped.Accepted == 0 && skipped.Diagnostic == "ControlCharacters"
+                    && untouched.Text == "" && NoInput(untouched), "Multi-line direct input must send nothing and defer to paste.");
+            }
             var beforeFocusChange = await Query(new("Prepare", Text: "original control"));
             Require(beforeFocusChange.Code == "Ready", "The focus-change fixture could not prepare.");
             var originalNative = new NativeTarget(new IntPtr(beforeFocusChange.Window), new IntPtr(beforeFocusChange.Focus),
                 beforeFocusChange.Thread, beforeFocusChange.Process);
-            bool OriginalSafe() => !process.HasExited && originalNative.Process == (uint)process.Id && Win32.Current() == originalNative;
-            var originalCapture = await TextDelivery.CaptureAsync(originalNative, OriginalSafe, token);
-            Require(originalCapture.Target != null, "The original control could not be captured before the focus-change check.");
-            try
+            const string movedOriginal = "new control ";
+            var changed = await Query(new("Prepare", "rich", movedOriginal, Start: movedOriginal.Length));
+            Require(changed.Code == "Ready" && changed.Process == (uint)process.Id && changed.Window == initial.Window
+                && changed.Focus != beforeFocusChange.Focus && Win32.Current() != originalNative, "The fixture did not move focus to its other control.");
+            // Within the original window, delivery follows the control that has focus
+            // now, as an IME commits at the current caret.
+            var followed = await TextDelivery.SendAsync(new InputTarget(originalNative, "", ""), twoSentences, () => !process.HasExited, token);
+            Require(followed.State == "PasteSent" && followed.Accepted == 4, "Paste did not follow focus inside the original window: " + followed.State + " / " + followed.Diagnostic);
+            Reply moved = new("Pending");
+            for (int i = 0; i < 50; i++)
             {
-                var changed = await Query(new("Prepare", "rich", "new control remains unchanged"));
-                Require(changed.Code == "Ready" && changed.Process == (uint)process.Id && changed.Window == initial.Window
-                    && changed.Focus != beforeFocusChange.Focus && !OriginalSafe(), "The fixture did not move focus to its other control.");
-                var blocked = await TextDelivery.SendAsync(originalCapture.Target!, twoSentences, OriginalSafe, token);
-                Require(blocked.State == "Blocked" && blocked.Accepted == 0, "A changed input focus must block clipboard preparation and paste.");
-                var unchanged = await Query(new("Read", Text: ClipboardSeed));
-                Require(unchanged.Code == "Ready" && unchanged.Text == "new control remains unchanged"
-                    && unchanged.ClipboardText == ClipboardSeed && unchanged.PasteDown == 0 && unchanged.PasteUp == 0
-                    && unchanged.PacketKeys == 0 && unchanged.PasteMessages == 0,
-                    "Changing focus must leave both the new control and clipboard unchanged.");
+                moved = await Query(new("Read", Text: twoSentences));
+                if (Lines(moved.Text) == Lines(movedOriginal + twoSentences) && moved.PasteUp == 1) break;
+                await Task.Delay(20, token);
             }
-            finally { await TextDelivery.ReleaseAsync(originalCapture.Target!); }
+            Require(Lines(moved.Text) == Lines(movedOriginal + twoSentences) && moved.PasteDown == 1 && moved.PasteUp == 1 && moved.PacketKeys == 0,
+                "The newly focused control did not receive exactly one paste.");
             return ["Native clipboard contention: a 600 ms competing lock recovers with the current full text; a 1800 ms lock fails within budget, preserves the previous result, sends no input, and permits the next explicit copy",
                 "Copy without UIA capture succeeds with no native focus and with a read-only control, preserving complete Chinese text, emoji and multiple lines while leaving controls, focus and input-message counters unchanged",
                 "A prepared copy is pasted once into independent plain and rich controls without another clipboard write, including a native-only target without UIA capture; a newer clipboard prevents all paste input and remains untouched",
                 "Production full-text clipboard delivery reads back both reported Chinese examples in independent plain and rich edit controls, including selection replacement, emoji, long text, multiple lines and delayed paste; each receives exactly one Ctrl+V, zero Unicode packet keys, and retains the complete result on the clipboard",
-                "Changing focus to another isolated control blocks delivery before changing the clipboard or sending a paste gesture"];
+                "Direct input inserts into plain and rich edit controls with EM_REPLACESEL and into a self-drawn WM_CHAR editor with Unicode key events, preserving Chinese text, emoji and combining marks, without touching the clipboard or sending a paste gesture; multi-line text sends nothing to a non-edit control and defers to paste",
+                "When focus moves to another control in the same window, paste follows the current focus and delivers exactly once"];
         }
         finally
         {

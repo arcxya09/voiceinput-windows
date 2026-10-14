@@ -352,7 +352,7 @@ static partial class StartupCaptureRegression
     public static async Task RunInputCompatibility(Func<string,Func<Task>,Task> test)
     {
         foreach(string scenario in new[]{"consumed-ctrl","no-focus","missing-focus","unavailable-provider","not-editable","read-only","disabled","focus-blip","focus-lost","window-changed","escape","password",
-            "dictation-only","clipboard-busy","paste-blocked","clipboard-changed","empty","incomplete","no-focus-polish","escape-polish","escape-copy","escape-paste","short-press","audio-gap","audio-fault","startup-audio-fault","activity-key","activity-mouse","activity-wheel","activity-startup","activity-queued","activity-password","activity-polish","activity-copy","activity-paste"})
+            "dictation-only","clipboard-busy","paste-blocked","clipboard-changed","empty","incomplete","no-focus-polish","escape-polish","escape-copy","escape-paste","short-press","audio-gap","audio-fault","startup-audio-fault","activity-key","activity-mouse","activity-wheel","activity-startup","activity-queued","activity-password","activity-polish","activity-copy","activity-paste","direct-typed","direct-partial","direct-disabled"})
         await test("2.1.8 生产按住说话："+scenario,async()=>
         {
             TextDelivery.Reset();
@@ -365,6 +365,8 @@ static partial class StartupCaptureRegression
             if(scenario is "password" or "activity-password")TextDelivery.CaptureCode="Password";
             if(scenario=="read-only")TextDelivery.CaptureCode="ReadOnly";
             if(scenario=="disabled")TextDelivery.CaptureCode="Disabled";
+            if(scenario is "direct-typed" or "direct-disabled")TextDelivery.DirectMode="Sent";
+            if(scenario=="direct-partial")TextDelivery.DirectMode="Partial";
             TextDelivery.ClipboardBusy=scenario=="clipboard-busy";
             TextDelivery.BlockPaste=scenario=="paste-blocked";
             TextDelivery.ClipboardChangesBeforePaste=scenario=="clipboard-changed";
@@ -385,7 +387,7 @@ static partial class StartupCaptureRegression
                 await polishRelease.Task.WaitAsync(Budget,token);
                 return ControllerFixture.Reply("这个方案我们先试一下。");
             }:null);
-            await fixture.App.SaveSettingsAsync(fixture.App.Settings with{DictationOnly=dictationOnly,PolishEnabled=polished},
+            await fixture.App.SaveSettingsAsync(fixture.App.Settings with{DictationOnly=dictationOnly,PolishEnabled=polished,DirectInput=scenario!="direct-disabled"},
                 polished?new("TEST_ONLY","TEST_ONLY"):fixture.App.Keys);
             await using var ptt=new PushToTalkService(fixture.App);
             var completed=new TaskCompletionSource<VoiceTurnCompletion>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -455,10 +457,12 @@ static partial class StartupCaptureRegression
             {
                 await Task.Delay(350);Win32.Focus=FocusObservation.Stable;
             }
-            await Task.Delay(scenario=="focus-lost"?1300:700);
+            // Child focus churn never downgrades; another window must stay away for the grace period.
+            await Task.Delay(scenario=="window-changed"?1800:scenario=="focus-lost"?1300:700);
             Check(!completed.Task.IsCompleted&&ptt.Busy&&!capture.StopRequested,"未收到真实松键或取消就中断录音。");
             Check(TextDelivery.CopyAttempts==0&&TextDelivery.Sends==0,"仍在录音时提前复制或上屏。");
-            bool manual=scenario.StartsWith("activity-")||scenario is "audio-gap" or "no-focus" or "missing-focus" or "read-only" or "disabled" or "focus-lost" or "window-changed" or "dictation-only" or "no-focus-polish" or "escape-polish";
+            // Clicks and scrolling do not type, so they no longer stop automatic input.
+            bool manual=scenario.StartsWith("activity-")&&scenario is not ("activity-mouse" or "activity-wheel")||scenario is "audio-gap" or "no-focus" or "missing-focus" or "read-only" or "disabled" or "window-changed" or "dictation-only" or "no-focus-polish" or "escape-polish";
             if(manual&&!dictationOnly&&scenario is not ("audio-gap" or "activity-polish" or "activity-copy" or "activity-paste"))
             {
                 var snapshot=await fixture.App.SnapshotAsync();
@@ -495,7 +499,7 @@ static partial class StartupCaptureRegression
             {
                 bool beforeCopy=scenario=="activity-copy";
                 await (beforeCopy?TextDelivery.CopyEntered:TextDelivery.SendEntered).Task.WaitAsync(Budget);
-                PhysicalHook.Latest.Emit("activity",inputCategory:"MouseButton");
+                PhysicalHook.Latest.Emit("activity",inputCategory:"Keyboard");
                 (beforeCopy?TextDelivery.CopyRelease:TextDelivery.SendRelease).TrySetResult();
             }
             var result=await completed.Task.WaitAsync(Budget);
@@ -504,14 +508,19 @@ static partial class StartupCaptureRegression
             string expectedText=scenario=="empty"?"":scenario is "no-focus-polish" or "activity-polish"?"这个方案我们先试一下。":turn.Socket.FinalText;
             if((!cancelledResult||cancelDuringDelivery)&&scenario!="incomplete")expectedText=SmartPunctuation.Format(expectedText);
             Check(result.Text==expectedText,"收尾正文丢失或未采用完整润色："+result.Text);
-            string expectedState=cancelledResult?"Cancelled":scenario=="empty"?"Empty":scenario is "incomplete" or "clipboard-changed"?"Blocked":scenario=="clipboard-busy"?"CopyFailed":manual||scenario=="paste-blocked"?"Copied":"PasteSent";
+            bool direct=scenario is "direct-typed" or "direct-partial";
+            string expectedState=scenario=="direct-typed"?"Sent":scenario=="direct-partial"?"Partial":cancelledResult?"Cancelled":scenario=="empty"?"Empty":scenario is "incomplete" or "clipboard-changed"?"Blocked":scenario=="clipboard-busy"?"CopyFailed":manual||scenario=="paste-blocked"?"Copied":"PasteSent";
             if(scenario=="audio-gap")Check(result.Status.Contains("音频位置缺口"),"缺口核对提示丢失。");
             Check(result.DeliveryState==expectedState,"终态错误："+result.DeliveryState+" / "+result.Status);
             bool shouldCopy=cancelDuringDelivery||!cancelledResult&&scenario is not ("empty" or "incomplete");
+            if(scenario=="direct-typed")shouldCopy=false;
+            Check(TextDelivery.Types==(direct?1:0)&&TextDelivery.TypedText==(direct?expectedText:""),"直接输入未执行、重复执行或正文不一致。");
+            Check(scenario!="direct-disabled"||TextDelivery.TypeAttempts==0,"关闭直接输入后仍尝试直接输入。");
+            Check(!manual||scenario is "activity-copy" or "activity-paste"||TextDelivery.TypeAttempts==0,"降级后仍尝试直接输入。");
             Check(TextDelivery.CopyAttempts==(shouldCopy?1:0),"重复复制，或取消/空白/不完整结果仍改写剪贴板。");
             bool copied=shouldCopy&&scenario is not ("clipboard-busy" or "escape-copy");
             Check(TextDelivery.Copies==(copied?1:0)&&TextDelivery.CopiedText==(copied?expectedText:""),"剪贴板成功状态或完整正文不符。");
-            bool shouldPaste=copied&&!cancelledResult&&!manual&&scenario is not ("paste-blocked" or "clipboard-changed");
+            bool shouldPaste=copied&&!cancelledResult&&!manual&&!direct&&scenario is not ("paste-blocked" or "clipboard-changed");
             Check(TextDelivery.Sends==(shouldPaste?1:0)&&TextDelivery.SentText==(shouldPaste?expectedText:""),"兼容降级后误投递、重复投递或正文不一致。");
             Check(polishCalls==(polished?1:0),"无焦点流程跳过润色或重复请求。");
             await fixture.App.Log.FlushAsync();

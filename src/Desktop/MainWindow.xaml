@@ -556,6 +556,8 @@
                                     </Grid>
                                     <TextBlock Text="连续录音默认 600 秒，可设 30—1800 秒。断句停顿默认 2500 ms，可设 200—6000 ms；停顿只影响识别确认。" Style="{StaticResource SecondaryText}"/>
                                     <CheckBox x:Name="ParagraphBox" Content="长停顿 2 秒时另起自然段"/>
+                                    <CheckBox x:Name="DirectInputBox" Content="直接输入到光标处，不占用剪贴板"/>
+                                    <TextBlock Text="标准文本框直接替换选区，其他软件按字符输入，期间临时关闭目标输入法以免候选词干扰。多行正文、特殊控件或直接输入不可用时，自动改用整段粘贴。关闭后始终使用粘贴。" Style="{StaticResource SecondaryText}"/>
                                     <CheckBox x:Name="TrayBox" Content="关闭管理窗口时收至托盘"/>
                                     <ToggleSwitch x:Name="StartupToggle" Header="开机自启动" OnContent="开启" OffContent="关闭" Toggled="StartupToggle_Toggled"/>
                                     <TextBlock x:Name="StartupStatusText" Style="{StaticResource SecondaryText}"/>

@@ -67,6 +67,10 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
             var current=Volatile.Read(ref active);
             if(s.Kind=="up"&&current!=null&&s.At-current.PressedAt>=controller.Settings.HoldMs)current.PhysicalReleased=true;
             if(s.Kind=="expedite"){current?.ExpediteInput();return;}
+            // Clicks and scrolling do not type. Text follows the caret inside the
+            // original window at delivery, and a click that activates another
+            // window is caught there and by the window continuity check.
+            if(s.Kind=="activity"&&s.InputCategory is "MouseButton" or "MouseWheel")return;
             // Paste eligibility changes synchronously, before the channel consumer.
             // Ordinary input never cancels recognition or the clipboard write.
             if(s.Kind=="activity")
@@ -179,18 +183,20 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
             UseManualDelivery(t,reason,category);
             return new(null,"DictationFallback",reason);
         }
-        if(t.Native is not {} anchor||anchor.Focus==IntPtr.Zero)return Manual("未检测到可靠的输入焦点，已继续听写；完成后自动复制。","MissingInitialFocus");
+        if(t.Native is not {} anchor)return Manual("未检测到可靠的输入焦点，已继续听写；完成后自动复制。","MissingInitialFocus");
         var native=await InputSafety.RecoverInitialFocusAsync(() =>
         {
             if(Win32.ObserveWindow(anchor)==FocusObservation.Changed)return (FocusObservation.Changed,(NativeTarget?)null);
             var current=Win32.Current();
-            if(current==null)return (FocusObservation.Unavailable,(NativeTarget?)null);
+            if(current==null||current.Focus==IntPtr.Zero)return (FocusObservation.Unavailable,(NativeTarget?)null);
             if(current.Window!=anchor.Window||current.Thread!=anchor.Thread||current.Process!=anchor.Process)
                 return (FocusObservation.Changed,(NativeTarget?)null);
+            // Focus may still be settling while the window activates at key-down.
             if(anchor.Focus!=IntPtr.Zero&&current.Focus!=anchor.Focus)return (FocusObservation.Unavailable,(NativeTarget?)null);
             return (FocusObservation.Stable,(NativeTarget?)current);
         },()=>CanContinue(t),t.Cancel.Token,1000);
-        if(native==null)return Manual("输入位置暂不可用，已继续听写；完成后自动复制。","InitialFocusUnavailable");
+        if(native==null)return Manual(anchor.Focus==IntPtr.Zero?"未检测到可靠的输入焦点，已继续听写；完成后自动复制。":"输入位置暂不可用，已继续听写；完成后自动复制。",
+            anchor.Focus==IntPtr.Zero?"MissingInitialFocus":"InitialFocusUnavailable");
         t.Native=native;
         var result=await TextDelivery.CaptureAsync(native,()=>CanContinue(t),t.Cancel.Token);
         if(result.Target!=null){t.TargetCaptured=true;return result;}
@@ -222,30 +228,62 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
             else if(text.Length==0)result=new("Empty","没有需要输入的文字。");
             else
             {
-                // A complete result is copied independently of target discovery.
-                // Pasting is optional; missing focus cannot discard the copy step.
                 bool Valid()=>CanContinue(t);
-                await controller.SetDeliveryAsync("Copying","正在复制…",turnId:t.Id);
-                long copyingAt=Environment.TickCount64;
-                result=await TextDelivery.CopyAsync(text,Valid,t.Cancel.Token);
-                t.CopyMs=Math.Max(0,Environment.TickCount64-copyingAt);
-                LogTurn("CopyCompleted",t,fields:[("State",AppController.LogDeliveryState(result.State)),
-                    ("Diagnostic",result.Diagnostic),("ElapsedMs",t.CopyMs)]);
-                if(result.State=="Copied"&&captureWarning!=null)result=result with{Message=captureWarning};
-                if(result.State=="Copied"&&Valid()&&activity.Matches(t.ActivityVersion)&&!t.ManualDelivery&&!t.DictationOnly&&target!=null)
+                bool Eligible()=>Valid()&&activity.Matches(t.ActivityVersion)&&!t.ManualDelivery;
+                DeliveryResult? typed=null;
+                // Direct input first: it inserts at the caret without touching the
+                // clipboard. Only a result that guarantees nothing was sent may fall
+                // back to paste; anything else must never be delivered twice.
+                if(controller.Settings.DirectInput&&Eligible()&&!t.DictationOnly&&target!=null)
                 {
-                    await controller.SetDeliveryAsync("Sending","正在粘贴…",turnId:t.Id);
-                    long pastingAt=Environment.TickCount64;
-                    var pasted=await TextDelivery.SendAsync(target,text,()=>Valid()&&activity.Matches(t.ActivityVersion)&&!t.ManualDelivery,t.Cancel.Token,
-                        ()=>t.DeliveryDispatched=true,preparedSequence:result.ClipboardSequence);
-                    t.PasteMs=Math.Max(0,Environment.TickCount64-pastingAt);
-                    LogTurn("PasteCompleted",t,fields:[("State",AppController.LogDeliveryState(pasted.State)),
-                        ("Diagnostic",pasted.Diagnostic),("AcceptedInputEvents",pasted.Accepted),("ElapsedMs",t.PasteMs)]);
-                    // A blocked paste does not undo the successful copy. A changed
-                    // clipboard must not be described as still containing our text.
-                    result=pasted.State=="Blocked"&&result.ClipboardSequence==Win32.GetClipboardSequenceNumber()
-                        ?result with{Message="文字已复制，未自动粘贴；可在目标输入框按 Ctrl+V。",Diagnostic=pasted.Diagnostic}
-                        :pasted;
+                    await controller.SetDeliveryAsync("Sending","正在输入…",turnId:t.Id);
+                    long typingAt=Environment.TickCount64;
+                    typed=await TextDelivery.TypeAsync(target,text,Eligible,t.Cancel.Token,()=>t.DeliveryDispatched=true);
+                    t.PasteMs=Math.Max(0,Environment.TickCount64-typingAt);
+                    LogTurn("DirectInputCompleted",t,fields:[("State",AppController.LogDeliveryState(typed.State)),
+                        ("Diagnostic",typed.Diagnostic),("AcceptedInputEvents",typed.Accepted),("ElapsedMs",t.PasteMs)]);
+                    if(typed.State=="Unsupported"&&!t.DeliveryDispatched&&typed.Accepted==0)typed=null;
+                }
+                if(typed is {State:"Sent"})result=typed;
+                else if(typed!=null)
+                {
+                    // Some text may already be in the target. Keep the full result on
+                    // the clipboard for a manual fix, but never paste it as well.
+                    t.DeliveryDispatched=true;
+                    long copyingAt=Environment.TickCount64;
+                    var recovery=await TextDelivery.CopyAsync(text,()=>true,CancellationToken.None);
+                    t.CopyMs=Math.Max(0,Environment.TickCount64-copyingAt);
+                    LogTurn("CopyCompleted",t,fields:[("State",AppController.LogDeliveryState(recovery.State)),
+                        ("Diagnostic",recovery.Diagnostic),("ElapsedMs",t.CopyMs)]);
+                    result=new(typed.State=="Partial"?"Partial":"Unknown",typed.Message+(recovery.State=="Copied"
+                        ?"完整正文已复制，可用于手动修正。":"请在程序中复制本轮识别文字。"),typed.Accepted) {Diagnostic=typed.Diagnostic};
+                }
+                else
+                {
+                    // A complete result is copied independently of target discovery.
+                    // Pasting is optional; missing focus cannot discard the copy step.
+                    await controller.SetDeliveryAsync("Copying","正在复制…",turnId:t.Id);
+                    long copyingAt=Environment.TickCount64;
+                    result=await TextDelivery.CopyAsync(text,Valid,t.Cancel.Token);
+                    t.CopyMs=Math.Max(0,Environment.TickCount64-copyingAt);
+                    LogTurn("CopyCompleted",t,fields:[("State",AppController.LogDeliveryState(result.State)),
+                        ("Diagnostic",result.Diagnostic),("ElapsedMs",t.CopyMs)]);
+                    if(result.State=="Copied"&&captureWarning!=null)result=result with{Message=captureWarning};
+                    if(result.State=="Copied"&&Valid()&&activity.Matches(t.ActivityVersion)&&!t.ManualDelivery&&!t.DictationOnly&&target!=null)
+                    {
+                        await controller.SetDeliveryAsync("Sending","正在粘贴…",turnId:t.Id);
+                        long pastingAt=Environment.TickCount64;
+                        var pasted=await TextDelivery.SendAsync(target,text,()=>Valid()&&activity.Matches(t.ActivityVersion)&&!t.ManualDelivery,t.Cancel.Token,
+                            ()=>t.DeliveryDispatched=true,preparedSequence:result.ClipboardSequence);
+                        t.PasteMs=Math.Max(0,Environment.TickCount64-pastingAt);
+                        LogTurn("PasteCompleted",t,fields:[("State",AppController.LogDeliveryState(pasted.State)),
+                            ("Diagnostic",pasted.Diagnostic),("AcceptedInputEvents",pasted.Accepted),("ElapsedMs",t.PasteMs)]);
+                        // A blocked paste does not undo the successful copy. A changed
+                        // clipboard must not be described as still containing our text.
+                        result=pasted.State=="Blocked"&&result.ClipboardSequence==Win32.GetClipboardSequenceNumber()
+                            ?result with{Message="文字已复制，未自动粘贴；可在目标输入框按 Ctrl+V。",Diagnostic=pasted.Diagnostic}
+                            :pasted;
+                    }
                 }
             }
             // Copy may finish concurrently with a cancellation. Preserve the
@@ -316,9 +354,9 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
                     await ManualHint(t);
                 }
                 if(t.TargetCaptured&&!t.ManualDelivery&&!t.DictationOnly&&t.Native is {} native&&
-                    !t.Focus.Observe(Win32.ObserveWindow(native),Win32.Observe(native),Environment.TickCount64))
+                    !t.Focus.Observe(Win32.ObserveWindow(native),Environment.TickCount64))
                 {
-                    UseManualDelivery(t,"输入焦点已变化，已继续听写；完成后自动复制。","FocusChanged");
+                    UseManualDelivery(t,"已切换到其他窗口，已继续听写；完成后自动复制。","FocusChanged");
                     await ManualHint(t);
                 }
                 if(t.ReleasedAt==0&&Environment.TickCount64-t.PressedAt>controller.Settings.MaxHoldSeconds*1000L)QueueCancel("已达到最长录音时间，确认文字可手动复制。","MaximumHoldDuration");
