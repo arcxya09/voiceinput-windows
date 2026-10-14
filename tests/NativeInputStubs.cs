@@ -34,8 +34,8 @@ public sealed class PhysicalHook(Action<PhysicalSignal> signal,Func<bool>? await
 }
 public static class TextDelivery
 {
-    public static string CaptureCode="Ready",SentText="",CopiedText="";
-    public static int Sends,Copies,CopyAttempts;
+    public static string CaptureCode="Ready",SentText="",CopiedText="",DirectMode="Unsupported",TypedText="";
+    public static int Sends,Copies,CopyAttempts,Types,TypeAttempts;
     public static bool ClipboardBusy,BlockPaste,ClipboardChangesBeforePaste,PauseBeforeCopy,PauseBeforeSend;
     public static TaskCompletionSource CopyEntered=NewGate(),CopyRelease=NewGate(),SendEntered=NewGate(),SendRelease=NewGate(),CancellationObserved=NewGate();
     private static TaskCompletionSource NewGate()=>new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -66,6 +66,19 @@ public static class TextDelivery
         Copies++;CopiedText=text;
         return new("Copied","已复制，可粘贴") {ClipboardSequence=++Sequence};
     }
+    // Direct input is opt-in per test so existing scenarios keep exercising the
+    // clipboard path that production uses whenever direct input is unsupported.
+    public static Task<DeliveryResult> TypeAsync(InputTarget target,string text,Func<bool> valid,CancellationToken token,Action? dispatched=null)
+    {
+        TypeAttempts++;
+        if(Copies!=0)throw new Exception("Direct input must run before any clipboard write.");
+        if(DirectMode=="Unsupported"||!valid()||token.IsCancellationRequested||Win32.Window!=FocusObservation.Stable)
+            return Task.FromResult(new DeliveryResult("Unsupported","未直接输入。") {Diagnostic="StubUnsupported"});
+        Types++;TypedText=text;dispatched?.Invoke();
+        return Task.FromResult(DirectMode=="Partial"
+            ?new DeliveryResult("Partial","只输入了部分文字，请核对目标内容。不会自动重发。",2) {Diagnostic="UnicodeInputPartial"}
+            :new DeliveryResult("Sent","已直接输入到光标处，剪贴板未改动。",text.Length*2) {Diagnostic="UnicodeInput"});
+    }
     public static async Task<DeliveryResult> SendAsync(InputTarget target,string text,Func<bool> valid,CancellationToken token,Action? dispatched=null,uint? preparedSequence=null)
     {
         if(Copies!=1||CopiedText!=text||preparedSequence!=Sequence)
@@ -77,13 +90,14 @@ public static class TextDelivery
         }
         if(ClipboardChangesBeforePaste)
         {Sequence++;return new("Blocked","剪贴板已变化") {Diagnostic="ClipboardChangedAfterCopy"};}
-        if(BlockPaste||!valid()||token.IsCancellationRequested||Win32.Focus!=FocusObservation.Stable||Win32.Window!=FocusObservation.Stable)
+        // Paste follows the current child focus; only another window blocks it.
+        if(BlockPaste||!valid()||token.IsCancellationRequested||Win32.Window!=FocusObservation.Stable)
             return new("Blocked","未投递");
         Sends++;SentText=text;dispatched?.Invoke();return new("PasteSent","正文保留在剪贴板",4);
     }
     public static void Reset()
     {
-        CaptureCode="Ready";Sends=Copies=CopyAttempts=0;SentText=CopiedText="";ClipboardBusy=BlockPaste=ClipboardChangesBeforePaste=PauseBeforeCopy=PauseBeforeSend=false;Sequence=10;
+        CaptureCode="Ready";Sends=Copies=CopyAttempts=Types=TypeAttempts=0;SentText=CopiedText=TypedText="";DirectMode="Unsupported";ClipboardBusy=BlockPaste=ClipboardChangesBeforePaste=PauseBeforeCopy=PauseBeforeSend=false;Sequence=10;
         CopyEntered=NewGate();CopyRelease=NewGate();SendEntered=NewGate();SendRelease=NewGate();CancellationObserved=NewGate();
         Win32.Target=new(new IntPtr(11),new IntPtr(12),13,14);Win32.Window=Win32.Focus=FocusObservation.Stable;
     }

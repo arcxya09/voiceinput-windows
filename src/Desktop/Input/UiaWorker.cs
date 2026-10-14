@@ -74,6 +74,8 @@ public static class UiaWorker
             captured = null;
             return Capture(new(new IntPtr(request.Window), new IntPtr(request.Focus), request.Thread, request.Process));
         }
+        if (request.Operation == "Inspect")
+            return Inspect(new(new IntPtr(request.Window), new IntPtr(request.Focus), request.Thread, request.Process));
         if (request.Operation == "Validate" && captured is { } target && target.Id == request.CaptureId)
             return Validate(target, request.CheckSelection);
         if (request.Operation == "PreparePaste" && captured is { } pasteTarget && pasteTarget.Id == request.CaptureId)
@@ -106,6 +108,19 @@ public static class UiaWorker
         if (Win32.Observe(native) != FocusObservation.Stable) return new("Unavailable");
         captured = new(Guid.NewGuid().ToString("N"), native, element.GetRuntimeId(), element, selection);
         return new("Ready", CaptureId: captured.Id);
+    }
+    // Delivery-time check of the element focused now, which may differ from the
+    // one captured at key-down. Password is checked before ownership so a
+    // recognized password field is refused even when its HWND is not the target.
+    private static UiaResponse Inspect(NativeTarget native)
+    {
+        if (Win32.ObserveWindow(native) != FocusObservation.Stable) return new("Unavailable");
+        var element = AutomationElement.FocusedElement;
+        if (element == null) return new("Unavailable");
+        if (element.Current.IsPassword) return new("Password");
+        if (!BelongsToTarget(element, native)) return new("Unavailable");
+        if (!element.Current.IsEnabled) return new("Disabled");
+        return Editability(element, out _) == false ? new("ReadOnly") : new("Ready");
     }
     // Unknown capability is not proof that ordinary Ctrl+V is unsupported.
     // A writable ValuePattern also wins over a read-only TextPattern: some

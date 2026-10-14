@@ -48,6 +48,17 @@ internal static class Win32
     [DllImport("imm32.dll")]public static extern IntPtr ImmGetContext(IntPtr hwnd);
     [DllImport("imm32.dll")]public static extern bool ImmReleaseContext(IntPtr hwnd,IntPtr context);
     [DllImport("imm32.dll",CharSet=CharSet.Unicode)]public static extern int ImmGetCompositionStringW(IntPtr context,uint index,IntPtr buffer,uint length);
+    [DllImport("imm32.dll")]public static extern IntPtr ImmGetDefaultIMEWnd(IntPtr hwnd);
+    [DllImport("user32.dll")]public static extern IntPtr GetKeyboardLayout(uint thread);
+    [DllImport("user32.dll",CharSet=CharSet.Unicode)]public static extern int GetClassName(IntPtr hwnd,System.Text.StringBuilder name,int count);
+    [DllImport("user32.dll",EntryPoint="GetWindowLongPtrW")]public static extern IntPtr GetWindowLongPtr(IntPtr hwnd,int index);
+    [DllImport("user32.dll",CharSet=CharSet.Unicode,SetLastError=true)]public static extern IntPtr SendMessageTimeout(IntPtr hwnd,uint message,IntPtr w,string l,uint flags,uint timeout,out IntPtr result);
+    [DllImport("user32.dll",SetLastError=true)]public static extern IntPtr SendMessageTimeout(IntPtr hwnd,uint message,IntPtr w,IntPtr l,uint flags,uint timeout,out IntPtr result);
+    public const uint AbortIfHung=0x2;
+    // Our own injected events seen by the low-level hook. Typing waits for the
+    // system to route them before releasing the temporary IME state.
+    public static long MarkerEvents;
+    public static volatile bool MarkerHookActive;
     public static bool Down(int key)=>(GetAsyncKeyState(key)&0x8000)!=0;
     public static NativeTarget? Current(bool allowMissingFocus=false)
     {
@@ -81,6 +92,32 @@ internal static class Win32
         if(GetForegroundWindow()!=foreground)return FocusObservation.Changed;
         return target.Focus==IntPtr.Zero?FocusObservation.Unavailable:gui.Focus==target.Focus?FocusObservation.Stable:FocusObservation.Changed;
     }
+    public static string ClassName(IntPtr hwnd)
+    {
+        var name=new System.Text.StringBuilder(256);
+        return GetClassName(hwnd,name,name.Capacity)>0?name.ToString():"";
+    }
+    // Window classes that implement the standard edit-control message contract,
+    // including WinForms, Delphi and Notepad's RichEdit variants.
+    public static bool IsStandardEdit(string name)=>
+        name.Equals("Edit",StringComparison.OrdinalIgnoreCase)||name.StartsWith("RichEdit",StringComparison.OrdinalIgnoreCase)||
+        name is "TEdit" or "TMemo"||
+        name.StartsWith("WindowsForms10.EDIT.",StringComparison.OrdinalIgnoreCase)||name.StartsWith("WindowsForms10.RichEdit",StringComparison.OrdinalIgnoreCase);
+    // Native styles of a standard edit control are authoritative even when its
+    // accessibility provider cannot be queried.
+    public static string? EditRefusal(IntPtr hwnd)
+    {
+        if(!IsStandardEdit(ClassName(hwnd)))return null;
+        long style=GetWindowLongPtr(hwnd,-16).ToInt64();
+        return (style&0x20)!=0?"Password":(style&0x800)!=0?"ReadOnly":null;
+    }
+    // Chinese, Japanese and Korean layouts route keystrokes through an IME.
+    public static bool ImeLayout(uint thread)=>(GetKeyboardLayout(thread).ToInt64()&0x3ff) is 0x04 or 0x11 or 0x12;
+    public static int? ImeControl(IntPtr ime,int command,int value)
+        =>SendMessageTimeout(ime,0x283,new IntPtr(command),new IntPtr(value),AbortIfHung,300,out var result)!=IntPtr.Zero?(int)result.ToInt64():null;
+    // A sent message is handled the next time the target thread retrieves a
+    // message, so each round trip lets it consume at most one queued input event.
+    public static bool Ping(IntPtr hwnd)=>SendMessageTimeout(hwnd,0,IntPtr.Zero,IntPtr.Zero,AbortIfHung,250,out _)!=IntPtr.Zero;
     public static bool Composing(IntPtr hwnd)
     {
         IntPtr context=ImmGetContext(hwnd);if(context==IntPtr.Zero)return false;
@@ -119,16 +156,17 @@ public sealed class PhysicalHook : IDisposable
             keyHook=Win32.SetWindowsHookEx(13,keyboard,Win32.GetModuleHandle(null),0);
             mouseHook=Win32.SetWindowsHookEx(14,mouse,Win32.GetModuleHandle(null),0);
             if(keyHook==IntPtr.Zero||mouseHook==IntPtr.Zero)throw new InvalidOperationException("无法监听全局按键，请退出后重新启动程序。");
-            ready.TrySetResult();while(Win32.GetMessage(out _,IntPtr.Zero,0,0)>0){}
+            Win32.MarkerHookActive=true;ready.TrySetResult();while(Win32.GetMessage(out _,IntPtr.Zero,0,0)>0){}
         }
         catch(Exception e){ready.TrySetException(e);}
-        finally{if(keyHook!=IntPtr.Zero)Win32.UnhookWindowsHookEx(keyHook);if(mouseHook!=IntPtr.Zero)Win32.UnhookWindowsHookEx(mouseHook);}
+        finally{Win32.MarkerHookActive=false;if(keyHook!=IntPtr.Zero)Win32.UnhookWindowsHookEx(keyHook);if(mouseHook!=IntPtr.Zero)Win32.UnhookWindowsHookEx(mouseHook);}
     }
     private IntPtr Key(int code,IntPtr w,IntPtr l)
     {
         if(code>=0)
         {
             var k=Marshal.PtrToStructure<Win32.KeyData>(l);
+            if((k.Flags&0x10)!=0&&k.Extra.ToUInt64()==Win32.Marker)Interlocked.Increment(ref Win32.MarkerEvents);
             if((k.Flags&0x10)==0&&k.Extra.ToUInt64()!=Win32.Marker)
             {
                 int vk=(int)k.Vk;if(vk==0x11)vk=(k.Flags&1)!=0?0xA3:0xA2;
@@ -230,42 +268,179 @@ public static class TextDelivery
         catch {return Failed("CopyNotConfirmed");}
     }
 
+    // Delivery follows the current focus inside the original top-level window,
+    // as an IME commits at the caret: editors move child focus or rebuild their
+    // accessibility elements while the user speaks. Another window never receives text.
+    private static async Task<NativeTarget?> CurrentTargetAsync(NativeTarget original,Func<bool> valid,CancellationToken token)
+    {
+        // A toast or flyout can hold the foreground briefly; wait for the original.
+        long deadline=Environment.TickCount64+800;
+        while(true)
+        {
+            if(!valid()||token.IsCancellationRequested)return null;
+            var current=Win32.Current();
+            if(current!=null&&current.Window==original.Window&&current.Thread==original.Thread&&current.Process==original.Process)return current;
+            if(Environment.TickCount64>=deadline)return null;
+            try{await Task.Delay(25,token);}catch(OperationCanceledException){return null;}
+        }
+    }
+    // Stateless check of whatever is focused now. An unknown provider does not
+    // block input; a recognized password, disabled or read-only control does.
+    private static async Task<string> InspectAsync(NativeTarget current,CancellationToken token)
+    {
+        var result=await Query(new("Inspect",current.Window.ToInt64(),current.Focus.ToInt64(),current.Thread,current.Process),token,timeoutMs:600);
+        return result?.Reply.Code??"Unavailable";
+    }
+    private static bool Modified()=>new[]{0x10,0x11,0x12,0x5b,0x5c}.Any(Win32.Down);
+    private static async Task<bool> ModifiersReleasedAsync(CancellationToken token)
+    {
+        long end=Environment.TickCount64+200;
+        while(Modified()&&Environment.TickCount64<end&&!token.IsCancellationRequested)await Task.Delay(10);
+        return !Modified();
+    }
+
+    public const int MaxTypedCharacters=4000;
+    private static DeliveryResult NotTyped(string diagnostic)=>new("Unsupported","未直接输入。") {Diagnostic=diagnostic};
+
+    // Native insertion without the clipboard. "Unsupported" guarantees nothing was
+    // sent, so the caller may fall back to paste; any other state may have reached
+    // the target and must never be repeated by another route.
+    public static async Task<DeliveryResult> TypeAsync(InputTarget target,string text,Func<bool> valid,CancellationToken token,Action? dispatched=null)
+    {
+        if(text.Length==0)return new("Empty","没有需要输入的文字。");
+        if(!ClipboardPaste.IsSupportedText(text))return NotTyped("TextUnsupported");
+        if(!await ModifiersReleasedAsync(token))return NotTyped("ModifiersHeld");
+        var current=await CurrentTargetAsync(target.Native,valid,token);
+        if(current==null)return NotTyped("TargetChanged");
+        string inspection=Win32.EditRefusal(current.Focus)??await InspectAsync(current,token);
+        if(inspection is "Password" or "Disabled" or "ReadOnly")return NotTyped("Target"+inspection);
+        if(!valid()||token.IsCancellationRequested)return NotTyped("Interrupted");
+        if(Win32.IsStandardEdit(Win32.ClassName(current.Focus)))
+        {
+            var replaced=await Task.Run(()=>ReplaceSelection(current,text,valid,dispatched));
+            if(replaced.State!="Unsupported")return replaced;
+        }
+        if(text.Length>MaxTypedCharacters)return NotTyped("TextTooLong");
+        // Line breaks and tabs are keys with application meanings (send a chat
+        // message, move focus). Whole-text paste keeps them as text.
+        if(text.Any(c=>c<0x20||c==0x7f))return NotTyped("ControlCharacters");
+        return await TypeUnicodeAsync(current,text,valid,token,dispatched);
+    }
+
+    // Standard edit controls insert at the caret or replace the selection in one
+    // message, with the control's own undo. The system marshals the string.
+    private static DeliveryResult ReplaceSelection(NativeTarget current,string text,Func<bool> valid,Action? dispatched)
+    {
+        long style=Win32.GetWindowLongPtr(current.Focus,-16).ToInt64();
+        string body=text.Replace("\r\n","\n",StringComparison.Ordinal).Replace('\r','\n');
+        if(body.Contains('\n'))
+        {
+            if((style&0x4)==0)return NotTyped("EditSingleLine");
+            body=body.Replace("\n","\r\n",StringComparison.Ordinal);
+        }
+        if(!valid()||Win32.Current()!=current||Modified())return NotTyped("Interrupted");
+        IntPtr sent=Win32.SendMessageTimeout(current.Focus,0xC2,new IntPtr(1),body,Win32.AbortIfHung,2000,out _);
+        if(sent!=IntPtr.Zero)
+        {
+            dispatched?.Invoke();
+            return new("Sent","已直接输入到光标处，剪贴板未改动。",text.Length) {Diagnostic="EditReplaceSelection"};
+        }
+        // A timed-out message can still be processed later: never send it again.
+        if(Marshal.GetLastWin32Error()==1460)
+        {
+            dispatched?.Invoke();
+            return new("Unknown","输入结果需要核对，请检查目标内容。不会自动重发。") {Diagnostic="EditReplaceTimeout"};
+        }
+        return NotTyped("EditReplaceRejected");
+    }
+
+    // Other editors receive the text as Unicode key events (VK_PACKET/WM_CHAR) in
+    // one SendInput call, which the system never interleaves with physical input.
+    private static async Task<DeliveryResult> TypeUnicodeAsync(NativeTarget current,string text,Func<bool> valid,CancellationToken token,Action? dispatched)
+    {
+        // A CJK IME in native mode may convert injected characters into
+        // punctuation or candidates. Close it while typing, then restore it.
+        IntPtr ime=Win32.ImmGetDefaultIMEWnd(current.Focus);
+        int? open=ime==IntPtr.Zero?null:Win32.ImeControl(ime,5,0);
+        bool reopen=false;
+        if(open is null){if(Win32.ImeLayout(current.Thread))return NotTyped("ImeStateUnknown");}
+        else if(open!=0)
+        {
+            if(Win32.ImeControl(ime,6,0) is null||Win32.ImeControl(ime,5,0)!=0)
+            {Win32.ImeControl(ime,6,1);return NotTyped("ImeNotClosed");}
+            reopen=true;
+        }
+        try
+        {
+            if(!valid()||token.IsCancellationRequested||Win32.Current()!=current||Modified())return NotTyped("Interrupted");
+            static Win32.Input Key(char unit,bool up)=>new(){Type=1,Data=new(){Key=new(){Vk=0,Scan=unit,Flags=4u|(up?2u:0u),Extra=new UIntPtr(Win32.Marker)}}};
+            var input=new Win32.Input[text.Length*2];
+            for(int index=0;index<text.Length;index++){input[index*2]=Key(text[index],false);input[index*2+1]=Key(text[index],true);}
+            long before=Interlocked.Read(ref Win32.MarkerEvents);
+            uint count=Win32.SendInput((uint)input.Length,input,Marshal.SizeOf<Win32.Input>());
+            if(count==0)return NotTyped("InputRejected");
+            dispatched?.Invoke();
+            if(count<input.Length)
+            {
+                // Release an unmatched key-down; never replay text events.
+                if(count%2==1){try{if(Win32.SendInput(1,[input[count]],Marshal.SizeOf<Win32.Input>())==1)count++;}catch{}}
+                await DrainAsync(current.Focus,before,count);
+                return new("Partial","只输入了部分文字，请核对目标内容。不会自动重发。",(int)count) {Diagnostic="UnicodeInputPartial"};
+            }
+            await DrainAsync(current.Focus,before,count);
+            return new("Sent","已直接输入到光标处，剪贴板未改动。",(int)count) {Diagnostic=reopen?"UnicodeInputImeClosed":"UnicodeInput"};
+        }
+        finally
+        {
+            // Restore only our own change; the user may have switched modes meanwhile.
+            if(reopen&&Win32.ImeControl(ime,5,0)==0)Win32.ImeControl(ime,6,1);
+        }
+    }
+
+    // Keep the IME closed until the target has taken the injected events: first
+    // until the system has routed them through the hook chain, then one sent-message
+    // round trip per queued message, because the target handles sent messages first.
+    private static async Task DrainAsync(IntPtr focus,long before,uint events)
+    {
+        long deadline=Environment.TickCount64+Math.Clamp(500L+events*2L,500L,5000L);
+        if(Win32.MarkerHookActive)
+            while(Interlocked.Read(ref Win32.MarkerEvents)-before<events&&Environment.TickCount64<deadline)await Task.Delay(5);
+        await Task.Delay(20);
+        await Task.Run(()=>
+        {
+            for(long round=0;round<events*2L+16&&Environment.TickCount64<deadline;round++)
+                if(!Win32.Ping(focus))break;
+        });
+        await Task.Delay(20);
+    }
+
     public static async Task<DeliveryResult> SendAsync(InputTarget target,string text,Func<bool> valid,CancellationToken token,Action? dispatched=null,uint? preparedSequence=null)
     {
         if(text.Length==0)return new("Empty","没有需要输入的文字。");
-        long end=Environment.TickCount64+200;
-        bool Modified()=>new[]{0x10,0x11,0x12,0x5b,0x5c}.Any(Win32.Down);
-        while(Modified()&&Environment.TickCount64<end&&!token.IsCancellationRequested)await Task.Delay(10);
-        if(Modified())return new("Blocked","修饰键仍未释放，文字已保留，可手动复制。");
+        if(!await ModifiersReleasedAsync(token))return new("Blocked","修饰键仍未释放，文字已保留，可手动复制。") {Diagnostic="ModifiersHeld"};
         if(!valid()||token.IsCancellationRequested)return new("Blocked","检测到其他操作，文字已保留，可手动复制。");
-        if(Win32.Composing(target.Native.Focus))return new("Blocked","输入法仍有未确认的候选词，文字已保留，可手动复制。");
+        var current=await CurrentTargetAsync(target.Native,valid,token);
+        if(current==null)return new("Blocked","输入窗口已切换，文字已保留，可手动粘贴。") {Diagnostic="TargetChanged"};
+        string inspection=Win32.EditRefusal(current.Focus)??await InspectAsync(current,token);
+        if(inspection is "Password" or "Disabled" or "ReadOnly")
+            return new("Blocked","当前输入位置不适合自动粘贴，文字已保留，可手动粘贴。") {Diagnostic="Target"+inspection};
+        if(Win32.Composing(current.Focus))return new("Blocked","输入法仍有未确认的候选词，文字已保留，可手动复制。");
         string diagnostic="PasteNotPrepared";
-        bool nativeOnly=target.WorkerId.Length==0&&target.CaptureId.Length==0;
-        bool Uninterrupted()=>valid()&&Win32.Current()==target.Native;
+        bool Uninterrupted()=>valid()&&Win32.Current()==current;
         var result=await ClipboardPaste.SendAsync(text,async(body,cancellation)=>
             {
                 if(preparedSequence is uint existing)
                 {
-                    // The finished result was already copied. Validate the old
-                    // target without rewriting the clipboard or adopting a newer copy.
+                    // The finished result was already copied. Do not rewrite the
+                    // clipboard or adopt a newer copy made by someone else.
                     if(Win32.GetClipboardSequenceNumber()!=existing)
                     {diagnostic="ClipboardChangedAfterCopy";return null;}
-                    if(!nativeOnly)
-                    {
-                        var validation=await Query(new("Validate",CaptureId:target.CaptureId,CheckSelection:true),
-                            cancellation,target.WorkerId,timeoutMs:1200);
-                        diagnostic=validation?.Reply.Code??"PasteWorkerUnavailable";
-                        if(validation?.Reply.Code!="Ready")return null;
-                    }
                     diagnostic="CopiedTextReady";
                     return existing;
                 }
                 uint previous=Win32.GetClipboardSequenceNumber();
-                UiaRequest request=nativeOnly
-                    ?new("PrepareNativePaste",target.Native.Window.ToInt64(),target.Native.Focus.ToInt64(),target.Native.Thread,target.Native.Process,
-                        Text:body,ClipboardSequence:previous)
-                    :new("PreparePaste",CaptureId:target.CaptureId,Text:body,ClipboardSequence:previous);
-                var prepared=await Query(request,cancellation,nativeOnly?null:target.WorkerId,timeoutMs:3000);
+                var prepared=await Query(new("PrepareNativePaste",current.Window.ToInt64(),current.Focus.ToInt64(),current.Thread,current.Process,
+                    Text:body,ClipboardSequence:previous),cancellation,timeoutMs:3000);
                 diagnostic=prepared?.Reply.Code??"PasteWorkerUnavailable";
                 return prepared is {} response&&response.Reply.Code=="Ready"?response.Reply.ClipboardSequence:null;
             },
@@ -275,7 +450,7 @@ public static class TextDelivery
                 if(!unchanged)diagnostic="ClipboardChangedAfterPrepare";
                 return unchanged;
             },
-            ()=>Uninterrupted()&&!Modified()&&!Win32.Composing(target.Native.Focus),
+            ()=>Uninterrupted()&&!Modified()&&!Win32.Composing(current.Focus),
             ()=>{int accepted=SendPasteShortcut();if(accepted>=2)dispatched?.Invoke();return accepted;},token,Uninterrupted);
         DeliveryResult delivery=result.State switch
         {
