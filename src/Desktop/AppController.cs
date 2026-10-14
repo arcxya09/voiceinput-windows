@@ -276,9 +276,12 @@ public sealed partial class AppController : IAsyncDisposable
             // Local capture precedes database refresh and the cloud handshake. Startup PCM
             // is bounded to the same fifteen seconds as the overall startup deadline.
             Stage("OpeningMicrophone");
-            var capture=await Task.Run(()=>captureFactory(turnSettings.DeviceId,(pcm,token)=>{attempt.EnvironmentAnalysis.Add(pcm);var sent=client.AudioAsync(pcm,token);attempt.ReviewAudio?.Add(pcm);return sent;},text=>AudioFault(client.TaskId,text),value=>AudioLevel(attempt,client.TaskId,value)),startupToken);audio=capture;
+            var capture=await OpenCaptureAsync(()=>captureFactory(turnSettings.DeviceId,(pcm,token)=>{attempt.EnvironmentAnalysis.Add(pcm);var sent=client.AudioAsync(pcm,token);attempt.ReviewAudio?.Add(pcm);return sent;},text=>AudioFault(client.TaskId,text),value=>AudioLevel(attempt,client.TaskId,value)),startupToken);audio=capture;
             // A release can arrive while the device is being constructed and audio
             // is still null. Forward it before Start so no post-release PCM is read.
+            // The full fence keeps the audio store ahead of the flag read; RequestStopCapture
+            // writes the flag under a lock before reading audio, so one side always sees the other.
+            Interlocked.MemoryBarrier();
             Stage("StartingMicrophone");
             if(captureReleased)capture.RequestStop();
             startupToken.ThrowIfCancellationRequested();capture.Start();Stage("PreparingRecognition");
@@ -450,7 +453,7 @@ public sealed partial class AppController : IAsyncDisposable
         try
         {
             await captureGate.WaitAsync(budget.Token);gate=true;
-            if(asr==null){await OnActor(()=>{if(state!=CaptureState.Closing)state=requestedPause?CaptureState.Paused:CaptureState.Stopped;Notify();});return;}
+            if(asr==null){await OnActor(()=>{if(state is not (CaptureState.Closing or CaptureState.Faulted))state=requestedPause?CaptureState.Paused:CaptureState.Stopped;Notify();});return;}
             var client=asr;await OnActor(()=>{state=CaptureState.Draining;Status(captureFailure??"正在收齐尾部语音…");});
             if(emergency){audioEnvironmentMemory.Remember("",AudioEnvironment.Empty,Environment.TickCount64);audio?.Abort();client.Abort();gap="系统挂起，尾部可能不完整";}
             else
@@ -762,6 +765,19 @@ public sealed partial class AppController : IAsyncDisposable
         return PolishRules.Validate(text,result,protectedTerms);
     }
     public async Task TestDeepSeekAsync(){await deepseek.CallAsync(Settings.EffectivePolishPrompt,new{current_text="嗯，这个方案我们先试一下。",protected_terms=Array.Empty<string>()},false,128,"polish",Keys.DeepSeekKey,8000,lifetime.Token);}
+    // Opening an endpoint makes blocking COM calls with no timeout of their own (a
+    // reconnecting Bluetooth headset can stall Activate). Stop waiting at the deadline
+    // and release a device that finishes opening after the turn has been abandoned.
+    private static async Task<IAudioCapture> OpenCaptureAsync(Func<IAudioCapture> open,CancellationToken token)
+    {
+        var opening=Task.Run(open,token);
+        try{return await opening.WaitAsync(token);}
+        catch(OperationCanceledException)
+        {
+            _=opening.ContinueWith(x=>{if(x.Status==TaskStatus.RanToCompletion)_=x.Result.DisposeAsync().AsTask();},TaskScheduler.Default);
+            throw;
+        }
+    }
     public async Task<string> TestMicrophoneAsync(string deviceId)
     {
         using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(8));
@@ -776,7 +792,7 @@ public sealed partial class AppController : IAsyncDisposable
             if(current.State is CaptureState.Recording or CaptureState.Connecting or CaptureState.Draining)throw new InvalidOperationException("请先结束当前录音。");
             float peak=0;
             Stage("OpeningMicrophone");
-            mic=await Task.Run(()=>captureFactory(deviceId,(_,_)=>ValueTask.CompletedTask,_=>{},v=>{peak=Math.Max(peak,v);Level?.Invoke(Math.Min(1,v*5));}),timeout.Token);
+            mic=await OpenCaptureAsync(()=>captureFactory(deviceId,(_,_)=>ValueTask.CompletedTask,_=>{},v=>{peak=Math.Max(peak,v);Level?.Invoke(Math.Min(1,v*5));}),timeout.Token);
             Stage("StartingMicrophone");mic.Start();
             Stage("ReadingMicrophone");await Task.Delay(3000,timeout.Token);
             Stage("StoppingMicrophone");await mic.StopAsync(timeout.Token);

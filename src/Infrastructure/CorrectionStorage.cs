@@ -104,7 +104,7 @@ public sealed partial class MemoryRepository
             // a legacy display alias; adding another pronunciation never replaces an older rule.
             var related=old==null?[]:ReadAllCorrectionDecisions(c).Where(d=>d.State==CorrectionState.Learned&&d.TermId==old.Id).ToArray();
             var baseline=CorrectionBaseline(old,related);
-            result=old==null?requested:old with{Text=word,Alias=old.Alias.Length==0?alias:old.Alias,Origin=old.Origin=="Extracted"?"CorrectionLearning":old.Origin,State=TermState.Enabled,Weight=Math.Max(old.Weight,requested.Weight),Pinned=true,Protect=true,Revision=old.Revision+1,UpdatedAt=DateTimeOffset.UtcNow};
+            result=old==null?requested:old with{Text=word,Alias=old.Alias.Length==0?alias:old.Alias,Origin=old.Origin is "Extracted" or "Predicted"?"CorrectionLearning":old.Origin,State=TermState.Enabled,Weight=Math.Max(old.Weight,requested.Weight),Pinned=true,Protect=true,Revision=old.Revision+1,UpdatedAt=DateTimeOffset.UtcNow};
             SaveTerm(c,result);
             // Sibling mapping changes are not a manual edit of the vocabulary. Keep their
             // rollback watermark current while retaining guards against actual later user edits.

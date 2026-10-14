@@ -30,6 +30,29 @@ FROM terms t LEFT JOIN (
         return result;
     }
 
+    // Segment saves run for every confirmed sentence and retention deletes run per session;
+    // decrypting the whole vocabulary each time stalls the single writer once it holds
+    // thousands of terms. Reuse a decrypted term while its stored ciphertext is unchanged:
+    // every rewrite stores new bytes, so a changed term is always decrypted again.
+    private readonly object termCacheSync=new();
+    private readonly Dictionary<string,(byte[] Raw,TermData Term)> termCache=new(StringComparer.Ordinal);
+    private List<TermData> ReadTermsCached(SqliteConnection c,string? scope)
+    {
+        using var query=Command(c,"SELECT id,payload FROM terms WHERE $s IS NULL OR scope=$s",("$s",scope));
+        using var reader=query.ExecuteReader();var result=new List<TermData>();
+        lock(termCacheSync)
+        {
+            if(termCache.Count>50000)termCache.Clear();
+            while(reader.Read())
+            {
+                string id=reader.GetString(0);var raw=(byte[])reader[1];
+                if(!termCache.TryGetValue(id,out var cached)||!cached.Raw.AsSpan().SequenceEqual(raw))termCache[id]=cached=(raw,Unpack<TermData>(raw));
+                result.Add(cached.Term);
+            }
+        }
+        return result;
+    }
+
     private static void RemoveTermObservationSession(SqliteConnection c,string session)
     {
         using var clear=Command(c,"DELETE FROM term_observations WHERE session=$id",("$id",session));clear.ExecuteNonQuery();
@@ -47,7 +70,7 @@ FROM terms t LEFT JOIN (
 
         // Machine-generated aliases/polish must not feed their own output back as observed use.
         string content=(segment.EditRevision>0?segment.FinalText:segment.RawText).Normalize(NormalizationForm.FormC);
-        var applicable=ReadTerms(c,session.ProjectId).Concat(session.ProjectId=="*"?[]:ReadTerms(c,"*"))
+        var applicable=ReadTermsCached(c,session.ProjectId).Concat(session.ProjectId=="*"?[]:ReadTermsCached(c,"*"))
             .Where(t=>t.State==TermState.Enabled)
             .GroupBy(t=>TermGenerationRules.Normalize(t.Text),StringComparer.Ordinal)
             .Select(g=>g.OrderByDescending(t=>t.Scope==session.ProjectId).ThenByDescending(t=>t.UpdatedAt).ThenBy(t=>t.Id,StringComparer.Ordinal).First());

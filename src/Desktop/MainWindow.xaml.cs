@@ -324,6 +324,9 @@ public partial class MainWindow : Window
     private async void ClosingWindow(AppWindow sender,AppWindowClosingEventArgs e)
     {
         e.Cancel=true;
+        // With close-to-tray off, closing the window exits: install a downloaded update then,
+        // as tray Exit does and as the update notification promises.
+        if(!controller.Settings.CloseToTray&&!closed&&!shuttingDown&&await InstallUpdateOnExitAsync())return;
         await RequestExitAsync(false);
     }
     private async Task RequestExitAsync(bool explicitExit)

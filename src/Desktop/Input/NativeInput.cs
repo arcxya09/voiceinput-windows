@@ -393,7 +393,9 @@ public static class TextDelivery
         finally
         {
             // Restore only our own change; the user may have switched modes meanwhile.
-            if(reopen&&Win32.ImeControl(ime,5,0)==0)Win32.ImeControl(ime,6,1);
+            // An unanswered status query (busy target) still reopens: leaving the
+            // user's IME closed is worse than reopening one they reopened already.
+            if(reopen&&Win32.ImeControl(ime,5,0) is null or 0)Win32.ImeControl(ime,6,1);
         }
     }
 
@@ -462,8 +464,10 @@ public static class TextDelivery
     }
     private static int SendPasteShortcut()
     {
-        static Win32.Input Key(ushort key,bool up)=>new(){Type=1,Data=new(){Key=new(){Vk=key,Flags=up?2u:0u,Extra=new UIntPtr(Win32.Marker)}}};
-        Win32.Input[] input=[Key(0x11,false),Key(0x56,false),Key(0x56,true),Key(0x11,true)];
+        // Include the set-1 scan codes: remote desktop, VM and some terminal clients
+        // forward scan codes rather than virtual keys and would drop a zero scan code.
+        static Win32.Input Key(ushort key,ushort scan,bool up)=>new(){Type=1,Data=new(){Key=new(){Vk=key,Scan=scan,Flags=up?2u:0u,Extra=new UIntPtr(Win32.Marker)}}};
+        Win32.Input[] input=[Key(0x11,0x1D,false),Key(0x56,0x2F,false),Key(0x56,0x2F,true),Key(0x11,0x1D,true)];
         uint count=Win32.SendInput((uint)input.Length,input,Marshal.SizeOf<Win32.Input>());
         if(count is >0 and <4)
         {
