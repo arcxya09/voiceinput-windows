@@ -13,7 +13,7 @@ using Windows.UI.ViewManagement;
 
 namespace RealtimeTranscription.Desktop;
 
-public enum TrayMenuCommand { OpenManager, ToggleEnabled, ToggleDictation, Copy, Settings, Exit }
+public enum TrayMenuCommand { OpenManager, ToggleEnabled, ToggleDictation, Copy, Settings, InstallUpdate, Exit }
 
 /// <summary>WinUI menu surface; the notification icon itself remains a Windows Shell adapter.</summary>
 public sealed class TrayMenuWindow : Window, IDisposable
@@ -28,6 +28,8 @@ public sealed class TrayMenuWindow : Window, IDisposable
     private readonly List<ButtonBase> buttons = [];
     private readonly Button enabledButton;
     private readonly ToggleButton dictationButton;
+    private readonly Button updateButton;
+    private readonly TextBlock updateLabel;
     private readonly TextBlock enabledLabel;
     private readonly IntPtr hwnd;
     private readonly SubclassProc windowProc;
@@ -66,6 +68,10 @@ public sealed class TrayMenuWindow : Window, IDisposable
         buttons.Add(dictationButton); stack.Children.Add(dictationButton);
         AddButton(stack, "TrayCopy", "复制最近结果", "\uE8C8", TrayMenuCommand.Copy);
         AddButton(stack, "TraySettings", "设置", "\uE713", TrayMenuCommand.Settings);
+        // Shown only once a verified update is ready; collapsed buttons stay disabled so keyboard navigation skips them.
+        updateButton = AddButton(stack, "TrayInstallUpdate", "安装新版并重启", "\uE896", TrayMenuCommand.InstallUpdate);
+        updateLabel = (TextBlock)((Grid)updateButton.Content).Children[1];
+        updateButton.Visibility = Visibility.Collapsed; updateButton.IsEnabled = false;
         stack.Children.Add(new Border { Height = 1, Background = new SolidColorBrush(Windows.UI.Color.FromArgb(50, 128, 128, 128)), Margin = new Thickness(10, 5, 10, 5) });
         AddButton(stack, "TrayExit", "退出", "\uE8BB", TrayMenuCommand.Exit);
         root = new Border
@@ -131,6 +137,16 @@ public sealed class TrayMenuWindow : Window, IDisposable
         AutomationProperties.SetName(enabledButton, enabledLabel.Text);
         dictationButton.IsChecked = dictation;
         dictationButton.IsEnabled = canChangeMode;
+    }
+
+    public void SetUpdate(string? label)
+    {
+        if (closed) return;
+        updateButton.Visibility = label == null ? Visibility.Collapsed : Visibility.Visible;
+        updateButton.IsEnabled = label != null;
+        updateLabel.Text = label ?? "安装新版并重启";
+        AutomationProperties.SetName(updateButton, updateLabel.Text);
+        ToolTipService.SetToolTip(updateButton, updateLabel.Text);
     }
 
     public void ShowAtCursor()

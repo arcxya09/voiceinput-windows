@@ -6,18 +6,19 @@ using System.Text.RegularExpressions;
 
 namespace RealtimeTranscription.Infrastructure;
 
-public sealed record GitHubRelease(Version Version, string Tag, string InstallerName, Uri InstallerUrl, long Size, Uri ChecksumsUrl, string? Digest)
+public sealed record GitHubRelease(Version Version, string Tag, string PackageName, Uri PackageUrl, long Size, Uri ChecksumsUrl, string? Digest, bool Portable = false)
 {
     public string PageUrl => $"https://github.com/{GitHubUpdates.Repository}/releases/tag/{Tag}";
 }
 public sealed record DownloadedUpdate(GitHubRelease Release, string Path, string Sha256);
 
-/// <summary>Only stable releases and exact assets from this application's repository are accepted.</summary>
+/// <summary>Only stable releases and exact assets from this application's repository are accepted.
+/// The installed build updates from the setup executable; a portable copy updates from the portable ZIP.</summary>
 public sealed class GitHubUpdates : IDisposable
 {
     public const string Repository = "arcxya09/voiceinput-windows";
     public const string LatestUrl = "https://api.github.com/repos/" + Repository + "/releases/latest";
-    public const long MaximumInstallerBytes = 1024L * 1024 * 1024;
+    public const long MaximumPackageBytes = 1024L * 1024 * 1024;
     private readonly HttpClient client;
     public GitHubUpdates(HttpMessageHandler? handler = null)
     {
@@ -25,7 +26,7 @@ public sealed class GitHubUpdates : IDisposable
         client.DefaultRequestHeaders.UserAgent.ParseAdd("VoiceInput-Updater/2.2.0");
     }
     public static Version? ParseTag(string? tag) => tag != null && Regex.IsMatch(tag, @"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\z") && Version.TryParse(tag[1..], out var version) ? version : null;
-    public static GitHubRelease? ParseRelease(string json, Version current)
+    public static GitHubRelease? ParseRelease(string json, Version current, bool portable = false)
     {
         using var document = JsonDocument.Parse(json);
         var root = document.RootElement;
@@ -33,7 +34,7 @@ public sealed class GitHubUpdates : IDisposable
         string tag = root.GetProperty("tag_name").GetString() ?? "";
         var version = ParseTag(tag);
         if (version == null || version <= new Version(current.Major, current.Minor, Math.Max(0, current.Build))) return null;
-        string name = $"VoiceInput-Setup-{version.ToString(3)}.exe";
+        string name = portable ? $"VoiceInput-Portable-x64-{version.ToString(3)}.zip" : $"VoiceInput-Setup-{version.ToString(3)}.exe";
         JsonElement Asset(string filename)
         {
             var matches = root.GetProperty("assets").EnumerateArray().Where(x => x.GetProperty("name").GetString() == filename).ToArray();
@@ -46,12 +47,12 @@ public sealed class GitHubUpdates : IDisposable
             if (asset.GetProperty("browser_download_url").GetString() != expected) throw new InvalidDataException("更新资源地址校验失败。");
             return new Uri(expected);
         }
-        var installer = Asset(name); var sums = Asset("SHA256SUMS.txt");
-        long size = installer.GetProperty("size").GetInt64();
-        if (size <= 0 || size > MaximumInstallerBytes) throw new InvalidDataException("更新安装包大小异常。");
-        string? digest = installer.TryGetProperty("digest", out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+        var package = Asset(name); var sums = Asset("SHA256SUMS.txt");
+        long size = package.GetProperty("size").GetInt64();
+        if (size <= 0 || size > MaximumPackageBytes) throw new InvalidDataException("更新安装包大小异常。");
+        string? digest = package.TryGetProperty("digest", out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
         if (digest != null && !Regex.IsMatch(digest, "^sha256:[0-9a-fA-F]{64}$")) throw new InvalidDataException("安装包摘要格式异常。");
-        return new(version, tag, name, Url(installer, name), size, Url(sums, "SHA256SUMS.txt"), digest?[7..].ToUpperInvariant());
+        return new(version, tag, name, Url(package, name), size, Url(sums, "SHA256SUMS.txt"), digest?[7..].ToUpperInvariant(), portable);
     }
     private static bool AllowedRedirect(Uri url) => url.Scheme == "https" && url.IsDefaultPort && url.UserInfo.Length == 0 &&
         (url.Host == "github.com" || url.Host == "release-assets.githubusercontent.com" || url.Host == "objects.githubusercontent.com");
@@ -92,10 +93,10 @@ public sealed class GitHubUpdates : IDisposable
         }
         return Encoding.UTF8.GetString(output.ToArray());
     }
-    public async Task<GitHubRelease?> CheckAsync(Version current, CancellationToken token)
+    public async Task<GitHubRelease?> CheckAsync(Version current, CancellationToken token, bool portable = false)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token); timeout.CancelAfter(TimeSpan.FromSeconds(30));
-        try { return ParseRelease(await TextAsync(new(LatestUrl), 2 * 1024 * 1024, timeout.Token), current); }
+        try { return ParseRelease(await TextAsync(new(LatestUrl), 2 * 1024 * 1024, timeout.Token), current, portable); }
         catch (HttpRequestException e) when (e.StatusCode == HttpStatusCode.NotFound) { return null; }
     }
     public static string ReadChecksum(string content, string name)
@@ -108,10 +109,10 @@ public sealed class GitHubUpdates : IDisposable
     public async Task<DownloadedUpdate> DownloadAsync(GitHubRelease release, string directory, IProgress<double>? progress, CancellationToken token)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token); timeout.CancelAfter(TimeSpan.FromMinutes(15)); token = timeout.Token;
-        string hash = ReadChecksum(await TextAsync(release.ChecksumsUrl, 64 * 1024, token), release.InstallerName);
+        string hash = ReadChecksum(await TextAsync(release.ChecksumsUrl, 64 * 1024, token), release.PackageName);
         if (release.Digest != null && hash != release.Digest) throw new InvalidDataException("GitHub 摘要与校验清单不一致，已停止更新。");
         Directory.CreateDirectory(directory);
-        string path = System.IO.Path.Combine(directory, release.InstallerName), partial = path + "." + Guid.NewGuid().ToString("N") + ".part";
+        string path = System.IO.Path.Combine(directory, release.PackageName), partial = path + "." + Guid.NewGuid().ToString("N") + ".part";
         if (File.Exists(path))
         {
             try
@@ -124,7 +125,7 @@ public sealed class GitHubUpdates : IDisposable
         }
         try
         {
-            using var response = await GetAsync(release.InstallerUrl, token);
+            using var response = await GetAsync(release.PackageUrl, token);
             if (response.Content.Headers.ContentLength is long size && size != release.Size) throw new InvalidDataException("安装包长度与发布信息不一致。");
             await using (var input = await response.Content.ReadAsStreamAsync(token))
             await using (var output = new FileStream(partial, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, true))
