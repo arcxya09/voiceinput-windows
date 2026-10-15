@@ -94,7 +94,6 @@ public static class UiaWorker
         if (Win32.Composing(native.Focus)) return new("Composing", "请先确认或取消输入法候选词，再按住说话。");
         var element = AutomationElement.FocusedElement;
         if (element == null) return new("Unavailable");
-        if (element.Current.IsPassword) return new("Password", "密码输入框不支持自动语音输入，未上传语音。");
         if (!element.Current.IsEnabled) return new("Disabled", "当前输入框不可用，完成后将复制识别文字。");
         if (!BelongsToTarget(element, native)) return new("Unavailable");
         bool? editable = Editability(element, out var pattern);
@@ -110,14 +109,13 @@ public static class UiaWorker
         return new("Ready", CaptureId: captured.Id);
     }
     // Delivery-time check of the element focused now, which may differ from the
-    // one captured at key-down. Password is checked before ownership so a
-    // recognized password field is refused even when its HWND is not the target.
+    // one captured at key-down. Password fields are ordinary text input: anything
+    // the keyboard can type into is a valid target.
     private static UiaResponse Inspect(NativeTarget native)
     {
         if (Win32.ObserveWindow(native) != FocusObservation.Stable) return new("Unavailable");
         var element = AutomationElement.FocusedElement;
         if (element == null) return new("Unavailable");
-        if (element.Current.IsPassword) return new("Password");
         if (!BelongsToTarget(element, native)) return new("Unavailable");
         if (!element.Current.IsEnabled) return new("Disabled");
         return Editability(element, out _) == false ? new("ReadOnly") : new("Ready");
@@ -148,8 +146,22 @@ public static class UiaWorker
         }
         catch { textPattern = null; }
         if (valueWritable == true || textWritable == true) return true;
-        if (valueWritable == false || textWritable == false) return false;
+        if ((valueWritable == false || textWritable == false) && TrustsReadOnly(element)) return false;
         return null;
+    }
+    // A read-only verdict is reliable only for a real text box in a native UI
+    // framework. Browser engines (Chromium/Electron apps such as Obsidian, VS Code,
+    // Notion; Firefox) report the focused document or a contenteditable editor's
+    // container as read-only while the caret is in an editable region, so that
+    // verdict is treated as unknown and native input decides.
+    private static bool TrustsReadOnly(AutomationElement element)
+    {
+        try
+        {
+            if (element.Current.ControlType != ControlType.Edit) return false;
+            return element.Current.FrameworkId is not ("Chrome" or "Gecko");
+        }
+        catch { return false; }
     }
     private static bool BelongsToTarget(AutomationElement element, NativeTarget native)
     {
@@ -168,7 +180,7 @@ public static class UiaWorker
         if (observation == FocusObservation.Changed || Win32.Composing(target.Native.Focus)) return new("Changed");
         var current = AutomationElement.FocusedElement;
         if (current == null) return new("Unavailable");
-        if (current.Current.IsPassword || !current.Current.IsEnabled || !current.GetRuntimeId().SequenceEqual(target.RuntimeId)) return new("Changed");
+        if (!current.Current.IsEnabled || !current.GetRuntimeId().SequenceEqual(target.RuntimeId)) return new("Changed");
         bool? editable = Editability(current, out var pattern);
         if (editable == false) return new("ReadOnly");
         if (pattern != null)

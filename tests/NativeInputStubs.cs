@@ -48,8 +48,7 @@ public static class TextDelivery
         token.ThrowIfCancellationRequested();
         // Unknown accessibility providers use the stable native focus as a fallback.
         bool native=CaptureCode is "Unavailable" or "NotEditable";
-        return Task.FromResult(new TargetCapture((CaptureCode=="Ready"||native)&&valid()?new(target,native?"":"test",native?"":"test",!native):null,CaptureCode,
-            CaptureCode=="Password"?"密码输入框不支持自动语音输入，未上传语音。":"提供程序不可用"));
+        return Task.FromResult(new TargetCapture((CaptureCode=="Ready"||native)&&valid()?new(target,native?"":"test",native?"":"test",!native):null,CaptureCode,"提供程序不可用"));
     }
     public static async Task<DeliveryResult> CopyAsync(string text,Func<bool> valid,CancellationToken token)
     {

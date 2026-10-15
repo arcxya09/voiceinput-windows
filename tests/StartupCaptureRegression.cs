@@ -351,8 +351,8 @@ static partial class StartupCaptureRegression
 
     public static async Task RunInputCompatibility(Func<string,Func<Task>,Task> test)
     {
-        foreach(string scenario in new[]{"consumed-ctrl","no-focus","missing-focus","unavailable-provider","not-editable","read-only","disabled","focus-blip","focus-lost","window-changed","escape","password",
-            "dictation-only","clipboard-busy","paste-blocked","clipboard-changed","empty","incomplete","no-focus-polish","escape-polish","escape-copy","escape-paste","short-press","audio-gap","audio-fault","startup-audio-fault","activity-key","activity-mouse","activity-wheel","activity-startup","activity-queued","activity-password","activity-polish","activity-copy","activity-paste","direct-typed","direct-partial","direct-disabled"})
+        foreach(string scenario in new[]{"consumed-ctrl","no-focus","missing-focus","unavailable-provider","not-editable","read-only","disabled","focus-blip","focus-lost","window-changed","escape",
+            "dictation-only","clipboard-busy","paste-blocked","clipboard-changed","empty","incomplete","no-focus-polish","escape-polish","escape-copy","escape-paste","short-press","audio-gap","audio-fault","startup-audio-fault","activity-key","activity-mouse","activity-wheel","activity-startup","activity-queued","activity-polish","activity-copy","activity-paste","direct-typed","direct-partial","direct-disabled"})
         await test("2.1.8 生产按住说话："+scenario,async()=>
         {
             TextDelivery.Reset();
@@ -362,7 +362,6 @@ static partial class StartupCaptureRegression
             if(scenario=="missing-focus")Win32.Target=Win32.Target! with{Focus=IntPtr.Zero};
             if(scenario=="unavailable-provider")TextDelivery.CaptureCode="Unavailable";
             if(scenario=="not-editable")TextDelivery.CaptureCode="NotEditable";
-            if(scenario is "password" or "activity-password")TextDelivery.CaptureCode="Password";
             if(scenario=="read-only")TextDelivery.CaptureCode="ReadOnly";
             if(scenario=="disabled")TextDelivery.CaptureCode="Disabled";
             if(scenario is "direct-typed" or "direct-disabled")TextDelivery.DirectMode="Sent";
@@ -395,10 +394,10 @@ static partial class StartupCaptureRegression
             await ptt.InitializeAsync();
             var downEntered=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var downRelease=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            if(scenario is "activity-queued" or "activity-password")ptt.CanStart=()=>
+            if(scenario=="activity-queued")ptt.CanStart=()=>
             {downEntered.TrySetResult();downRelease.Task.WaitAsync(Budget).GetAwaiter().GetResult();return true;};
             long downAt=Environment.TickCount64;PhysicalHook.Latest!.Emit("down",downAt);
-            if(scenario is "activity-queued" or "activity-password")
+            if(scenario=="activity-queued")
             {
                 await downEntered.Task.WaitAsync(Budget);
                 PhysicalHook.Latest.Emit("activity");downRelease.TrySetResult();
@@ -422,13 +421,6 @@ static partial class StartupCaptureRegression
                 var failed=await completed.Task.WaitAsync(Budget);
                 Check(failed.DeliveryState=="Failed"&&failed.Status.Contains("麦克风采集已中断"),"启动取消覆盖了设备故障原因。");
                 Check(TextDelivery.CopyAttempts==0&&TextDelivery.Sends==0&&turn.Socket.Pcm.IsEmpty,"启动故障仍复制或上传。");
-                return;
-            }
-            if(scenario is "password" or "activity-password")
-            {
-                var denied=await completed.Task.WaitAsync(Budget);
-                Check(denied.DeliveryState=="StartFailed"&&denied.Status.Contains("密码"),"密码拒绝原因被取消/无文字掩盖。");
-                Check(turn.Socket.Actions.IsEmpty&&turn.Socket.Pcm.IsEmpty&&TextDelivery.CopyAttempts==0&&TextDelivery.Sends==0,"密码目标仍上传、复制或投递。");
                 return;
             }
             var capture=await turn.StartedCapture();await capture.EmitFrame(.04f);
