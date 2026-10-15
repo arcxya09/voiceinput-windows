@@ -224,7 +224,20 @@ public static class DesktopSmoke
                     "A native vocabulary tab did not render: " + i);
             }
             vocabulary.SelectedIndex = 0;
-            checks.Add("All five WinUI navigation pages and every native vocabulary tab render actual content");
+            window.ShowPage(3);
+            var settingsTabs = Find<TabView>(window, "SettingsTabs");
+            Require(settingsTabs.TabItems.Count == 4, "The settings page is missing a tab.");
+            for (int i = 0; i < settingsTabs.TabItems.Count; i++)
+            {
+                settingsTabs.SelectedIndex = i;
+                await LayoutAsync(window);
+                Require(settingsTabs.SelectedItem is TabViewItem tab && tab.Content is FrameworkElement content && content.ActualWidth > 0 && content.ActualHeight > 0,
+                    "A native settings tab did not render: " + i);
+                pageImages.Add(await CaptureAsync((FrameworkElement)window.Content));
+            }
+            await SaveContactSheetAsync(Path.ChangeExtension(report, ".png"), pageImages, columns: 2);
+            settingsTabs.SelectedIndex = 0;
+            checks.Add("All five WinUI navigation pages, every native vocabulary tab and every settings tab render actual content");
 
             // Exercise the actual WinUI layout at a narrow supported width.
             // This is a resized-window check at the runner's current DPI, not
@@ -253,10 +266,20 @@ public static class DesktopSmoke
                     if (i > 0) responsiveImages.Add(await CaptureAsync((FrameworkElement)window.Content));
                 }
                 vocabulary.SelectedIndex = 0;
+                window.ShowPage(3);
+                for (int i = 0; i < settingsTabs.TabItems.Count; i++)
+                {
+                    settingsTabs.SelectedIndex = i;
+                    await LayoutAsync(window);
+                    var tab = (TabViewItem)settingsTabs.SelectedItem;
+                    CheckHorizontalLayout((FrameworkElement)tab.Content, (FrameworkElement)window.Content, $"Settings tab {i} at {size.Width}×{size.Height}");
+                    if (i > 0) responsiveImages.Add(await CaptureAsync((FrameworkElement)window.Content));
+                }
+                settingsTabs.SelectedIndex = 0;
             }
             await SaveContactSheetAsync(EvidencePath(report, "responsive"), responsiveImages, 2);
             vocabulary.SelectedIndex = 0;
-            checks.Add("All five native pages and three vocabulary tabs remain inside the horizontal viewport at 700 by 620 and the supported minimum 600 by 420 DIPs");
+            checks.Add("All five native pages, three vocabulary tabs and four settings tabs remain inside the horizontal viewport at 700 by 620 and the supported minimum 600 by 420 DIPs");
 
             // Exercise a tray-origin dialog while its owner is hidden, including
             // the production owner restore, XamlRoot and modal queue. Change only

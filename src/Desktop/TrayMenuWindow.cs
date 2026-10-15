@@ -13,7 +13,7 @@ using Windows.UI.ViewManagement;
 
 namespace RealtimeTranscription.Desktop;
 
-public enum TrayMenuCommand { OpenManager, ToggleEnabled, ToggleDictation, Copy, Settings, InstallUpdate, Exit }
+public enum TrayMenuCommand { OpenManager, ToggleEnabled, ToggleDictation, Copy, Settings, CheckUpdate, InstallUpdate, Exit }
 
 /// <summary>WinUI menu surface; the notification icon itself remains a Windows Shell adapter.</summary>
 public sealed class TrayMenuWindow : Window, IDisposable
@@ -68,6 +68,7 @@ public sealed class TrayMenuWindow : Window, IDisposable
         buttons.Add(dictationButton); stack.Children.Add(dictationButton);
         AddButton(stack, "TrayCopy", "复制最近结果", "\uE8C8", TrayMenuCommand.Copy);
         AddButton(stack, "TraySettings", "设置", "\uE713", TrayMenuCommand.Settings);
+        AddButton(stack, "TrayCheckUpdate", "检查更新", "\uE72C", TrayMenuCommand.CheckUpdate);
         // Shown only once a verified update is ready; collapsed buttons stay disabled so keyboard navigation skips them.
         updateButton = AddButton(stack, "TrayInstallUpdate", "安装新版并重启", "\uE896", TrayMenuCommand.InstallUpdate);
         updateLabel = (TextBlock)((Grid)updateButton.Content).Children[1];
