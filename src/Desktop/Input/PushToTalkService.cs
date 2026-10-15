@@ -200,7 +200,6 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
         t.Native=native;
         var result=await TextDelivery.CaptureAsync(native,()=>CanContinue(t),t.Cancel.Token);
         if(result.Target!=null){t.TargetCaptured=true;return result;}
-        if(result.Code=="Password")return result;
         t.Cancel.Token.ThrowIfCancellationRequested();
         return Manual("当前输入位置不适合自动粘贴，已继续听写；完成后自动复制。","TargetNotEditable");
     }
@@ -213,7 +212,7 @@ public sealed class PushToTalkService : IAsyncDisposable, IVoicePreviewEvents
             var readyTask=targetTask.ContinueWith(x=>x.Status==TaskStatus.RanToCompletion&&(t.DictationOnly||x.Result.Target!=null||x.Result.Code=="DictationFallback")&&CanContinue(t),TaskScheduler.Default);
             bool started=await controller.StartAsync(t.PressedAt,t.Cancel.Token,readyTask,t.Id);
             var capture=await targetTask;var target=capture.Target;capturedTarget=target;
-            if(capture.Code=="Password"||(target==null&&!t.DictationOnly&&!t.ManualDelivery)){LogTurn("StartRejected",t,fields:[("Reason","TargetUnavailable")]);if(!t.Invalid)t.EndState="StartFailed";t.Invalid=true;if(t.Reason.Length==0)t.Reason=capture.Message;t.CancelInput();t.Released.TrySetResult();}
+            if(target==null&&!t.DictationOnly&&!t.ManualDelivery){LogTurn("StartRejected",t,fields:[("Reason","TargetUnavailable")]);if(!t.Invalid)t.EndState="StartFailed";t.Invalid=true;if(t.Reason.Length==0)t.Reason=capture.Message;t.CancelInput();t.Released.TrySetResult();}
             if(!started){LogTurn("StartRejected",t,fields:[("Reason","ControllerStartFailed")]);if(!t.Invalid)t.EndState="StartFailed";t.Invalid=true;if(t.Reason.Length==0)t.Reason=(await controller.SnapshotAsync()).Status;t.Released.TrySetResult();}
             if(started&&t.ManualDelivery)await ManualHint(t);
             await t.Released.Task.WaitAsync(TimeSpan.FromSeconds(controller.Settings.MaxHoldSeconds+2));

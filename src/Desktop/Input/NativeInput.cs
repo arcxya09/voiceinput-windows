@@ -109,7 +109,7 @@ internal static class Win32
     {
         if(!IsStandardEdit(ClassName(hwnd)))return null;
         long style=GetWindowLongPtr(hwnd,-16).ToInt64();
-        return (style&0x20)!=0?"Password":(style&0x800)!=0?"ReadOnly":null;
+        return (style&0x800)!=0?"ReadOnly":null;
     }
     // Chinese, Japanese and Korean layouts route keystrokes through an IME.
     public static bool ImeLayout(uint thread)=>(GetKeyboardLayout(thread).ToInt64()&0x3ff) is 0x04 or 0x11 or 0x12;
@@ -224,15 +224,14 @@ public static class TextDelivery
             return Win32.Observe(native)==FocusObservation.Stable?(FocusObservation.Stable,(NativeTarget?)native):(FocusObservation.Unavailable,(NativeTarget?)null);
         },valid,token,1000);
         if(recovered==null)return new(null,"TargetChanged","暂时无法确认原输入位置。");
-        // UIA adds password/editability and selection information when available.
+        // UIA adds editability and selection information when available.
         // One bounded attempt keeps a slow or unsupported provider off the normal
         // recognition path; stable native focus can still accept ordinary Ctrl+V.
         var result=await Query(new("Capture",native.Window.ToInt64(),native.Focus.ToInt64(),native.Thread,native.Process),token,timeoutMs:400);
         token.ThrowIfCancellationRequested();
         // Preserve a positive refusal even if the application moves focus while
-        // the response is returning. In particular, never turn a known password
-        // field into the unknown-target dictation fallback.
-        if(result is {} denied&&denied.Reply.Code is "Password" or "Disabled" or "ReadOnly")
+        // the response is returning.
+        if(result is {} denied&&denied.Reply.Code is "Disabled" or "ReadOnly")
             return new(null,denied.Reply.Code,denied.Reply.Message);
         if(!valid()||Win32.Observe(native)!=FocusObservation.Stable)
             return new(null,"TargetChanged","输入位置已变化，完成后将复制识别文字。");
@@ -285,7 +284,8 @@ public static class TextDelivery
         }
     }
     // Stateless check of whatever is focused now. An unknown provider does not
-    // block input; a recognized password, disabled or read-only control does.
+    // block input; a recognized disabled or read-only control does. Password
+    // fields accept input like any other text box.
     private static async Task<string> InspectAsync(NativeTarget current,CancellationToken token)
     {
         var result=await Query(new("Inspect",current.Window.ToInt64(),current.Focus.ToInt64(),current.Thread,current.Process),token,timeoutMs:600);
@@ -313,7 +313,7 @@ public static class TextDelivery
         var current=await CurrentTargetAsync(target.Native,valid,token);
         if(current==null)return NotTyped("TargetChanged");
         string inspection=Win32.EditRefusal(current.Focus)??await InspectAsync(current,token);
-        if(inspection is "Password" or "Disabled" or "ReadOnly")return NotTyped("Target"+inspection);
+        if(inspection is "Disabled" or "ReadOnly")return NotTyped("Target"+inspection);
         if(!valid()||token.IsCancellationRequested)return NotTyped("Interrupted");
         if(Win32.IsStandardEdit(Win32.ClassName(current.Focus)))
         {
@@ -424,7 +424,7 @@ public static class TextDelivery
         var current=await CurrentTargetAsync(target.Native,valid,token);
         if(current==null)return new("Blocked","输入窗口已切换，文字已保留，可手动粘贴。") {Diagnostic="TargetChanged"};
         string inspection=Win32.EditRefusal(current.Focus)??await InspectAsync(current,token);
-        if(inspection is "Password" or "Disabled" or "ReadOnly")
+        if(inspection is "Disabled" or "ReadOnly")
             return new("Blocked","当前输入位置不适合自动粘贴，文字已保留，可手动粘贴。") {Diagnostic="Target"+inspection};
         if(Win32.Composing(current.Focus))return new("Blocked","输入法仍有未确认的候选词，文字已保留，可手动复制。");
         string diagnostic="PasteNotPrepared";
