@@ -89,6 +89,13 @@ public partial class MainWindow
         finally { selectingPage = false; }
     }
 
+    /// <summary>Opens the settings page on one of its tabs.</summary>
+    public void ShowSettings(TabViewItem tab)
+    {
+        ShowPage(3);
+        SettingsTabs.SelectedItem = tab;
+    }
+
     private void Navigation_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
     {
         if (MainRoot == null || LivePage == null || HelpPage == null) return;

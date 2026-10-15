@@ -34,7 +34,7 @@
                     <Image Source="ms-appx:///Assets/Logo.png" Width="30" Height="30"/>
                     <StackPanel VerticalAlignment="Center">
                         <TextBlock Text="VoiceInput" FontSize="18" FontWeight="SemiBold"/>
-                        <TextBlock Text="语音输入 · 2.1" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                        <TextBlock x:Name="PaneVersionText" Text="语音输入" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
                     </StackPanel>
                 </StackPanel>
             </NavigationView.PaneHeader>
@@ -461,180 +461,240 @@
                         <RowDefinition Height="*"/>
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
-                    <ScrollViewer MaxWidth="850" HorizontalAlignment="Stretch" VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
-                        <StackPanel Margin="8,0,8,12" Spacing="16" HorizontalAlignment="Stretch">
-                            <Border Style="{StaticResource Card}">
-                                <StackPanel Spacing="12">
-                                    <TextBlock Text="语音识别" Style="{StaticResource SectionTitle}"/>
-                                    <TextBlock Text="阿里云百炼 · qwen-audio-3.0-asr-flash-streaming" Style="{StaticResource SecondaryText}"/>
-                                    <PasswordBox x:Name="BailianKeyBox" Header="API Key" PasswordRevealMode="Peek"/>
-                                    <Grid ColumnSpacing="12">
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="140"/>
-                                            <ColumnDefinition Width="*"/>
-                                        </Grid.ColumnDefinitions>
-                                        <ComboBox x:Name="RegionBox" Header="服务地域" SelectedIndex="0" HorizontalAlignment="Stretch">
-                                            <ComboBoxItem Content="北京"/>
-                                            <ComboBoxItem Content="新加坡"/>
-                                        </ComboBox>
-                                        <TextBox x:Name="WorkspaceBox" Grid.Column="1" Header="Workspace ID" PlaceholderText="业务空间 ID"/>
-                                    </Grid>
-                                    <CheckBox x:Name="LegacyBox"><TextBlock Text="使用兼容地址（无需 Workspace ID）" TextWrapping="Wrap"/></CheckBox>
-                                    <CheckBox x:Name="HighAccuracyBox" Content="高精度模式：松开后复核整段语音（默认关闭）"/>
-                                    <TextBlock Text="按需开启后，使用百炼再次识别完整录音，会增加一次识别费用和等待时间。单次最多复核 3 分钟，最长等待 12 秒；失败或超时使用实时结果。回车跳过等待，Esc 取消输入。音频仅暂存内存。" Style="{StaticResource SecondaryText}"/>
-                                    <CheckBox x:Name="AdaptiveAsrBox" Content="根据音量和背景噪声自动调整识别灵敏度"/>
-                                    <CheckBox x:Name="SmartPunctuationBox" Content="智能标点：短输入省略句末句号"/>
-                                    <TextBlock Text="适用于单词、短语和简短单句；保留问号、感叹号、多句及专业符号。关闭润色或润色超时也会生效。" Style="{StaticResource SecondaryText}"/>
-                                    <Button x:Name="TestBailianButton" Content="保存设置并测试百炼" Click="TestBailian_Click"/>
+                    <!-- Grouped by what the user is adjusting; one save bar below covers every tab. -->
+                    <TabView x:Name="SettingsTabs" IsAddTabButtonVisible="False" CanDragTabs="False" CanReorderTabs="False" TabWidthMode="SizeToContent">
+                        <TabViewItem x:Name="InputSettingsTab" Header="输入与麦克风" IsClosable="False">
+                            <ScrollViewer Margin="0,16,0,0" MaxWidth="850" HorizontalAlignment="Stretch" VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
+                                <StackPanel Margin="8,0,8,12" Spacing="16" HorizontalAlignment="Stretch">
+                                    <Border Style="{StaticResource Card}">
+                                        <StackPanel Spacing="12">
+                                            <TextBlock Text="按键与录音" Style="{StaticResource SectionTitle}"/>
+                                            <Grid ColumnSpacing="16" RowSpacing="12">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                </Grid.ColumnDefinitions>
+                                                <Grid.RowDefinitions>
+                                                    <RowDefinition Height="Auto"/>
+                                                    <RowDefinition Height="Auto"/>
+                                                </Grid.RowDefinitions>
+                                                <ComboBox x:Name="HotkeyBox" Header="按住说话键" SelectedIndex="0" HorizontalAlignment="Stretch">
+                                                    <ComboBoxItem Content="RightCtrl"/>
+                                                    <ComboBoxItem Content="F8"/>
+                                                    <ComboBoxItem Content="F9"/>
+                                                </ComboBox>
+                                                <TextBox x:Name="HoldBox" Grid.Column="1" Header="长按确认（ms）"/>
+                                                <TextBox x:Name="SilenceBox" Grid.Row="1" Header="断句停顿（ms）"/>
+                                                <TextBox x:Name="MaxHoldBox" Grid.Row="1" Grid.Column="1" Header="最长按住（秒）"/>
+                                            </Grid>
+                                            <TextBlock Text="连续录音默认 600 秒，可设 30—1800 秒。断句停顿默认 2500 ms，可设 200—6000 ms；停顿只影响识别确认。" Style="{StaticResource SecondaryText}"/>
+                                            <CheckBox x:Name="ParagraphBox" Content="长停顿 2 秒时另起自然段"/>
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Style="{StaticResource Card}">
+                                        <StackPanel Spacing="12">
+                                            <TextBlock Text="上屏方式" Style="{StaticResource SectionTitle}"/>
+                                            <CheckBox x:Name="DirectInputBox" Content="直接输入到光标处，不占用剪贴板"/>
+                                            <TextBlock Text="标准文本框直接替换选区，其他软件按字符输入，期间临时关闭目标输入法以免候选词干扰。多行正文、特殊控件或直接输入不可用时，自动改用整段粘贴。关闭后始终使用粘贴。" Style="{StaticResource SecondaryText}"/>
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Style="{StaticResource Card}">
+                                        <StackPanel Spacing="12">
+                                            <TextBlock Text="麦克风" Style="{StaticResource SectionTitle}"/>
+                                            <Grid ColumnSpacing="8">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+                                                <ComboBox x:Name="DeviceBox" Header="输入设备" DisplayMemberPath="Name" SelectedValuePath="Id" HorizontalAlignment="Stretch"/>
+                                                <Button Grid.Column="1" Content="刷新设备" Click="Devices_Click" VerticalAlignment="Bottom"/>
+                                            </Grid>
+                                            <local:ResponsivePanel Spacing="8">
+                                                <Button x:Name="TestMicrophoneButton" Content="本地麦克风测试（3 秒）" Click="TestMicrophone_Click"/>
+                                                <Button Content="查看录音诊断" Click="Diagnostics_Click"/>
+                                            </local:ResponsivePanel>
+                                            <TextBlock Text="已选设备断开或失效时，临时使用 Windows 默认通信麦克风。麦克风测试不上传音频。启动失败后请先查看录音诊断，再运行测试；诊断不包含 Key、录音或识别正文。" Style="{StaticResource SecondaryText}"/>
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Style="{StaticResource Card}">
+                                        <StackPanel Spacing="12">
+                                            <TextBlock Text="启动与托盘" Style="{StaticResource SectionTitle}"/>
+                                            <ToggleSwitch x:Name="StartupToggle" Header="开机自启动" OnContent="开启" OffContent="关闭" Toggled="StartupToggle_Toggled"/>
+                                            <TextBlock x:Name="StartupStatusText" Style="{StaticResource SecondaryText}"/>
+                                            <HyperlinkButton Content="打开 Windows 启动应用设置" Click="OpenWindowsStartupSettings_Click"/>
+                                            <CheckBox x:Name="TrayBox" Content="关闭管理窗口时收至托盘"/>
+                                        </StackPanel>
+                                    </Border>
                                 </StackPanel>
-                            </Border>
-                            <Border Style="{StaticResource Card}">
-                                <StackPanel Spacing="12">
-                                    <TextBlock Text="全文润色" Style="{StaticResource SectionTitle}"/>
-                                    <TextBlock Text="DeepSeek · 松开后统一整理全文，保护原意、数字与专业词条。" Style="{StaticResource SecondaryText}"/>
-                                    <PasswordBox x:Name="DeepSeekKeyBox" Header="API Key" PasswordRevealMode="Peek"/>
-                                    <CheckBox x:Name="PolishBox" Content="启用轻量润色"/>
-                                    <CheckBox x:Name="FastDeliveryBox" Content="优先快速上屏"/>
-                                    <TextBlock Text="语音复核完成后，自动复制或上屏最多等待润色 0.8 秒，超时使用完整识别正文及已确认纠错；关闭后等待完整润色。松手后回车加速、Esc 取消。" Style="{StaticResource SecondaryText}"/>
-                                    <CheckBox x:Name="PreviousBox" Visibility="Collapsed" Content="旧版分片上下文设置"/>
-                                    <Button x:Name="TestDeepSeekButton" Content="保存设置并测试 DeepSeek" Click="TestDeepSeek_Click"/>
-                                    <TextBlock Text="连接测试会发起少量 API 调用。deepseek-flash 使用非思考模式，仅返回整理后的正文。" Style="{StaticResource SecondaryText}"/>
-                                    <Expander Header="编辑与试用润色提示词" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
-                                        <ContentControl x:Name="PromptEditorPanel" HorizontalContentAlignment="Stretch">
-                                            <StackPanel Spacing="12">
-                                                <TextBlock Text="在默认提示词上修改，保存后用于之后的润色。超出轻量整理范围时，程序会保留原文。" Style="{StaticResource SecondaryText}"/>
-                                                <TextBox x:Name="PolishPromptBox" Header="润色提示词" Height="240" TextWrapping="Wrap" AcceptsReturn="True" ScrollViewer.VerticalScrollBarVisibility="Auto" MaxLength="8000" ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
-                                                <local:ResponsivePanel Spacing="8">
-                                                    <Button Content="保存提示词" Click="PromptSave_Click"/>
-                                                    <Button Content="恢复默认" Click="PromptReset_Click"/>
-                                                </local:ResponsivePanel>
-                                                <TextBox x:Name="PolishSampleBox" Header="试用文本" Height="88" Text="嗯，这个方案我们先试一下。" TextWrapping="Wrap" AcceptsReturn="True" ScrollViewer.VerticalScrollBarVisibility="Auto" MaxLength="600" ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
-                                                <Button x:Name="PromptTestButton" Content="试用当前提示词" Click="PromptTest_Click"/>
-                                                <TextBox x:Name="PromptResultBox" Header="试用结果" MinHeight="56" MaxHeight="180" IsReadOnly="True" TextWrapping="Wrap" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
-                                                <TextBlock x:Name="PromptTestStatus" Text="试用会调用上方 DeepSeek Key，产生少量用量；无需先保存提示词。" Style="{StaticResource SecondaryText}"/>
-                                            </StackPanel>
-                                        </ContentControl>
+                            </ScrollViewer>
+                        </TabViewItem>
+                        <TabViewItem x:Name="ServiceSettingsTab" Header="识别与润色" IsClosable="False">
+                            <ScrollViewer Margin="0,16,0,0" MaxWidth="850" HorizontalAlignment="Stretch" VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
+                                <StackPanel Margin="8,0,8,12" Spacing="16" HorizontalAlignment="Stretch">
+                                    <Border Style="{StaticResource Card}">
+                                        <StackPanel Spacing="12">
+                                            <TextBlock Text="语音识别" Style="{StaticResource SectionTitle}"/>
+                                            <TextBlock Text="阿里云百炼 · qwen-audio-3.0-asr-flash-streaming" Style="{StaticResource SecondaryText}"/>
+                                            <PasswordBox x:Name="BailianKeyBox" Header="API Key" PasswordRevealMode="Peek"/>
+                                            <Grid ColumnSpacing="12">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="140"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                </Grid.ColumnDefinitions>
+                                                <ComboBox x:Name="RegionBox" Header="服务地域" SelectedIndex="0" HorizontalAlignment="Stretch">
+                                                    <ComboBoxItem Content="北京"/>
+                                                    <ComboBoxItem Content="新加坡"/>
+                                                </ComboBox>
+                                                <TextBox x:Name="WorkspaceBox" Grid.Column="1" Header="Workspace ID" PlaceholderText="业务空间 ID"/>
+                                            </Grid>
+                                            <CheckBox x:Name="LegacyBox"><TextBlock Text="使用兼容地址（无需 Workspace ID）" TextWrapping="Wrap"/></CheckBox>
+                                            <Button x:Name="TestBailianButton" Content="保存设置并测试百炼" Click="TestBailian_Click"/>
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Style="{StaticResource Card}">
+                                        <StackPanel Spacing="12">
+                                            <TextBlock Text="识别效果" Style="{StaticResource SectionTitle}"/>
+                                            <CheckBox x:Name="AdaptiveAsrBox" Content="根据音量和背景噪声自动调整识别灵敏度"/>
+                                            <CheckBox x:Name="SmartPunctuationBox" Content="智能标点：短输入省略句末句号"/>
+                                            <TextBlock Text="适用于单词、短语和简短单句；保留问号、感叹号、多句及专业符号。关闭润色或润色超时也会生效。" Style="{StaticResource SecondaryText}"/>
+                                            <CheckBox x:Name="HighAccuracyBox" Content="高精度模式：松开后复核整段语音（默认关闭）"/>
+                                            <TextBlock Text="按需开启后，使用百炼再次识别完整录音，会增加一次识别费用和等待时间。单次最多复核 3 分钟，最长等待 12 秒；失败或超时使用实时结果。回车跳过等待，Esc 取消输入。音频仅暂存内存。" Style="{StaticResource SecondaryText}"/>
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Style="{StaticResource Card}">
+                                        <StackPanel Spacing="12">
+                                            <TextBlock Text="全文润色" Style="{StaticResource SectionTitle}"/>
+                                            <TextBlock Text="DeepSeek · 松开后统一整理全文，保护原意、数字与专业词条。" Style="{StaticResource SecondaryText}"/>
+                                            <PasswordBox x:Name="DeepSeekKeyBox" Header="API Key" PasswordRevealMode="Peek"/>
+                                            <CheckBox x:Name="PolishBox" Content="启用轻量润色"/>
+                                            <CheckBox x:Name="FastDeliveryBox" Content="优先快速上屏"/>
+                                            <TextBlock Text="语音复核完成后，自动复制或上屏最多等待润色 0.8 秒，超时使用完整识别正文及已确认纠错；关闭后等待完整润色。松手后回车加速、Esc 取消。" Style="{StaticResource SecondaryText}"/>
+                                            <CheckBox x:Name="PreviousBox" Visibility="Collapsed" Content="旧版分片上下文设置"/>
+                                            <Button x:Name="TestDeepSeekButton" Content="保存设置并测试 DeepSeek" Click="TestDeepSeek_Click"/>
+                                            <TextBlock Text="连接测试会发起少量 API 调用。deepseek-flash 使用非思考模式，仅返回整理后的正文。" Style="{StaticResource SecondaryText}"/>
+                                            <Expander Header="编辑与试用润色提示词" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                                                <ContentControl x:Name="PromptEditorPanel" HorizontalContentAlignment="Stretch">
+                                                    <StackPanel Spacing="12">
+                                                        <TextBlock Text="在默认提示词上修改，保存后用于之后的润色。超出轻量整理范围时，程序会保留原文。" Style="{StaticResource SecondaryText}"/>
+                                                        <TextBox x:Name="PolishPromptBox" Header="润色提示词" Height="240" TextWrapping="Wrap" AcceptsReturn="True" ScrollViewer.VerticalScrollBarVisibility="Auto" MaxLength="8000" ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
+                                                        <local:ResponsivePanel Spacing="8">
+                                                            <Button Content="保存提示词" Click="PromptSave_Click"/>
+                                                            <Button Content="恢复默认" Click="PromptReset_Click"/>
+                                                        </local:ResponsivePanel>
+                                                        <TextBox x:Name="PolishSampleBox" Header="试用文本" Height="88" Text="嗯，这个方案我们先试一下。" TextWrapping="Wrap" AcceptsReturn="True" ScrollViewer.VerticalScrollBarVisibility="Auto" MaxLength="600" ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
+                                                        <Button x:Name="PromptTestButton" Content="试用当前提示词" Click="PromptTest_Click"/>
+                                                        <TextBox x:Name="PromptResultBox" Header="试用结果" MinHeight="56" MaxHeight="180" IsReadOnly="True" TextWrapping="Wrap" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
+                                                        <TextBlock x:Name="PromptTestStatus" Text="试用会调用上方 DeepSeek Key，产生少量用量；无需先保存提示词。" Style="{StaticResource SecondaryText}"/>
+                                                    </StackPanel>
+                                                </ContentControl>
+                                            </Expander>
+                                        </StackPanel>
+                                    </Border>
+                                </StackPanel>
+                            </ScrollViewer>
+                        </TabViewItem>
+                        <TabViewItem x:Name="LexiconSettingsTab" Header="词库与记忆" IsClosable="False">
+                            <ScrollViewer Margin="0,16,0,0" MaxWidth="850" HorizontalAlignment="Stretch" VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
+                                <StackPanel Margin="8,0,8,12" Spacing="16" HorizontalAlignment="Stretch">
+                                    <Border Style="{StaticResource Card}">
+                                        <StackPanel Spacing="10">
+                                            <TextBlock Text="文本记忆" Style="{StaticResource SectionTitle}" Margin="0,0,0,2"/>
+                                            <CheckBox x:Name="MemoryBox" Content="保存本地文本记忆"/>
+                                            <TextBox x:Name="RetentionBox" Header="保留天数" PlaceholderText="留空为长期保留" MaxWidth="400" HorizontalAlignment="Left"/>
+                                            <TextBlock Text="历史记录和词条整理都依赖本地文本记忆。默认不保存录音。" Style="{StaticResource SecondaryText}"/>
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Style="{StaticResource Card}">
+                                        <StackPanel Spacing="10">
+                                            <TextBlock Text="词库" Style="{StaticResource SectionTitle}" Margin="0,0,0,2"/>
+                                            <CheckBox x:Name="UseTermsBox"><TextBlock Text="启用词库（识别热词、保护与确认纠错）" TextWrapping="Wrap"/></CheckBox>
+                                            <CheckBox x:Name="AsrContextBox" Content="向 ASR 提供已选领域词上下文"/>
+                                            <CheckBox x:Name="DynamicTermsBox"><TextBlock Text="根据使用与人工纠错调整热词优先级（需允许本地学习）" TextWrapping="Wrap"/></CheckBox>
+                                            <CheckBox x:Name="CorrectionLearningBox"><TextBlock Text="从手动修订中发现纠错候选（本地比较，确认后学习）" TextWrapping="Wrap"/></CheckBox>
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Style="{StaticResource Card}">
+                                        <StackPanel Spacing="10">
+                                            <TextBlock Text="AI 词条整理" Style="{StaticResource SectionTitle}" Margin="0,0,0,2"/>
+                                            <CheckBox x:Name="LearningBox" Content="允许词条整理（新会话默认）"/>
+                                            <CheckBox x:Name="AutoExtractBox" Content="停止后自动提取原文词条（待确认）"/>
+                                            <CheckBox x:Name="DomainLexiconBox"><TextBlock Text="智能领域词库：根据历史预测易错词，后台更新并低权重试用" TextWrapping="Wrap"/></CheckBox>
+                                            <TextBlock Text="开启后，将本项目近期及较早的部分历史文本发送给 DeepSeek，识别话题并生成少量相关易错词。模型预测不代表实测错误；不依赖其他软件中的修改记录。可在词库查看依据、禁用或删除，关闭此项即停止预测词注入。" Style="{StaticResource SecondaryText}"/>
+                                            <TextBox x:Name="BudgetBox" Header="每日词库 AI Token 预算（UTC）" MaxWidth="400" HorizontalAlignment="Left" Margin="0,4,0,4"/>
+                                            <TextBlock Text="已有会话可在“听写”页面单独设置整理许可。原文提取生成待确认候选；智能领域词库自动低权重试用。两者共用每日预算，按 UTC 日期重置。" Style="{StaticResource SecondaryText}"/>
+                                        </StackPanel>
+                                    </Border>
+                                    <Expander Header="从全部历史提取词条" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                                        <StackPanel Spacing="12">
+                                            <TextBlock Text="遍历所有项目中已保存、允许整理的历史输入，分批发送原文或手动修订文本给 DeepSeek。新词保存到来源项目并等待确认。已整理版本自动跳过，取消或预算耗尽后可继续。" Style="{StaticResource SecondaryText}"/>
+                                            <local:ResponsivePanel Spacing="8">
+                                                <Button x:Name="AllHistoryButton" Content="提取全部历史词条" Click="ExtractAllHistory_Click"/>
+                                                <Button x:Name="CancelHistoryButton" Content="取消历史提取" Click="CancelHistory_Click" IsEnabled="False"/>
+                                            </local:ResponsivePanel>
+                                            <ProgressBar x:Name="HistoryExtractionProgressBar" Maximum="1" AutomationProperties.Name="历史词条提取进度"/>
+                                            <TextBlock x:Name="HistoryExtractionStatus" Text="覆盖全部已保存记录，不受历史列表最多显示 500 条的限制。" Style="{StaticResource SecondaryText}"/>
+                                        </StackPanel>
                                     </Expander>
                                 </StackPanel>
-                            </Border>
-                            <Border Style="{StaticResource Card}">
-                                <StackPanel Spacing="12">
-                                    <TextBlock Text="麦克风与操作" Style="{StaticResource SectionTitle}"/>
-                                    <Grid ColumnSpacing="8">
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="*"/>
-                                            <ColumnDefinition Width="Auto"/>
-                                        </Grid.ColumnDefinitions>
-                                        <ComboBox x:Name="DeviceBox" Header="输入设备" DisplayMemberPath="Name" SelectedValuePath="Id" HorizontalAlignment="Stretch"/>
-                                        <Button Grid.Column="1" Content="刷新设备" Click="Devices_Click" VerticalAlignment="Bottom"/>
-                                    </Grid>
-                                    <local:ResponsivePanel Spacing="8">
-                                        <Button x:Name="TestMicrophoneButton" Content="本地麦克风测试（3 秒）" Click="TestMicrophone_Click"/>
-                                        <Button Content="查看录音诊断" Click="Diagnostics_Click"/>
-                                        <Button x:Name="ExportLogButton" Content="导出运行日志" Click="ExportLog_Click"/>
-                                    </local:ResponsivePanel>
-                                    <TextBlock Text="已选设备断开或失效时，临时使用 Windows 默认通信麦克风。麦克风测试不上传音频。启动失败后请先查看录音诊断，再运行测试；诊断不包含 Key、录音或识别正文。" Style="{StaticResource SecondaryText}"/>
-                                    <TextBlock x:Name="LogStatusText" Text="正在准备运行日志…" Style="{StaticResource SecondaryText}"/>
-                                    <TextBlock Text="日志自动记录启动、设备、识别和上屏过程，保留最近 7 天、最多 10 个文件。导出为一个 .log 文件，不包含 Key、录音或识别正文。" Style="{StaticResource SecondaryText}"/>
-                                    <Grid ColumnSpacing="16" RowSpacing="12">
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="*"/>
-                                            <ColumnDefinition Width="*"/>
-                                        </Grid.ColumnDefinitions>
-                                        <Grid.RowDefinitions>
-                                            <RowDefinition Height="Auto"/>
-                                            <RowDefinition Height="Auto"/>
-                                        </Grid.RowDefinitions>
-                                        <ComboBox x:Name="HotkeyBox" Header="按住说话键" SelectedIndex="0" HorizontalAlignment="Stretch">
-                                            <ComboBoxItem Content="RightCtrl"/>
-                                            <ComboBoxItem Content="F8"/>
-                                            <ComboBoxItem Content="F9"/>
-                                        </ComboBox>
-                                        <TextBox x:Name="SilenceBox" Grid.Column="1" Header="断句停顿（ms）"/>
-                                        <TextBox x:Name="HoldBox" Grid.Row="1" Header="长按确认（ms）"/>
-                                        <TextBox x:Name="MaxHoldBox" Grid.Row="1" Grid.Column="1" Header="最长按住（秒）"/>
-                                    </Grid>
-                                    <TextBlock Text="连续录音默认 600 秒，可设 30—1800 秒。断句停顿默认 2500 ms，可设 200—6000 ms；停顿只影响识别确认。" Style="{StaticResource SecondaryText}"/>
-                                    <CheckBox x:Name="ParagraphBox" Content="长停顿 2 秒时另起自然段"/>
-                                    <CheckBox x:Name="DirectInputBox" Content="直接输入到光标处，不占用剪贴板"/>
-                                    <TextBlock Text="标准文本框直接替换选区，其他软件按字符输入，期间临时关闭目标输入法以免候选词干扰。多行正文、特殊控件或直接输入不可用时，自动改用整段粘贴。关闭后始终使用粘贴。" Style="{StaticResource SecondaryText}"/>
-                                    <CheckBox x:Name="TrayBox" Content="关闭管理窗口时收至托盘"/>
-                                    <ToggleSwitch x:Name="StartupToggle" Header="开机自启动" OnContent="开启" OffContent="关闭" Toggled="StartupToggle_Toggled"/>
-                                    <TextBlock x:Name="StartupStatusText" Style="{StaticResource SecondaryText}"/>
-                                    <HyperlinkButton Content="打开 Windows 启动应用设置" Click="OpenWindowsStartupSettings_Click"/>
+                            </ScrollViewer>
+                        </TabViewItem>
+                        <TabViewItem x:Name="UpdateSettingsTab" Header="更新与维护" IsClosable="False">
+                            <ScrollViewer Margin="0,16,0,0" MaxWidth="850" HorizontalAlignment="Stretch" VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
+                                <StackPanel Margin="8,0,8,12" Spacing="16" HorizontalAlignment="Stretch">
+                                    <Border Style="{StaticResource Card}">
+                                        <StackPanel Spacing="10">
+                                            <TextBlock Text="软件更新" Style="{StaticResource SectionTitle}"/>
+                                            <TextBlock x:Name="UpdateVersionText" Style="{StaticResource SecondaryText}"/>
+                                            <TextBlock x:Name="UpdateStatusText" Text="尚未检查更新。" TextWrapping="Wrap"/>
+                                            <ProgressBar x:Name="UpdateProgress" Minimum="0" Maximum="100" Visibility="Collapsed"/>
+                                            <local:ResponsivePanel Spacing="8">
+                                                <Button x:Name="UpdateCheckButton" Content="立即检查更新" Style="{StaticResource AccentButtonStyle}" Click="UpdateCheck_Click"/>
+                                                <Button x:Name="UpdateInstallButton" Content="安装并重启" Click="UpdateInstall_Click" IsEnabled="False"/>
+                                                <Button x:Name="UpdateDownloadButton" Content="重新下载" Click="UpdateDownload_Click" IsEnabled="False"/>
+                                                <Button x:Name="UpdateCancelButton" Content="取消下载" Click="UpdateCancel_Click" IsEnabled="False"/>
+                                                <Button Content="版本说明" Click="UpdateRelease_Click"/>
+                                            </local:ResponsivePanel>
+                                            <TextBlock Text="手动检查发现新版后会直接下载并校验，完成后点击“安装并重启”。也可从托盘菜单“检查更新”。" Style="{StaticResource SecondaryText}"/>
+                                            <TextBlock x:Name="UpdateModeText" Style="{StaticResource SecondaryText}"/>
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Style="{StaticResource Card}">
+                                        <StackPanel Spacing="10">
+                                            <TextBlock Text="自动更新" Style="{StaticResource SectionTitle}"/>
+                                            <CheckBox x:Name="AutoCheckUpdateBox"><TextBlock Text="启动后自动检查新版（每 6 小时）" TextWrapping="Wrap"/></CheckBox>
+                                            <CheckBox x:Name="AutoDownloadUpdateBox"><TextBlock Text="发现新版后自动下载" TextWrapping="Wrap"/></CheckBox>
+                                            <CheckBox x:Name="AutoInstallUpdateBox"><TextBlock Text="电脑空闲或退出程序时自动安装已下载的新版" TextWrapping="Wrap"/></CheckBox>
+                                            <TextBlock Text="自动安装只在管理窗口关闭、3 分钟没有键盘鼠标操作时进行，不会打断听写；安装在后台完成并自动重新打开。新版下载好后，也可点击托盘提示或托盘菜单立即安装。" Style="{StaticResource SecondaryText}"/>
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Style="{StaticResource Card}">
+                                        <StackPanel Spacing="10">
+                                            <TextBlock Text="运行日志" Style="{StaticResource SectionTitle}"/>
+                                            <TextBlock x:Name="LogStatusText" Text="正在准备运行日志…" Style="{StaticResource SecondaryText}"/>
+                                            <TextBlock Text="日志自动记录启动、设备、识别和上屏过程，保留最近 7 天、最多 10 个文件。导出为一个 .log 文件，不包含 Key、录音或识别正文。" Style="{StaticResource SecondaryText}"/>
+                                            <Button x:Name="ExportLogButton" Content="导出运行日志" Click="ExportLog_Click"/>
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Style="{StaticResource Card}">
+                                        <StackPanel Spacing="10">
+                                            <TextBlock Text="数据恢复与项目管理" Style="{StaticResource SectionTitle}"/>
+                                            <TextBlock Text="保存失败时，可先复制或导出正文，再重试保存。删除项目将同时清除该项目的记忆与项目词条。" Style="{StaticResource SecondaryText}"/>
+                                            <local:ResponsivePanel Spacing="8">
+                                                <Button Content="重试保存未保存内容" Click="RetrySave_Click"/>
+                                                <Button Content="删除当前项目" Click="DeleteProject_Click"/>
+                                            </local:ResponsivePanel>
+                                        </StackPanel>
+                                    </Border>
                                 </StackPanel>
-                            </Border>
-                            <Border Style="{StaticResource Card}">
-                                <StackPanel Spacing="10">
-                                    <TextBlock Text="软件更新" Style="{StaticResource SectionTitle}"/>
-                                    <TextBlock x:Name="UpdateVersionText" Style="{StaticResource SecondaryText}"/>
-                                    <CheckBox x:Name="AutoCheckUpdateBox"><TextBlock Text="启动后自动检查新版（每 6 小时）" TextWrapping="Wrap"/></CheckBox>
-                                    <CheckBox x:Name="AutoDownloadUpdateBox"><TextBlock Text="发现新版后自动下载" TextWrapping="Wrap"/></CheckBox>
-                                    <CheckBox x:Name="AutoInstallUpdateBox"><TextBlock Text="电脑空闲或退出程序时自动安装已下载的新版" TextWrapping="Wrap"/></CheckBox>
-                                    <TextBlock Text="以上选项点击页面底部“保存设置”生效。自动安装只在管理窗口关闭、3 分钟没有键盘鼠标操作时进行，不会打断听写；安装在后台完成并自动重新打开。新版下载好后，也可点击托盘提示或托盘菜单立即安装。" Style="{StaticResource SecondaryText}"/>
-                                    <TextBlock x:Name="UpdateModeText" Style="{StaticResource SecondaryText}"/>
-                                    <TextBlock x:Name="UpdateStatusText" Text="尚未检查更新。" Style="{StaticResource SecondaryText}"/>
-                                    <ProgressBar x:Name="UpdateProgress" Minimum="0" Maximum="100" Visibility="Collapsed"/>
-                                    <local:ResponsivePanel Spacing="8">
-                                        <Button x:Name="UpdateCheckButton" Content="检查更新" Click="UpdateCheck_Click"/>
-                                        <Button x:Name="UpdateDownloadButton" Content="下载 / 重新下载" Click="UpdateDownload_Click" IsEnabled="False"/>
-                                        <Button x:Name="UpdateInstallButton" Content="安装并重启" Click="UpdateInstall_Click" IsEnabled="False"/>
-                                        <Button x:Name="UpdateCancelButton" Content="取消下载" Click="UpdateCancel_Click" IsEnabled="False"/>
-                                        <Button Content="版本说明" Click="UpdateRelease_Click"/>
-                                    </local:ResponsivePanel>
-                                </StackPanel>
-                            </Border>
-                            <Border Style="{StaticResource Card}">
-                                <StackPanel Spacing="10">
-                                    <TextBlock Text="记忆与词库" Style="{StaticResource SectionTitle}" Margin="0,0,0,2"/>
-                                    <CheckBox x:Name="MemoryBox" Content="保存本地文本记忆"/>
-                                    <CheckBox x:Name="LearningBox" Content="允许词条整理（新会话默认）"/>
-                                    <CheckBox x:Name="UseTermsBox"><TextBlock Text="启用词库（识别热词、保护与确认纠错）" TextWrapping="Wrap"/></CheckBox>
-                                    <CheckBox x:Name="DynamicTermsBox"><TextBlock Text="根据使用与人工纠错调整热词优先级（需允许本地学习）" TextWrapping="Wrap"/></CheckBox>
-                                    <CheckBox x:Name="CorrectionLearningBox"><TextBlock Text="从手动修订中发现纠错候选（本地比较，确认后学习）" TextWrapping="Wrap"/></CheckBox>
-                                    <CheckBox x:Name="AutoExtractBox" Content="停止后自动提取原文词条（待确认）"/>
-                                    <CheckBox x:Name="DomainLexiconBox"><TextBlock Text="智能领域词库：根据历史预测易错词，后台更新并低权重试用" TextWrapping="Wrap"/></CheckBox>
-                                    <TextBlock Text="开启后，将本项目近期及较早的部分历史文本发送给 DeepSeek，识别话题并生成少量相关易错词。模型预测不代表实测错误；不依赖其他软件中的修改记录。可在词库查看依据、禁用或删除，关闭此项即停止预测词注入。" Style="{StaticResource SecondaryText}"/>
-                                    <CheckBox x:Name="AsrContextBox" Content="向 ASR 提供已选领域词上下文"/>
-                                    <Grid ColumnSpacing="16" Margin="0,4,0,4">
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="*"/>
-                                            <ColumnDefinition Width="*"/>
-                                        </Grid.ColumnDefinitions>
-                                        <TextBox x:Name="RetentionBox" Header="保留天数" PlaceholderText="留空为长期保留"/>
-                                        <TextBox x:Name="BudgetBox" Grid.Column="1" Header="每日词库 AI Token 预算（UTC）"/>
-                                    </Grid>
-                                    <TextBlock Text="已有会话可在“听写”页面单独设置整理许可。原文提取生成待确认候选；智能领域词库自动低权重试用。两者共用每日预算。默认不保存录音，每日预算按 UTC 日期重置。" Style="{StaticResource SecondaryText}"/>
-                                </StackPanel>
-                            </Border>
-                            <Expander Header="从全部历史提取词条" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
-                                <StackPanel Spacing="12">
-                                    <TextBlock Text="遍历所有项目中已保存、允许整理的历史输入，分批发送原文或手动修订文本给 DeepSeek。新词保存到来源项目并等待确认。已整理版本自动跳过，取消或预算耗尽后可继续。" Style="{StaticResource SecondaryText}"/>
-                                    <local:ResponsivePanel Spacing="8">
-                                        <Button x:Name="AllHistoryButton" Content="提取全部历史词条" Click="ExtractAllHistory_Click"/>
-                                        <Button x:Name="CancelHistoryButton" Content="取消历史提取" Click="CancelHistory_Click" IsEnabled="False"/>
-                                    </local:ResponsivePanel>
-                                    <ProgressBar x:Name="HistoryExtractionProgressBar" Maximum="1" AutomationProperties.Name="历史词条提取进度"/>
-                                    <TextBlock x:Name="HistoryExtractionStatus" Text="覆盖全部已保存记录，不受历史列表最多显示 500 条的限制。" Style="{StaticResource SecondaryText}"/>
-                                </StackPanel>
-                            </Expander>
-                            <Expander Header="数据恢复与项目管理" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
-                                <StackPanel Spacing="12">
-                                    <TextBlock Text="保存失败时，可先复制或导出正文，再重试保存。删除项目将同时清除该项目的记忆与项目词条。" Style="{StaticResource SecondaryText}"/>
-                                    <local:ResponsivePanel Spacing="8">
-                                        <Button Content="重试保存未保存内容" Click="RetrySave_Click"/>
-                                        <Button Content="删除当前项目" Click="DeleteProject_Click"/>
-                                    </local:ResponsivePanel>
-                                </StackPanel>
-                            </Expander>
-                        </StackPanel>
-                    </ScrollViewer>
+                            </ScrollViewer>
+                        </TabViewItem>
+                    </TabView>
                     <Grid Grid.Row="1" MaxWidth="850" HorizontalAlignment="Stretch" ColumnSpacing="12">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
-                        <TextBlock Text="修改完成后保存，新的识别任务将使用最新设置。" Style="{StaticResource SecondaryText}" VerticalAlignment="Center"/>
+                        <TextBlock Text="各分页的修改统一在这里保存，新的识别任务将使用最新设置。" Style="{StaticResource SecondaryText}" VerticalAlignment="Center"/>
                         <Button x:Name="SaveSettingsButton" Grid.Column="1" Content="保存设置" Style="{StaticResource AccentButtonStyle}" Click="SettingsSave_Click"/>
                     </Grid>
                 </Grid>

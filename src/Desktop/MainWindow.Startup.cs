@@ -101,7 +101,8 @@ public partial class MainWindow
                 NotifyStartupError("本地记忆暂不可用，请双击托盘图标检查启动提示。");
             return;
         }
-        if (controller.StartupWarning != null || controller.Keys.BailianKey.Length == 0) ShowPage(3);
+        if (controller.Keys.BailianKey.Length == 0) ShowSettings(ServiceSettingsTab);
+        else if (controller.StartupWarning != null) ShowPage(3);
         else if (controller.MemoryAvailable)
         {
             Hide();

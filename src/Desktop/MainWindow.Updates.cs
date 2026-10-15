@@ -53,6 +53,7 @@ public partial class MainWindow
         try { PortableUpdate.Cleanup(UpdatesDirectory, portableRoot, CurrentVersion); }
         catch (Exception error) { controller.Log.Write("Update", "CleanupFailed", exception: error); }
         UpdateVersionText.Text = $"当前版本 {CurrentVersion.ToString(3)} · GitHub 正式版";
+        PaneVersionText.Text = $"语音输入 · {CurrentVersion.ToString(3)}";
         UpdateModeText.Text = updateKind switch
         {
             UpdateKind.Installed => "安装版：新版校验通过后在后台静默安装，完成后自动重新打开 VoiceInput；设置、词库和历史记录保留。",
@@ -105,6 +106,7 @@ public partial class MainWindow
     {
         UpdateCheckButton.IsEnabled = !updateBusy && !updateInstalling;
         UpdateDownloadButton.IsEnabled = availableUpdate != null && updateKind != UpdateKind.Unsupported && !updateBusy && !updateInstalling;
+        UpdateDownloadButton.Content = downloadedUpdate != null ? "重新下载" : "下载";
         UpdateInstallButton.IsEnabled = downloadedUpdate != null && updateKind != UpdateKind.Unsupported && !updateBusy && !updateInstalling;
         UpdateCancelButton.IsEnabled = updateBusy;
         trayMenu?.SetUpdate(UpdateInstallButton.IsEnabled ? $"安装新版 {downloadedUpdate!.Release.Tag} 并重启" : null);
@@ -128,9 +130,11 @@ public partial class MainWindow
             if (shuttingDown) return;
             if (availableUpdate?.Tag != release?.Tag) downloadedUpdate = null;
             availableUpdate = release;
-            UpdateStatusText.Text = release == null ? "当前已是最新正式版本。" : downloadedUpdate != null ? $"{release.Tag} 已下载并校验，可安装并重启。" :
+            string checkedAt = $"（检查于 {DateTime.Now:HH:mm}）";
+            UpdateStatusText.Text = release == null ? $"当前已是最新正式版本 {CurrentVersion.ToString(3)}{checkedAt}。" : downloadedUpdate != null ? $"{release.Tag} 已下载并校验，可安装并重启。" :
                 updateKind == UpdateKind.Unsupported ? $"发现新版 {release.Tag}，请点击“版本说明”下载。" : $"发现新版 {release.Tag}（{release.Size / 1048576d:F1} MB）。";
-            download = release != null && downloadedUpdate == null && updateKind != UpdateKind.Unsupported && controller.Settings.AutoDownloadUpdates;
+            // A manual check is an explicit request for the new version, so it downloads even with automatic download off.
+            download = release != null && downloadedUpdate == null && updateKind != UpdateKind.Unsupported && (!automatic || controller.Settings.AutoDownloadUpdates);
             if (!automatic) autoInstallPaused = false;
         }
         catch (Exception error) { UpdateFailure(error); }

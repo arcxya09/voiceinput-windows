@@ -95,6 +95,8 @@ public partial class MainWindow : Window
                 case TrayMenuCommand.ToggleDictation: await SetDictationMode(!controller.Settings.DictationOnly); break;
                 case TrayMenuCommand.Copy: await CopyCurrent(); break;
                 case TrayMenuCommand.Settings: OpenManager(); ShowPage(3); break;
+                // Not awaited: a download can take minutes and the tray menu stays locked while a command runs.
+                case TrayMenuCommand.CheckUpdate: OpenManager(); ShowSettings(UpdateSettingsTab); _ = CheckUpdatesAsync(false); break;
                 case TrayMenuCommand.InstallUpdate: await InstallUpdateAsync(false); break;
                 case TrayMenuCommand.Exit: if(!await InstallUpdateOnExitAsync())await RequestExitAsync(true); break;
             }
