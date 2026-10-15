@@ -2,7 +2,7 @@
 
 按住快捷键说话，松开后将整理好的文字输入当前文本框。
 
-使用范围：仅限个人非商业使用；禁止未经授权的商用和二次开发。详见 [许可协议](LICENSE.txt) 和 [2.6.1 版本说明](docs/releases/2.6.1.md)。
+使用范围：仅限个人非商业使用；禁止未经授权的商用和二次开发。详见 [许可协议](LICENSE.txt) 和 [2.6.2 版本说明](docs/releases/2.6.2.md)。
 
 软件自动从 GitHub Releases 检查并下载新版，安装版在后台静默安装、便携版原地替换，完成后自动重新打开，见 [2.6.0 版本说明](docs/releases/2.6.0.md)。检查与下载机制见 [2.2.0 版本说明](docs/releases/2.2.0.md)。
 
@@ -201,6 +201,7 @@ Pull Request 会执行回归测试、Windows 构建、发布脚本离线测试�
 ## 文档
 
 - [技术设计](docs/技术设计_v3.0.md)
+- [2.6.2 Obsidian 等 Electron 编辑器的焦点识别](docs/releases/2.6.2.md)
 - [2.6.1 全项目审查修复](docs/releases/2.6.1.md)
 - [2.6.0 自动安装更新](docs/releases/2.6.0.md)
 - [2.5.0 直接输入与焦点跟随](docs/releases/2.5.0.md)

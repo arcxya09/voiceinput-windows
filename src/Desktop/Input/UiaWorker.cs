@@ -148,8 +148,22 @@ public static class UiaWorker
         }
         catch { textPattern = null; }
         if (valueWritable == true || textWritable == true) return true;
-        if (valueWritable == false || textWritable == false) return false;
+        if ((valueWritable == false || textWritable == false) && TrustsReadOnly(element)) return false;
         return null;
+    }
+    // A read-only verdict is reliable only for a real text box in a native UI
+    // framework. Browser engines (Chromium/Electron apps such as Obsidian, VS Code,
+    // Notion; Firefox) report the focused document or a contenteditable editor's
+    // container as read-only while the caret is in an editable region, so that
+    // verdict is treated as unknown and native input decides.
+    private static bool TrustsReadOnly(AutomationElement element)
+    {
+        try
+        {
+            if (element.Current.ControlType != ControlType.Edit) return false;
+            return element.Current.FrameworkId is not ("Chrome" or "Gecko");
+        }
+        catch { return false; }
     }
     private static bool BelongsToTarget(AutomationElement element, NativeTarget native)
     {
